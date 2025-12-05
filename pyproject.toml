@@ -1,0 +1,19 @@
+[project]
+name = "ai-agent15-status-service"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "email-validator>=2.2.0",
+    "fastapi>=0.116.1",
+    "mysql-connector-python>=9.4.0",
+    "pydantic>=2.11.7",
+    "pydantic-settings>=2.10.1",
+    "pyjwt>=2.10.1",
+    "python-dotenv>=1.1.1",
+    "pyyaml>=6.0.2",
+    "requests>=2.32.4",
+    "sqlalchemy>=2.0.42",
+    "uvicorn>=0.35.0",
+]
