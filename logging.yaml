@@ -1,0 +1,29 @@
+version: 1
+disable_existing_loggers: False
+
+formatters:
+    standard:
+        format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s - [in %(pathname)s:%(lineno)d %(funcName)s]"
+
+handlers:
+    console:
+        class: logging.StreamHandler
+        formatter: standard
+        level: DEBUG
+    
+    file:
+        class: logging.FileHandler
+        formatter: standard
+        level: DEBUG
+        filename: status_service.log
+        encoding: utf8
+
+loggers:
+    app_logger:
+        handlers: [console, file]
+        level: DEBUG
+        propagate: False
+
+root:
+    handlers: [console]
+    level: DEBUG
