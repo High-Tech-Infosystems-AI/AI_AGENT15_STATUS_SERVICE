@@ -48,7 +48,7 @@ FILE_STORING_PATH=
 Run the application using UV and Uvicorn:
 
 ```bash
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8116 --reload
 ```
 
 ### Production Mode
