@@ -120,6 +120,8 @@ pipeline {
                 -e DB_PASSWORD=$DB_PASSWORD \\
                 -e REDIS_HOST=$REDIS_HOST \\
                 -e REDIS_PORT=$REDIS_PORT \\
+                -e REDIS_PASSWORD='' \\
+                -e REDIS_DB=0 \\
                 -e FILE_HANDLER_LOG=${LOG_PATH} \\
                 -v ${LOG_PATH}:${LOG_PATH} \\
                 ${IMAGE_NAME}
