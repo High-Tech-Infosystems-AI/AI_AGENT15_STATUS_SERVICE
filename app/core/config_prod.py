@@ -12,7 +12,7 @@ logger = logging.getLogger("app_logger")
 
 class Settings(BaseSettings):
     """
-    Settings class to manage application configuration.
+    Settings class to manage application configuration
     Uses Pydantic's BaseSettings to handle environment and default values.
     Values mirrored from .env as of 2024-06.
     """

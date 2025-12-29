@@ -105,6 +105,8 @@ pipeline {
             string(credentialsId: cred('AI-DB-NAME-QA'), variable: 'DB_NAME'),
             string(credentialsId: cred('REDIS-HOST'), variable: 'REDIS_HOST'),
             string(credentialsId: cred('REDIS-PORT'), variable: 'REDIS_PORT'),
+            string(credentialsId: cred('QA-AUTH-URL'), variable: 'AUTH_SERVICE_URL'),
+            string(credentialsId: cred('AI-JWT-SECRET-KEY'), variable: 'JWT_SECRET_KEY'),
           ]) {
             sh """
               docker run -d --name ${CONTAINER} --restart unless-stopped \\
@@ -113,6 +115,9 @@ pipeline {
                 -p ${APP_PORT}:${APP_PORT} \\
                 -e APP_ENV=${env.APP_ENV} \\
                 -e APP_PORT=${APP_PORT} \\
+                -e ACCESS_TOKEN_EXPIRE_HOURS=24 \\
+                -e JWT_SECRET_KEY=$JWT_SECRET_KEY \\
+                -e JWT_ALGORITHM=HS256 \\
                 -e DB_HOST=$DB_HOST \\
                 -e DB_PORT=$DB_PORT \\
                 -e DB_NAME=$DB_NAME \\
@@ -120,7 +125,11 @@ pipeline {
                 -e DB_PASSWORD=$DB_PASSWORD \\
                 -e REDIS_HOST=$REDIS_HOST \\
                 -e REDIS_PORT=$REDIS_PORT \\
-                -e FILE_HANDLER_LOG=${LOG_PATH} \\
+                -e REDIS_PASSWORD='' \\
+                -e REDIS_DB=0 \\
+                -e STATUS_AGENT_LOG=${LOG_PATH} \\
+                -e AUTH_SERVICE_URL=$AUTH_SERVICE_URL \\
+                -e BASE_URL=http://localhost:8115 \\
                 -v ${LOG_PATH}:${LOG_PATH} \\
                 ${IMAGE_NAME}
             """
