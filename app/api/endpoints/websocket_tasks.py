@@ -52,7 +52,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                               (current_status in terminal_states and current_status != last_status))
                 
                 if should_send:
-                    # Format response with fields from progress data
+                    # Start with fixed fields (ensuring they are always present)
                     response_data = {
                         "task_id": progress_data.get("task_id", task_id),
                         "status": current_status,
@@ -60,21 +60,11 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                         "message": progress_data.get("message", "")
                     }
 
-                    # Add type if available
-                    if progress_data.get("type"):
-                        response_data["type"] = progress_data.get("type")
-
-                    # Add JD data if available (when task is SUCCESS)
-                    if progress_data.get("jd"):
-                        response_data["jd"] = progress_data.get("jd")
-
-                    # Add error for FAILED or ERROR status
-                    if current_status in ["FAILED", "ERROR"] and progress_data.get("error"):
-                        response_data["error"] = progress_data.get("error")
-
-                    # Add updated_at if available
-                    if progress_data.get("updated_at"):
-                        response_data["updated_at"] = progress_data.get("updated_at")
+                    # Merge all other fields from Redis data (preserving fixed fields)
+                    # This ensures all fields from Redis are included while keeping fixed fields
+                    for key, value in progress_data.items():
+                        if key not in response_data:
+                            response_data[key] = value
 
                     await websocket.send_json(response_data)
                     last_progress = current_progress
