@@ -1,6 +1,7 @@
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
 import logging
@@ -20,6 +21,25 @@ class Settings(BaseSettings):
     # Application
     APP_NAME: str = "Status service"
     DEBUG: bool = False
+
+    # Consul service discovery (optional)
+    CONSUL_HOST: str = os.getenv("CONSUL_HOST", "localhost")
+    CONSUL_PORT: int = int(os.getenv("CONSUL_PORT", "8500"))
+    CONSUL_ENABLED: bool = os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes")
+    CONSUL_HEALTH_CHECK_ENABLED: bool = os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes")
+    CONSUL_SERVICE_NAME: str = os.getenv("CONSUL_SERVICE_NAME", "status-service")
+    CONSUL_SERVICE_PORT: int = int(os.getenv("CONSUL_SERVICE_PORT", os.getenv("APP_PORT", "8115")))
+    CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
+    CONSUL_SERVICE_EXTERNAL_IP: str = os.getenv("CONSUL_SERVICE_EXTERNAL_IP", "")
+    CONSUL_SERVICE_PATH: str = os.getenv("CONSUL_SERVICE_PATH", "/status")
+    CONSUL_SERVICE_AUTH: str = os.getenv("CONSUL_SERVICE_AUTH", "mixed")
+
+    @field_validator("CONSUL_SERVICE_EXTERNAL_PORT", mode="before")
+    @classmethod
+    def _validate_consul_service_external_port(cls, v):
+        if v in (None, ""):
+            return None
+        return int(v)
 
     STATUS_AGENT_LOG: str = os.getenv("STATUS_AGENT_LOG")
     AUTH_SERVICE_URL: str = os.getenv("AUTH_SERVICE_URL")

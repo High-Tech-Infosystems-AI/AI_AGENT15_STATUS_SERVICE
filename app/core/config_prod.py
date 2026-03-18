@@ -1,6 +1,7 @@
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
 import logging
@@ -50,6 +51,25 @@ class Settings(BaseSettings):
 
     # Base URL
     BASE_URL: str = Field(default_factory=lambda: os.getenv("BASE_URL", "http://localhost:8115"), env="BASE_URL")
+
+    # Consul service discovery (optional)
+    CONSUL_HOST: str = Field(default_factory=lambda: os.getenv("CONSUL_HOST", "localhost"), env="CONSUL_HOST")
+    CONSUL_PORT: int = Field(default_factory=lambda: int(os.getenv("CONSUL_PORT", "8500")), env="CONSUL_PORT")
+    CONSUL_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes"), env="CONSUL_ENABLED")
+    CONSUL_HEALTH_CHECK_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes"), env="CONSUL_HEALTH_CHECK_ENABLED")
+    CONSUL_SERVICE_NAME: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_NAME", "status-service"), env="CONSUL_SERVICE_NAME")
+    CONSUL_SERVICE_PORT: int = Field(default_factory=lambda: int(os.getenv("CONSUL_SERVICE_PORT", os.getenv("APP_PORT", "8115"))), env="CONSUL_SERVICE_PORT")
+    CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
+    CONSUL_SERVICE_EXTERNAL_IP: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_EXTERNAL_IP", ""), env="CONSUL_SERVICE_EXTERNAL_IP")
+    CONSUL_SERVICE_PATH: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_PATH", "/status"), env="CONSUL_SERVICE_PATH")
+    CONSUL_SERVICE_AUTH: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_AUTH", "mixed"), env="CONSUL_SERVICE_AUTH")
+
+    @field_validator("CONSUL_SERVICE_EXTERNAL_PORT", mode="before")
+    @classmethod
+    def _validate_consul_service_external_port(cls, v):
+        if v in (None, ""):
+            return None
+        return int(v)
 
     @property
     def DB_URI(self) -> str:
