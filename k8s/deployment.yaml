@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: status-service
+  labels:
+    app: status-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: status-service
+  template:
+    metadata:
+      labels:
+        app: status-service
+    spec:
+      imagePullSecrets:
+        - name: harbor-creds
+      containers:
+        - name: status-service
+          image: __DOCKER_IMAGE__
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8515
+          envFrom:
+            - configMapRef:
+                name: __CONFIG_MAP_NAME__
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          volumeMounts:
+            - name: hrmis-logs
+              mountPath: /var/log/hrmis
+
+      volumes:
+        - name: hrmis-logs
+          persistentVolumeClaim:
+            claimName: hrmis-logs-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: status-service
+  labels:
+    app: status-service
+spec:
+  selector:
+    app: status-service
+  ports:
+    - name: http
+      port: 8515
+      targetPort: 8515
+  type: ClusterIP

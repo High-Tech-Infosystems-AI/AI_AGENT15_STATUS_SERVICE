@@ -22,8 +22,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "Status service"
     DEBUG: bool = False  # Not exposed in .env, but can be referenced
 
-    # Logging
-    STATUS_SERVICE_LOG: str = Field(default_factory=lambda: os.getenv("STATUS_AGENT_LOG", "D:\\LOGS"), env="STATUS_AGENT_LOG")
+    # Logging configuration
+    STATUS_AGENT_LOG: str = Field("./logs", env="LOG_FILE_PATH")
+    LOG_LEVEL: str = Field("INFO", env="LOG_LEVEL")
+    LOG_TO_CONSOLE: bool = Field(True, env="LOG_TO_CONSOLE")
 
     # Auth Service
     AUTH_SERVICE_URL: str = Field(default_factory=lambda: os.getenv("AUTH_SERVICE_URL", "http://localhost:8085/ats/verify-token"), env="AUTH_SERVICE_URL")
@@ -58,10 +60,10 @@ class Settings(BaseSettings):
     CONSUL_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes"), env="CONSUL_ENABLED")
     CONSUL_HEALTH_CHECK_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes"), env="CONSUL_HEALTH_CHECK_ENABLED")
     CONSUL_SERVICE_NAME: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_NAME", "status-service"), env="CONSUL_SERVICE_NAME")
-    CONSUL_SERVICE_PORT: int = Field(default_factory=lambda: int(os.getenv("CONSUL_SERVICE_PORT", os.getenv("APP_PORT", "8115"))), env="CONSUL_SERVICE_PORT")
+    CONSUL_SERVICE_PORT: int = Field(default_factory=lambda: int(os.getenv("STATUS_SERVICE_PORT", os.getenv("APP_PORT", "8115"))), env="STATUS_SERVICE_PORT")
     CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
     CONSUL_SERVICE_EXTERNAL_IP: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_EXTERNAL_IP", ""), env="CONSUL_SERVICE_EXTERNAL_IP")
-    CONSUL_SERVICE_PATH: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_PATH", "/status"), env="CONSUL_SERVICE_PATH")
+    CONSUL_SERVICE_PATH: str = Field(default_factory=lambda: os.getenv("STATUS_SERVICE_PATH", "/status"), env="STATUS_SERVICE_PATH")
     CONSUL_SERVICE_AUTH: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_AUTH", "mixed"), env="CONSUL_SERVICE_AUTH")
 
     @field_validator("CONSUL_SERVICE_EXTERNAL_PORT", mode="before")
@@ -85,6 +87,7 @@ class Settings(BaseSettings):
         """
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 # Create a global settings instance
 settings = Settings()
