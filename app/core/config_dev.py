@@ -28,10 +28,10 @@ class Settings(BaseSettings):
     CONSUL_ENABLED: bool = os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes")
     CONSUL_HEALTH_CHECK_ENABLED: bool = os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes")
     CONSUL_SERVICE_NAME: str = os.getenv("CONSUL_SERVICE_NAME", "status-service")
-    CONSUL_SERVICE_PORT: int = int(os.getenv("CONSUL_SERVICE_PORT", os.getenv("APP_PORT", "8115")))
+    CONSUL_SERVICE_PORT: int = int(os.getenv("STATUS_SERVICE_PORT", os.getenv("APP_PORT", "8115")))
     CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
     CONSUL_SERVICE_EXTERNAL_IP: str = os.getenv("CONSUL_SERVICE_EXTERNAL_IP", "")
-    CONSUL_SERVICE_PATH: str = os.getenv("CONSUL_SERVICE_PATH", "/status")
+    CONSUL_SERVICE_PATH: str = os.getenv("STATUS_SERVICE_PATH", "/status")
     CONSUL_SERVICE_AUTH: str = os.getenv("CONSUL_SERVICE_AUTH", "mixed")
 
     @field_validator("CONSUL_SERVICE_EXTERNAL_PORT", mode="before")
@@ -41,7 +41,10 @@ class Settings(BaseSettings):
             return None
         return int(v)
 
-    STATUS_AGENT_LOG: str = os.getenv("STATUS_AGENT_LOG")
+    # Logging configuration
+    STATUS_AGENT_LOG: str = os.getenv("LOG_FILE_PATH", "./logs")
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_TO_CONSOLE: bool = os.getenv("LOG_TO_CONSOLE", "true").lower() in ("true", "1", "yes")
     AUTH_SERVICE_URL: str = os.getenv("AUTH_SERVICE_URL")
     ACCESS_TOKEN_EXPIRE_HOURS: int = os.getenv("ACCESS_TOKEN_EXPIRE_HOURS")
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY")
@@ -72,6 +75,7 @@ class Settings(BaseSettings):
         """
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 # Create a global settings instance
 settings = Settings()
