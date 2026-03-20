@@ -9,6 +9,17 @@ from app.api.endpoints import websocket_tasks, get_running_resume, get_running_s
 
 router = APIRouter()
 
+# Public paths used by API gateway / Consul for no-jwt tagging.
+NO_AUTH_PATHS = [
+    "/health",
+    "/status/health",
+    "/model/api/docs",
+    "/openapi.json",
+    "/redoc",
+    "/ws/tasks/{task_id}",
+    "/status/ws/tasks/{task_id}",
+]
+
 # Include WebSocket router
 router.include_router(websocket_tasks.router, tags=["WebSocket"])
 
