@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     CONSUL_PORT: int = int(os.getenv("CONSUL_PORT", "8500"))
     CONSUL_ENABLED: bool = os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes")
     CONSUL_HEALTH_CHECK_ENABLED: bool = os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes")
-    CONSUL_SERVICE_NAME: str = os.getenv("CONSUL_SERVICE_NAME", "status-service")
+    CONSUL_SERVICE_NAME: str = os.getenv("STATUS_SERVICE_NAME", "HRMIS_STATUS_SERVICE")
     CONSUL_SERVICE_PORT: int = int(os.getenv("STATUS_SERVICE_PORT", os.getenv("APP_PORT", "8115")))
     CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
     CONSUL_SERVICE_EXTERNAL_IP: str = os.getenv("CONSUL_SERVICE_EXTERNAL_IP", "")
