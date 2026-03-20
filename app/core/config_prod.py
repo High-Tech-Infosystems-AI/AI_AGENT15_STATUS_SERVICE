@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     FILE_STORING_PATH: str = Field(default_factory=lambda: os.getenv("FILE_STORING_PATH", ""), env="FILE_STORING_PATH")
 
     # Base URL
-    BASE_URL: str = Field(default_factory=lambda: os.getenv("BASE_URL", "http://localhost:8115"), env="BASE_URL")
+    BASE_URL: str = Field(default_factory=lambda: os.getenv("BASE_URL", "http://localhost:8515"), env="BASE_URL")
 
     # Consul service discovery (optional)
     CONSUL_HOST: str = Field(default_factory=lambda: os.getenv("CONSUL_HOST", "localhost"), env="CONSUL_HOST")
