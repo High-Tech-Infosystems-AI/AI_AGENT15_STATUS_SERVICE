@@ -1,0 +1,112 @@
+{
+    "info": {
+        "name": "Status Service",
+        "_postman_id": "status-service-collection",
+        "description": "Postman collection for the Status Service.",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Health Check",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{base_url}}/status/health",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "status",
+                        "health"
+                    ]
+                }
+            },
+            "response": []
+        },
+        {
+            "name": "Get Running Resume Tasks",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{jwt_token}}",
+                        "type": "text"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/status/get_running_resume",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "status",
+                        "get_running_resume"
+                    ]
+                }
+            },
+            "response": []
+        },
+        {
+            "name": "Get Running Summaries",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{jwt_token}}",
+                        "type": "text"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/status/get_running_summaries",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "status",
+                        "get_running_summaries"
+                    ]
+                }
+            },
+            "response": []
+        },
+        {
+            "name": "Get Running Matcher Tasks",
+            "request": {
+                "method": "GET",
+                "header": [
+                    {
+                        "key": "Authorization",
+                        "value": "Bearer {{jwt_token}}",
+                        "type": "text"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/status/get_running_matcher",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "status",
+                        "get_running_matcher"
+                    ]
+                }
+            },
+            "response": []
+        }
+    ],
+    "variable": [
+        {
+            "key": "base_url",
+            "value": "http://localhost:8115",
+            "type": "string"
+        },
+        {
+            "key": "jwt_token",
+            "value": "",
+            "type": "string"
+        }
+    ]
+}

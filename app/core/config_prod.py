@@ -1,6 +1,7 @@
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
 import logging
@@ -9,6 +10,18 @@ import logging
 load_dotenv(override=True)
 
 logger = logging.getLogger("app_logger")
+
+
+def _parse_port(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        if isinstance(value, str) and ":" in value:
+            tail = value.rsplit(":", 1)[-1]
+            if tail.isdigit():
+                return int(tail)
+        logger.warning("Invalid port value '%s'. Falling back to %s", value, default)
+        return default
 
 class Settings(BaseSettings):
     """
@@ -21,8 +34,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "Status service"
     DEBUG: bool = False  # Not exposed in .env, but can be referenced
 
-    # Logging
-    STATUS_SERVICE_LOG: str = Field(default_factory=lambda: os.getenv("STATUS_AGENT_LOG", "D:\\LOGS"), env="STATUS_AGENT_LOG")
+    # Logging configuration
+    STATUS_AGENT_LOG: str = Field("./logs", env="LOG_FILE_PATH")
+    LOG_LEVEL: str = Field("INFO", env="LOG_LEVEL")
+    LOG_TO_CONSOLE: bool = Field(True, env="LOG_TO_CONSOLE")
 
     # Auth Service
     AUTH_SERVICE_URL: str = Field(default_factory=lambda: os.getenv("AUTH_SERVICE_URL", "http://localhost:8085/ats/verify-token"), env="AUTH_SERVICE_URL")
@@ -49,7 +64,26 @@ class Settings(BaseSettings):
     FILE_STORING_PATH: str = Field(default_factory=lambda: os.getenv("FILE_STORING_PATH", ""), env="FILE_STORING_PATH")
 
     # Base URL
-    BASE_URL: str = Field(default_factory=lambda: os.getenv("BASE_URL", "http://localhost:8115"), env="BASE_URL")
+    BASE_URL: str = Field(default_factory=lambda: os.getenv("BASE_URL", "http://localhost:8515"), env="BASE_URL")
+
+    # Consul service discovery (optional)
+    CONSUL_HOST: str = Field(default_factory=lambda: os.getenv("CONSUL_HOST", "localhost"), env="CONSUL_HOST")
+    CONSUL_PORT: int = Field(default_factory=lambda: int(os.getenv("CONSUL_PORT", "8500")), env="CONSUL_PORT")
+    CONSUL_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes"), env="CONSUL_ENABLED")
+    CONSUL_HEALTH_CHECK_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes"), env="CONSUL_HEALTH_CHECK_ENABLED")
+    CONSUL_SERVICE_NAME: str = Field(default_factory=lambda: os.getenv("STATUS_SERVICE_NAME", "HRMIS_STATUS_SERVICE"), env="STATUS_SERVICE_NAME")
+    CONSUL_SERVICE_PORT: int = Field(default_factory=lambda: _parse_port(os.getenv("STATUS_SERVICE_PORT", "8115"), 8115), env="STATUS_SERVICE_PORT")
+    CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
+    CONSUL_SERVICE_EXTERNAL_IP: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_EXTERNAL_IP", ""), env="CONSUL_SERVICE_EXTERNAL_IP")
+    CONSUL_SERVICE_PATH: str = Field(default_factory=lambda: os.getenv("STATUS_SERVICE_PATH", "/status"), env="STATUS_SERVICE_PATH")
+    CONSUL_SERVICE_AUTH: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_AUTH", "mixed"), env="CONSUL_SERVICE_AUTH")
+
+    @field_validator("CONSUL_SERVICE_EXTERNAL_PORT", mode="before")
+    @classmethod
+    def _validate_consul_service_external_port(cls, v):
+        if v in (None, ""):
+            return None
+        return int(v)
 
     @property
     def DB_URI(self) -> str:
@@ -65,6 +99,7 @@ class Settings(BaseSettings):
         """
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 # Create a global settings instance
 settings = Settings()
