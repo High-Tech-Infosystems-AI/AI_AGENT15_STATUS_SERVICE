@@ -1,150 +1,154 @@
 pipeline {
-  agent any
+  agent {
+    kubernetes {
+      yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-agent
+spec:
+  serviceAccountName: jenkins
+  containers:
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug
+    command:
+    - cat
+    tty: true
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 3Gi
+      limits:
+        cpu: 3000m
+        memory: 6Gi
+    volumeMounts:
+    - name: docker-config
+      mountPath: /kaniko/.docker
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+  - name: kubectl
+    image: alpine/k8s:1.30.4
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+  volumes:
+  - name: docker-config
+    secret:
+      secretName: supriyo-docker-creds
+      optional: true
+  - name: workspace-volume
+    emptyDir: {}
+'''
+    }
+  }
 
   options {
     disableConcurrentBuilds()
   }
 
   environment {
-    // Fixed to QA; defaults set to avoid unset-variable errors
-    APP_ENV    = 'qa'
-    APP_PORT   = '8515'
-    IMAGE_NAME = 'ats-agent15-status-service:qa'
-    CONTAINER  = 'ats-agent15-status-qa'
-    LOG_PATH   = '/home/supriyo/ai_agents_qa/LOGS'
-    NETWORK    = 'ats-qa-network'
+    REGISTRY   = "harbor.htinfosystems.com/hrmis"   // Harbor project path
+    IMAGE_NAME = "hrmis-status-service"
   }
 
   stages {
-    stage('Guard Branch') {
-      when { expression { return env.BRANCH_NAME != null } }
+    stage('Check branch') {
       steps {
         script {
-          if (env.BRANCH_NAME != 'qa') {
-            echo "Skipping build: only qa branch is allowed (current: ${env.BRANCH_NAME})"
+          if (!(env.BRANCH_NAME in ['main', 'staging'])) {
+            echo "Branch '${env.BRANCH_NAME}' is not configured for deployment. Stopping pipeline."
             currentBuild.result = 'NOT_BUILT'
-            return
+            error("Unsupported branch for deployment")
           }
-        }
-      }
-    }
-
-    stage('Init') {
-      when { branch 'qa' }
-      steps {
-        script {
-          // For now we deploy only QA. To re-enable branch-based mapping:
-          // def branch = env.BRANCH_NAME ?: 'unknown'
-          // def envMap = [
-          //   'main'    : 'prod',
-          //   'master'  : 'prod',
-          //   'qa'      : 'qa',
-          //   'release' : 'qa',
-          //   'develop' : 'dev',
-          //   'dev'     : 'dev'
-          // ]
-          // env.APP_ENV = envMap.get(branch, 'qa')
-          env.APP_ENV = 'qa'    
-
-          // Map env → port; adjust if you prefer different ports
-          def portMap = [dev: '8415', qa: '8515', prod: '8615']
-          def networkMap = [dev: 'ats-dev-network', qa: 'ats-qa-network', prod: 'ats-prod-network']
-          env.APP_PORT   = portMap[env.APP_ENV]
-          env.IMAGE_NAME = "ats-agent15-status-service:${env.APP_ENV}"
-          env.CONTAINER  = "ats-agent15-status-${env.APP_ENV}"
-          // Log path fixed per request; adjust map if enabling other envs
-          env.LOG_PATH   = "/home/supriyo/ai_agents_qa/LOGS"
-          env.NETWORK    = networkMap[env.APP_ENV]
         }
       }
     }
 
     stage('Checkout') {
-      when { branch 'qa' }
       steps {
         checkout scm
       }
     }
 
-    stage('Build Image') {
-      when { branch 'qa' }
-      steps {
-        sh """
-          docker build -t ${IMAGE_NAME} .
-        """
-      }
-    }
-
-    stage('Stop Old Container') {
-      when { branch 'qa' }
-      steps {
-        sh """
-          docker stop ${CONTAINER} 2>/dev/null || true
-          docker rm -f ${CONTAINER} 2>/dev/null || true
-        """
-      }
-    }
-
-    stage('Run Container') {
-      when { branch 'qa' }
+    stage('Set Environment') {
       steps {
         script {
-          // Expect per-env Jenkins credentials:
-          // dbCreds-<env>      : usernamePassword (DB user/pass)
-          // dbHost-<env>       : secret text (DB_HOST)
-          // dbPort-<env>       : secret text (DB_PORT)
-          // dbName-<env>       : secret text (DB_NAME)
-          // Credentials IDs are used as-is (no env suffix appended)
-          def cred = { base -> base }
+          def namespace   = 'hrmis-prod'
+          def configMap   = 'hrmis-prod-config'
+          def logsPvc     = 'hrmis-logs-pvc-prod'
 
-          withCredentials([
-            string(credentialsId: cred('AI-DB-QA-USER'), variable: 'DB_USER'),
-            string(credentialsId: cred('AI-DB-QA-PASS'), variable: 'DB_PASSWORD'),
-            string(credentialsId: cred('AI-DB-HOST'), variable: 'DB_HOST'),
-            string(credentialsId: cred('AI-DB-PORT'), variable: 'DB_PORT'),
-            string(credentialsId: cred('AI-DB-NAME-QA'), variable: 'DB_NAME'),
-            string(credentialsId: cred('REDIS-HOST'), variable: 'REDIS_HOST'),
-            string(credentialsId: cred('REDIS-PORT'), variable: 'REDIS_PORT'),
-            string(credentialsId: cred('QA-AUTH-URL'), variable: 'AUTH_SERVICE_URL'),
-            string(credentialsId: cred('AI-JWT-SECRET-KEY'), variable: 'JWT_SECRET_KEY'),
-          ]) {
+          if (env.BRANCH_NAME == 'staging') {
+            namespace = 'hrmis-stage'
+            configMap = 'hrmis-stage-config'
+            logsPvc = 'hrmis-logs-pvc'
+          }
+
+          env.K8S_NAMESPACE   = namespace
+          env.CONFIG_MAP_NAME = configMap
+          env.LOGS_PVC        = logsPvc
+          env.IMAGE_TAG       = "${env.BUILD_NUMBER}"
+        }
+      }
+    }
+
+    stage('Prepare Manifests') {
+      steps {
+        container('kubectl') {
+          dir('k8s') {
             sh """
-              docker run -d --name ${CONTAINER} --restart unless-stopped \\
-                --add-host=host.docker.internal:host-gateway \\
-                --network ${NETWORK} \\
-                -p ${APP_PORT}:${APP_PORT} \\
-                -e APP_ENV=${env.APP_ENV} \\
-                -e APP_PORT=${APP_PORT} \\
-                -e ACCESS_TOKEN_EXPIRE_HOURS=24 \\
-                -e JWT_SECRET_KEY=$JWT_SECRET_KEY \\
-                -e JWT_ALGORITHM=HS256 \\
-                -e DB_HOST=$DB_HOST \\
-                -e DB_PORT=$DB_PORT \\
-                -e DB_NAME=$DB_NAME \\
-                -e DB_USER=$DB_USER \\
-                -e DB_PASSWORD=$DB_PASSWORD \\
-                -e REDIS_HOST=$REDIS_HOST \\
-                -e REDIS_PORT=$REDIS_PORT \\
-                -e REDIS_PASSWORD='' \\
-                -e REDIS_DB=0 \\
-                -e STATUS_AGENT_LOG=${LOG_PATH} \\
-                -e AUTH_SERVICE_URL=$AUTH_SERVICE_URL \\
-                -e BASE_URL=http://localhost:8115 \\
-                -v ${LOG_PATH}:${LOG_PATH} \\
-                ${IMAGE_NAME}
+              cp deployment.yaml deployment.rendered.yaml || true
+
+              sed -i "s|__DOCKER_IMAGE__|${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}|g" deployment.rendered.yaml
+              sed -i "s|__CONFIG_MAP_NAME__|${CONFIG_MAP_NAME}|g" deployment.rendered.yaml || true
+              sed -i "s|__LOGS_PVC__|${LOGS_PVC}|g" deployment.rendered.yaml || true
             """
           }
+        }
+      }
+    }
+
+    stage('Build & Push to Harbor') {
+      steps {
+        container('kaniko') {
+          sh """
+            /kaniko/executor \\
+              --context=${WORKSPACE} \\
+              --dockerfile=${WORKSPACE}/Dockerfile \\
+              --destination=${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \\
+              --destination=${REGISTRY}/${IMAGE_NAME}:latest \\
+              --cache=true \\
+              --compressed-caching=false \\
+              --snapshot-mode=redo \\
+              --skip-tls-verify=false
+          """
+        }
+      }
+    }
+
+    stage('Deploy to K8s') {
+      steps {
+        container('kubectl') {
+          sh """
+            kubectl get namespace ${K8S_NAMESPACE} || kubectl create namespace ${K8S_NAMESPACE}
+
+            kubectl apply -f k8s/deployment.rendered.yaml -n ${K8S_NAMESPACE}
+            kubectl rollout status deployment/status-service -n ${K8S_NAMESPACE} --timeout=300s
+          """
         }
       }
     }
   }
 
   post {
-    always {
-      sh 'command -v docker >/dev/null 2>&1 && docker ps -a --filter "name=ats-agent15-status" || echo "docker not available on agent"'
+    success {
+      echo "hrmis-status-service #${BUILD_NUMBER} deployed successfully to ${K8S_NAMESPACE}"
     }
     failure {
-      echo "Deployment failed for ${env.APP_ENV}"
+      echo "hrmis-status-service build #${BUILD_NUMBER} failed!"
     }
   }
 }
