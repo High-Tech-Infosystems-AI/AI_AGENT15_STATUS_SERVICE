@@ -11,6 +11,18 @@ load_dotenv(override=True)
 
 logger = logging.getLogger("app_logger")
 
+
+def _parse_port(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        if isinstance(value, str) and ":" in value:
+            tail = value.rsplit(":", 1)[-1]
+            if tail.isdigit():
+                return int(tail)
+        logger.warning("Invalid port value '%s'. Falling back to %s", value, default)
+        return default
+
 class Settings(BaseSettings):
     """
     Settings class to manage application configuration
@@ -59,8 +71,8 @@ class Settings(BaseSettings):
     CONSUL_PORT: int = Field(default_factory=lambda: int(os.getenv("CONSUL_PORT", "8500")), env="CONSUL_PORT")
     CONSUL_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes"), env="CONSUL_ENABLED")
     CONSUL_HEALTH_CHECK_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes"), env="CONSUL_HEALTH_CHECK_ENABLED")
-    CONSUL_SERVICE_NAME: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_NAME", "status-service"), env="CONSUL_SERVICE_NAME")
-    CONSUL_SERVICE_PORT: int = Field(default_factory=lambda: int(os.getenv("STATUS_SERVICE_PORT", os.getenv("APP_PORT", "8115"))), env="STATUS_SERVICE_PORT")
+    CONSUL_SERVICE_NAME: str = Field(default_factory=lambda: os.getenv("STATUS_SERVICE_NAME", "HRMIS_STATUS_SERVICE"), env="STATUS_SERVICE_NAME")
+    CONSUL_SERVICE_PORT: int = Field(default_factory=lambda: _parse_port(os.getenv("STATUS_SERVICE_PORT", "8115"), 8115), env="STATUS_SERVICE_PORT")
     CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
     CONSUL_SERVICE_EXTERNAL_IP: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_EXTERNAL_IP", ""), env="CONSUL_SERVICE_EXTERNAL_IP")
     CONSUL_SERVICE_PATH: str = Field(default_factory=lambda: os.getenv("STATUS_SERVICE_PATH", "/status"), env="STATUS_SERVICE_PATH")

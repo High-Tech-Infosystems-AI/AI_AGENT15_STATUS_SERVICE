@@ -11,6 +11,18 @@ load_dotenv(override=True)
 
 logger = logging.getLogger("app_logger")
 
+
+def _parse_port(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        if isinstance(value, str) and ":" in value:
+            tail = value.rsplit(":", 1)[-1]
+            if tail.isdigit():
+                return int(tail)
+        logger.warning("Invalid port value '%s'. Falling back to %s", value, default)
+        return default
+
 class Settings(BaseSettings):
     """
     Settings class to manage application configuration.
@@ -28,7 +40,7 @@ class Settings(BaseSettings):
     CONSUL_ENABLED: bool = os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes")
     CONSUL_HEALTH_CHECK_ENABLED: bool = os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes")
     CONSUL_SERVICE_NAME: str = os.getenv("STATUS_SERVICE_NAME", "HRMIS_STATUS_SERVICE")
-    CONSUL_SERVICE_PORT: int = int(os.getenv("STATUS_SERVICE_PORT", os.getenv("APP_PORT", "8115")))
+    CONSUL_SERVICE_PORT: int = _parse_port(os.getenv("STATUS_SERVICE_PORT", "8115"), 8115)
     CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
     CONSUL_SERVICE_EXTERNAL_IP: str = os.getenv("CONSUL_SERVICE_EXTERNAL_IP", "")
     CONSUL_SERVICE_PATH: str = os.getenv("STATUS_SERVICE_PATH", "/status")
