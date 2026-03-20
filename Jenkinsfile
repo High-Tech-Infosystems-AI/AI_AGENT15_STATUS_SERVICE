@@ -1,4 +1,4 @@
-﻿pipeline {
+pipeline {
   agent {
     kubernetes {
       yaml '''
@@ -17,11 +17,11 @@ spec:
     tty: true
     resources:
       requests:
-        cpu: 500m
-        memory: 1Gi
+        cpu: 1000m
+        memory: 3Gi
       limits:
-        cpu: 2000m
-        memory: 2Gi
+        cpu: 3000m
+        memory: 6Gi
     volumeMounts:
     - name: docker-config
       mountPath: /kaniko/.docker
@@ -79,14 +79,17 @@ spec:
         script {
           def namespace   = 'hrmis-prod'
           def configMap   = 'hrmis-prod-config'
+          def logsPvc     = 'hrmis-logs-pvc-prod'
 
           if (env.BRANCH_NAME == 'staging') {
             namespace = 'hrmis-stage'
             configMap = 'hrmis-stage-config'
+            logsPvc = 'hrmis-logs-pvc'
           }
 
           env.K8S_NAMESPACE   = namespace
           env.CONFIG_MAP_NAME = configMap
+          env.LOGS_PVC        = logsPvc
           env.IMAGE_TAG       = "${env.BUILD_NUMBER}"
         }
       }
@@ -101,6 +104,7 @@ spec:
 
               sed -i "s|__DOCKER_IMAGE__|${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}|g" deployment.rendered.yaml
               sed -i "s|__CONFIG_MAP_NAME__|${CONFIG_MAP_NAME}|g" deployment.rendered.yaml || true
+              sed -i "s|__LOGS_PVC__|${LOGS_PVC}|g" deployment.rendered.yaml || true
             """
           }
         }
@@ -117,6 +121,8 @@ spec:
               --destination=${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \\
               --destination=${REGISTRY}/${IMAGE_NAME}:latest \\
               --cache=true \\
+              --compressed-caching=false \\
+              --snapshot-mode=redo \\
               --skip-tls-verify=false
           """
         }
