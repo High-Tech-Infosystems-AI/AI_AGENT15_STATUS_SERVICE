@@ -17,11 +17,11 @@ spec:
     tty: true
     resources:
       requests:
-        cpu: 1000m
-        memory: 3Gi
+        cpu: "200m"      # was 500m or 1
+        memory: "1Gi"  # was 2Gi or 3Gi
       limits:
-        cpu: 3000m
-        memory: 6Gi
+        cpu: "500m"      # was 2
+        memory: "2Gi"    # was 4Gi
     volumeMounts:
     - name: docker-config
       mountPath: /kaniko/.docker
@@ -120,9 +120,10 @@ spec:
               --dockerfile=${WORKSPACE}/Dockerfile \\
               --destination=${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \\
               --destination=${REGISTRY}/${IMAGE_NAME}:latest \\
-              --cache=true \\
-              --compressed-caching=false \\
+              --compressed-caching=false \
               --snapshot-mode=redo \\
+              --use-new-run \\
+              --cleanup \\
               --skip-tls-verify=false
           """
         }
