@@ -61,10 +61,10 @@ def _fire_scheduled_notifications(db, now: datetime):
     for sched in pending:
         try:
             metadata = None
-            if sched.metadata:
+            if sched.extra_metadata:
                 import json
                 try:
-                    metadata = json.loads(sched.metadata) if isinstance(sched.metadata, str) else sched.metadata
+                    metadata = json.loads(sched.extra_metadata) if isinstance(sched.extra_metadata, str) else sched.extra_metadata
                 except (ValueError, TypeError):
                     metadata = None
 
