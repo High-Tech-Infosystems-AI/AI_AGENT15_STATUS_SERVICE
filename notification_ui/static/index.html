@@ -8,17 +8,8 @@
 :root{--bg:#0f1117;--surface:#1a1d27;--surface2:#242836;--border:#2e3348;--text:#e1e4ed;--text2:#8b8fa3;--accent:#6366f1;--accent2:#818cf8;--green:#22c55e;--red:#ef4444;--orange:#f59e0b;--blue:#3b82f6;--cyan:#06b6d4}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-/* Login */
-.login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh}
-.login-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:40px;width:380px}
-.login-box h2{margin-bottom:24px;font-size:20px;text-align:center}
-.login-box input{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:14px;margin-bottom:14px;outline:none}
-.login-box input:focus{border-color:var(--accent)}
-.login-box button{width:100%;padding:10px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-size:14px;font-weight:600;cursor:pointer}
-.login-box button:hover{background:var(--accent2)}
-.login-error{color:var(--red);font-size:13px;margin-bottom:10px;display:none}
 /* Layout */
-.app{display:none;height:100vh;flex-direction:column}
+.app{height:100vh;flex-direction:column}
 .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;background:var(--surface);border-bottom:1px solid var(--border)}
 .topbar h1{font-size:18px;font-weight:600}
 .topbar .right{display:flex;align-items:center;gap:16px}
@@ -102,19 +93,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </head>
 <body>
 
-<!-- LOGIN SCREEN -->
-<div class="login-wrap" id="loginScreen">
-  <div class="login-box">
-    <h2>Notification Test Dashboard</h2>
-    <div class="login-error" id="loginError">Invalid credentials</div>
-    <input type="text" id="loginUser" placeholder="Username" autocomplete="off">
-    <input type="password" id="loginPass" placeholder="Password">
-    <button onclick="doLogin()">Sign In</button>
-  </div>
-</div>
-
-<!-- APP -->
-<div class="app" id="app">
+<!-- APP (no login screen — server logs in on startup) -->
+<div class="app" id="app" style="display:flex">
   <!-- Topbar -->
   <div class="topbar">
     <h1>Notification Dashboard</h1>
@@ -123,10 +103,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <div class="unread-badge" id="unreadBadge" title="Unread">0</div>
       <button class="btn btn-sm" onclick="markAllRead()">Mark All Read</button>
       <button class="btn btn-sm btn-accent" onclick="openSendModal()">Send Notification</button>
+      <span id="sessionInfo" style="font-size:12px;color:var(--text2)">connecting...</span>
       <select id="userSelect" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px">
         <option value="">-- View as User --</option>
       </select>
-      <button class="btn btn-sm" onclick="doLogout()">Logout</button>
+      <button class="btn btn-sm" onclick="relogin()">Re-Login</button>
     </div>
   </div>
 
@@ -259,54 +240,48 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
 <script>
 const API_BASE = window.location.origin;
-let TOKEN = null;
+let TOKEN = null;  // fetched from server session
 let WS = null;
 let currentTab = 'notifications';
 let currentPage = 1;
 
-// --- AUTH ---
-function doLogin() {
-  const u = document.getElementById('loginUser').value.trim();
-  const p = document.getElementById('loginPass').value;
-  fetch(API_BASE + '/auth/login', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({username: u, password: p})
-  }).then(r => r.json()).then(d => {
-    if (d.token) {
+// --- SESSION (server holds the JWT — we just fetch it) ---
+function initSession() {
+  fetch(API_BASE + '/api/session').then(r => r.json()).then(d => {
+    if (d.logged_in && d.token) {
       TOKEN = d.token;
-      localStorage.setItem('notif_token', TOKEN);
-      showApp();
+      document.getElementById('sessionInfo').textContent = `${d.username} (${d.role_name})`;
+      loadUsers();
+      loadNotifications();
+      loadBanners();
+      connectWS();
     } else {
-      document.getElementById('loginError').style.display = 'block';
+      document.getElementById('sessionInfo').textContent = 'Not logged in — check server logs';
+      document.getElementById('sessionInfo').style.color = 'var(--red)';
     }
   }).catch(() => {
-    document.getElementById('loginError').style.display = 'block';
+    document.getElementById('sessionInfo').textContent = 'Server unavailable';
+    document.getElementById('sessionInfo').style.color = 'var(--red)';
   });
 }
 
-function doLogout() {
-  TOKEN = null;
-  localStorage.removeItem('notif_token');
-  if (WS) WS.close();
-  document.getElementById('app').style.display = 'none';
-  document.getElementById('loginScreen').style.display = 'flex';
+function relogin() {
+  document.getElementById('sessionInfo').textContent = 'Re-logging in...';
+  fetch(API_BASE + '/api/relogin', {method:'POST'}).then(r => r.json()).then(() => {
+    initSession();
+  }).catch(() => {
+    document.getElementById('sessionInfo').textContent = 'Re-login failed';
+  });
 }
 
-function showApp() {
-  document.getElementById('loginScreen').style.display = 'none';
-  document.getElementById('app').style.display = 'flex';
-  loadUsers();
-  loadNotifications();
-  loadBanners();
-  connectWS();
-}
-
-// --- API helpers ---
+// --- API helpers (no auth header needed — server adds it) ---
 function api(path, opts = {}) {
   const headers = {'Content-Type':'application/json'};
-  if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
   return fetch(API_BASE + path, {...opts, headers}).then(r => {
-    if (r.status === 401) { doLogout(); throw new Error('Unauthorized'); }
+    if (r.status === 401) {
+      relogin();
+      throw new Error('Unauthorized — re-logging in');
+    }
     return r.json();
   });
 }
@@ -315,7 +290,7 @@ function api(path, opts = {}) {
 function loadUsers() {
   api('/api/users').then(d => {
     const sel = document.getElementById('userSelect');
-    sel.innerHTML = '<option value="">-- View as User --</option>';
+    sel.innerHTML = '<option value="">-- All Users --</option>';
     (d.users || d || []).forEach(u => {
       sel.innerHTML += `<option value="${u.id}">${u.name} (${u.role || 'user'})</option>`;
     });
@@ -557,7 +532,8 @@ function sendNotification() {
 function connectWS() {
   if (WS) WS.close();
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  WS = new WebSocket(`${proto}://${location.host}/ws/notifications?token=${TOKEN}`);
+  // Token passed as query param — server proxy uses its own server-held JWT
+  WS = new WebSocket(`${proto}://${location.host}/ws/notifications?token=server`);
   WS.onopen = () => {
     document.getElementById('wsBadge').className = 'ws-badge connected';
     document.getElementById('wsBadge').textContent = 'Connected';
@@ -610,9 +586,7 @@ function timeAgo(dt) {
 
 // --- INIT ---
 window.onload = () => {
-  const t = localStorage.getItem('notif_token');
-  if (t) { TOKEN = t; showApp(); }
-  document.getElementById('loginPass').addEventListener('keydown', e => { if (e.key==='Enter') doLogin(); });
+  initSession();
 };
 </script>
 </body>
