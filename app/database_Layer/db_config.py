@@ -52,10 +52,8 @@ def get_db():
     
     Ensures proper cleanup of database sessions after use.
     """
-    logger.info("Creating new database session")
     db = SessionLocal()
     try:
         yield db
     finally:
-        logger.info("Closing database session")
         db.close()
