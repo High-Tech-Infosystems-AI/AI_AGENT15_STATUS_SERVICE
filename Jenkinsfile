@@ -138,6 +138,8 @@ spec:
 
             kubectl apply -f k8s/deployment.rendered.yaml -n ${K8S_NAMESPACE}
             kubectl rollout status deployment/status-service -n ${K8S_NAMESPACE} --timeout=300s
+
+            echo "Notification UI exposed on NodePort 30509"
           """
         }
       }
