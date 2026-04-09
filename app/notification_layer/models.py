@@ -48,7 +48,7 @@ class Notification(Base):
     event_type = Column(String(100), nullable=True)      # auto-notification event name
 
     # Extra context as JSON string
-    metadata = Column(Text, nullable=True)
+    extra_metadata = Column("metadata", Text, nullable=True)
 
     # Audit
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -112,7 +112,7 @@ class NotificationSchedule(Base):
     priority = Column(String(20), nullable=False, server_default="medium")
     target_type = Column(String(20), nullable=False)
     target_id = Column(String(255), nullable=True)
-    metadata = Column(Text, nullable=True)
+    extra_metadata = Column("metadata", Text, nullable=True)
 
     scheduled_at = Column(DateTime, nullable=False)
     repeat_type = Column(String(20), nullable=False, server_default="once")  # once, daily, weekly

@@ -46,7 +46,7 @@ async def create_schedule(
         priority=request.priority,
         target_type=request.target_type,
         target_id=request.target_id,
-        metadata=json.dumps(request.metadata) if request.metadata else None,
+        extra_metadata=json.dumps(request.metadata) if request.metadata else None,
         scheduled_at=request.scheduled_at,
         repeat_type=request.repeat_type,
         repeat_until=request.repeat_until,
