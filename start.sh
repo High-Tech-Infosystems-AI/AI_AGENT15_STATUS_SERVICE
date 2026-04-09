@@ -1,5 +1,13 @@
 #!/bin/bash
-# Start both the Status/Notification API (port 8515) and the Notification UI (port 5009)
+# Start all processes: Status API, Notification UI, Celery Worker + Beat
+
+echo "Starting Celery Worker..."
+celery -A app.notification_layer.celery_app worker --loglevel=info --concurrency=2 -Q notification &
+CELERY_PID=$!
+
+echo "Starting Celery Beat..."
+celery -A app.notification_layer.celery_app beat --loglevel=info &
+BEAT_PID=$!
 
 echo "Starting Status + Notification API on port 8515..."
 uvicorn app.main:app --host 0.0.0.0 --port 8515 &
@@ -11,12 +19,12 @@ uvicorn server:app --host 0.0.0.0 --port 5009 &
 UI_PID=$!
 cd /app
 
-echo "Both services started (API PID=$API_PID, UI PID=$UI_PID)"
+echo "All processes started (API=$API_PID, UI=$UI_PID, Worker=$CELERY_PID, Beat=$BEAT_PID)"
 
-# Wait for either to exit — if one dies, kill the other and exit
-wait -n $API_PID $UI_PID
+# Wait for any to exit — if one dies, kill all and exit
+wait -n $API_PID $UI_PID $CELERY_PID $BEAT_PID
 EXIT_CODE=$?
 
 echo "A process exited with code $EXIT_CODE. Stopping all..."
-kill $API_PID $UI_PID 2>/dev/null
+kill $API_PID $UI_PID $CELERY_PID $BEAT_PID 2>/dev/null
 exit $EXIT_CODE
