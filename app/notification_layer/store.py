@@ -133,7 +133,7 @@ def create_notification(
         target_id=target_id,
         source_service=source_service,
         event_type=event_type,
-        metadata=json.dumps(metadata) if metadata else None,
+        extra_metadata=json.dumps(metadata) if metadata else None,
         created_by=created_by,
         expires_at=expires_at,
     )
@@ -239,11 +239,11 @@ def get_user_notifications(
     results = []
     for notif, read_flag, read_at in rows:
         meta = None
-        if notif.metadata:
+        if notif.extra_metadata:
             try:
-                meta = json.loads(notif.metadata)
+                meta = json.loads(notif.extra_metadata)
             except (json.JSONDecodeError, TypeError):
-                meta = notif.metadata
+                meta = notif.extra_metadata
         results.append({
             "id": notif.id,
             "title": notif.title,
@@ -350,11 +350,11 @@ def get_admin_notification_logs(
             creator_name = creator
 
         meta = None
-        if notif.metadata:
+        if notif.extra_metadata:
             try:
-                meta = json.loads(notif.metadata)
+                meta = json.loads(notif.extra_metadata)
             except (json.JSONDecodeError, TypeError):
-                meta = notif.metadata
+                meta = notif.extra_metadata
 
         results.append({
             "id": notif.id,
@@ -450,11 +450,11 @@ def get_active_banners(db: Session) -> list:
     results = []
     for b in banners:
         meta = None
-        if b.metadata:
+        if b.extra_metadata:
             try:
-                meta = json.loads(b.metadata)
+                meta = json.loads(b.extra_metadata)
             except (json.JSONDecodeError, TypeError):
-                meta = b.metadata
+                meta = b.extra_metadata
         results.append({
             "id": b.id,
             "title": b.title,
@@ -474,8 +474,8 @@ def get_active_banners(db: Session) -> list:
 
 def create_schedule(db: Session, **kwargs) -> NotificationSchedule:
     sched = NotificationSchedule(**kwargs)
-    if sched.metadata and isinstance(sched.metadata, dict):
-        sched.metadata = json.dumps(sched.metadata)
+    if sched.extra_metadata and isinstance(sched.extra_metadata, dict):
+        sched.extra_metadata = json.dumps(sched.extra_metadata)
     db.add(sched)
     db.commit()
     db.refresh(sched)
