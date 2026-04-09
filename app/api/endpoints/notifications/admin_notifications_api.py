@@ -36,7 +36,7 @@ async def get_admin_notification_logs(
     page: int = Query(1, ge=1),
     limit: int = Query(25, ge=1, le=100),
     sort_by: str = Query("created_at"),
-    sort_order: str = Query("desc", regex="^(asc|desc)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
