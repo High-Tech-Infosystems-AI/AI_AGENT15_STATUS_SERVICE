@@ -60,6 +60,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .tag.security{background:rgba(239,68,68,.15);color:var(--red)}
 .tag.system{background:rgba(245,158,11,.15);color:var(--orange)}
 .tag.user_management{background:rgba(168,85,247,.15);color:#a855f7}
+.tag.manual{background:rgba(236,72,153,.15);color:#ec4899}
 .tag.critical{background:rgba(239,68,68,.2);color:var(--red)}
 .tag.high{background:rgba(245,158,11,.2);color:var(--orange)}
 .tag.medium{background:rgba(59,130,246,.15);color:var(--blue)}
@@ -131,6 +132,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
         <option value="security">Security</option>
         <option value="system">System</option>
         <option value="user_management">User Management</option>
+        <option value="manual">Manual</option>
       </select>
       <label>Priority</label>
       <select id="fPriority" onchange="loadNotifications()">
@@ -199,16 +201,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <select id="mMode">
       <option value="push">Push</option>
       <option value="banner">Banner</option>
-    </select>
-    <label>Domain Type</label>
-    <select id="mDomain">
-      <option value="system">System</option>
-      <option value="login">Login</option>
-      <option value="jobs">Jobs</option>
-      <option value="ai">AI</option>
-      <option value="candidate">Candidate</option>
-      <option value="security">Security</option>
-      <option value="user_management">User Management</option>
     </select>
     <label>Priority</label>
     <select id="mPriority">
@@ -285,9 +277,15 @@ function loadUsers() {
 document.addEventListener('DOMContentLoaded', () => {
   const sel = document.getElementById('userSelect');
   if (sel) sel.addEventListener('change', () => {
+    document.getElementById('sessionInfo').textContent =
+      sel.options[sel.selectedIndex].textContent;
     loadNotifications();
     loadUnreadCount();
-    if (WS) WS.close(); // reconnect with new user_id
+    // Close and reconnect WS for new user_id (onclose handler auto-reconnects)
+    if (WS) { WS.onclose = null; WS.close(); WS = null; }
+    if (_wsHeartbeat) { clearInterval(_wsHeartbeat); _wsHeartbeat = null; }
+    if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
+    _wsConnecting = false;
     connectWS();
   });
 });
@@ -507,7 +505,7 @@ function sendNotification() {
     title: document.getElementById('mTitle').value,
     message: document.getElementById('mMessage').value,
     delivery_mode: mode,
-    domain_type: document.getElementById('mDomain').value,
+    domain_type: 'manual',
     priority: document.getElementById('mPriority').value,
     target_type: document.getElementById('mTarget').value,
     target_id: document.getElementById('mTargetId').value || null,
@@ -525,20 +523,47 @@ function sendNotification() {
 }
 
 // --- WEBSOCKET ---
+let _wsHeartbeat = null;
+let _wsReconnectTimer = null;
+let _wsConnecting = false;
+
 function connectWS() {
-  if (WS) { try { WS.close(); } catch(e){} }
+  // Prevent multiple simultaneous connection attempts
+  if (_wsConnecting) return;
+  _wsConnecting = true;
+
+  // Clean up previous connection
+  if (_wsHeartbeat) { clearInterval(_wsHeartbeat); _wsHeartbeat = null; }
+  if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
+  if (WS) { try { WS.onclose = null; WS.close(); } catch(e){} WS = null; }
+
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const uid = getSelectedUserId();
   WS = new WebSocket(`${proto}://${location.host}/ws/notifications?user_id=${uid}`);
+
   WS.onopen = () => {
+    _wsConnecting = false;
     document.getElementById('wsBadge').className = 'ws-badge connected';
     document.getElementById('wsBadge').textContent = 'Connected';
+    // Start single heartbeat interval
+    _wsHeartbeat = setInterval(() => {
+      if (WS && WS.readyState === 1) WS.send(JSON.stringify({action:'ping'}));
+    }, 30000);
   };
+
   WS.onclose = () => {
+    _wsConnecting = false;
+    if (_wsHeartbeat) { clearInterval(_wsHeartbeat); _wsHeartbeat = null; }
     document.getElementById('wsBadge').className = 'ws-badge disconnected';
     document.getElementById('wsBadge').textContent = 'Disconnected';
-    setTimeout(connectWS, 5000);
+    // Reconnect after 5s (single timer, no stacking)
+    _wsReconnectTimer = setTimeout(connectWS, 5000);
   };
+
+  WS.onerror = () => {
+    _wsConnecting = false;
+  };
+
   WS.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
@@ -551,11 +576,9 @@ function connectWS() {
         loadBanners();
       } else if (msg.type === 'unread_count') {
         updateUnread(msg.data.count);
-      } else if (msg.type === 'pong') { /* heartbeat ok */ }
+      }
     } catch(err) {}
   };
-  // Heartbeat
-  setInterval(() => { if (WS && WS.readyState === 1) WS.send(JSON.stringify({action:'ping'})); }, 30000);
 }
 
 // --- TOAST ---
