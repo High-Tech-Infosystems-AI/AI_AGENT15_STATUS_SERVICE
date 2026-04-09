@@ -17,10 +17,6 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml /app/
 RUN uv pip install -r pyproject.toml
 
-# Install notification UI deps (httpx, websockets, pyjwt already in main deps)
-COPY notification_ui/requirements.txt /app/notification_ui/requirements.txt
-RUN pip install --no-cache-dir -r /app/notification_ui/requirements.txt
-
 # Copy source
 COPY . /app
 
