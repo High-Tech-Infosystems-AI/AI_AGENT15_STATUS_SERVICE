@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 # Enums as string literals (kept simple — no Python Enum overhead)
 # ---------------------------------------------------------------------------
 DELIVERY_MODES = ("push", "banner")
-DOMAIN_TYPES = ("login", "jobs", "ai", "candidate", "security", "system", "user_management")
+DOMAIN_TYPES = ("login", "jobs", "ai", "candidate", "security", "system", "user_management", "manual")
 VISIBILITY_LEVELS = ("personal", "public", "restricted")
 PRIORITIES = ("low", "medium", "high", "critical")
 TARGET_TYPES = ("all", "user", "job", "role")
@@ -36,7 +36,7 @@ class SendNotificationRequest(BaseModel):
     title: str = Field(..., max_length=255)
     message: str
     delivery_mode: str = Field("push", description="push or banner")
-    domain_type: str = Field("system", description="login, jobs, ai, candidate, security, system, user_management")
+    domain_type: str = Field("manual", description="login, jobs, ai, candidate, security, system, user_management, manual")
     visibility: str = Field("public", description="personal, public, restricted")
     priority: str = Field("medium", description="low, medium, high, critical")
     target_type: str = Field("all", description="all, user, job, role")
