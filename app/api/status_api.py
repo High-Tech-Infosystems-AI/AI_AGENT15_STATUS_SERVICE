@@ -18,6 +18,9 @@ NO_AUTH_PATHS = [
     "/redoc",
     "/ws/tasks/{task_id}",
     "/status/ws/tasks/{task_id}",
+    "/ws/notifications",
+    "/status/ws/notifications",
+    "/status/notifications/ws/notifications",
 ]
 
 # Include WebSocket router

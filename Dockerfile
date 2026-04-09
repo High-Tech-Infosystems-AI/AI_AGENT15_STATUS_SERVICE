@@ -20,12 +20,14 @@ RUN uv pip install -r pyproject.toml
 # Copy source
 COPY . /app
 
-# Expose default QA port; override at runtime
-EXPOSE 8515
+# Expose ports: 8515 (API) + 5009 (Notification UI)
+EXPOSE 8515 5009
 
-# Healthcheck (assumes /health exists; adjust if different)
+# Healthcheck against main API
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD curl -f http://127.0.0.1:8515/health || exit 1
+  CMD curl -f http://127.0.0.1:8515/health && curl -f http://127.0.0.1:5009/health || exit 1
 
-# Run FastAPI app
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8515"]
+# Start both processes: main API + notification UI
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+CMD ["/app/start.sh"]
