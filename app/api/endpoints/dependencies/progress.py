@@ -15,6 +15,7 @@ logger = logging.getLogger("app_logger")
 
 # Redis connection for custom progress tracking
 _redis_client: Optional[redis.Redis] = None
+_notified_missing_tasks: set = set()  # Track tasks already logged as missing
 
 
 def get_redis_client() -> redis.Redis:
@@ -93,7 +94,12 @@ def get_progress(task_id: str) -> Optional[Dict]:
         task_data = redis_client.get(task_key)
         
         if not task_data:
-            logger.debug(f"No progress data found for task {task_id}")
+            if task_id not in _notified_missing_tasks:
+                logger.debug(f"No progress data found for task {task_id}")
+                _notified_missing_tasks.add(task_id)
+                # Prevent unbounded growth — cap at 1000 entries
+                if len(_notified_missing_tasks) > 1000:
+                    _notified_missing_tasks.clear()
             return {
                 "task_id": task_id,
                 "status": "PENDING",

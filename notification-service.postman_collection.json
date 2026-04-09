@@ -1,0 +1,435 @@
+{
+	"info": {
+		"name": "Notification Service",
+		"description": "Complete API collection for the Notification Service.\n\n**Two modes:**\n- `/test/*` — No JWT required, uses `user_id` query param (for testing)\n- `/status/notifications/*` — JWT required via Bearer token (production)\n\n**Setup:**\n1. Set `base_url` variable to your Status Service URL (e.g. `http://localhost:8515`)\n2. For JWT endpoints: run the Login request first, it auto-sets the `token` variable\n3. For test endpoints: just run directly, no auth needed",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{"key": "base_url", "value": "http://localhost:8515", "type": "string"},
+		{"key": "gateway_url", "value": "http://localhost:8050", "type": "string"},
+		{"key": "auth_url", "value": "http://localhost:8085", "type": "string"},
+		{"key": "token", "value": "", "type": "string"},
+		{"key": "user_id", "value": "1", "type": "string"},
+		{"key": "notification_id", "value": "1", "type": "string"},
+		{"key": "schedule_id", "value": "1", "type": "string"}
+	],
+	"item": [
+		{
+			"name": "0. Auth",
+			"description": "Login to get JWT token. Token is auto-saved to {{token}} variable.",
+			"item": [
+				{
+					"name": "Login (get JWT)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"var json = pm.response.json();",
+									"if (json.access_token) {",
+									"    pm.collectionVariables.set('token', json.access_token);",
+									"    pm.collectionVariables.set('user_id', json.user_id);",
+									"    console.log('Token saved. user_id=' + json.user_id);",
+									"}",
+									"pm.test('Login successful', function() {",
+									"    pm.response.to.have.status(200);",
+									"    pm.expect(json.access_token).to.exist;",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"username\": \"supriyohti\",\n    \"password\": \"891y29hdfabsf8128\"\n}"
+						},
+						"url": {"raw": "{{auth_url}}/ats/login", "host": ["{{auth_url}}"], "path": ["ats", "login"]}
+					}
+				}
+			]
+		},
+		{
+			"name": "1. Test APIs (No Auth)",
+			"description": "No JWT needed. Pass `user_id` as query param. Hit Status Service directly.",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"url": {"raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"]}
+					}
+				},
+				{
+					"name": "Get All Users",
+					"request": {
+						"method": "GET",
+						"url": {"raw": "{{base_url}}/test/users", "host": ["{{base_url}}"], "path": ["test", "users"]}
+					}
+				},
+				{
+					"name": "Get Notifications (user)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/test/notifications?user_id={{user_id}}&page=1&limit=20",
+							"host": ["{{base_url}}"], "path": ["test", "notifications"],
+							"query": [
+								{"key": "user_id", "value": "{{user_id}}"},
+								{"key": "page", "value": "1"},
+								{"key": "limit", "value": "20"},
+								{"key": "domain_type", "value": "", "disabled": true},
+								{"key": "priority", "value": "", "disabled": true},
+								{"key": "is_read", "value": "false", "disabled": true},
+								{"key": "delivery_mode", "value": "", "disabled": true},
+								{"key": "date_from", "value": "2026-04-01", "disabled": true},
+								{"key": "date_to", "value": "2026-04-30", "disabled": true}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Unread Count",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/test/notifications/unread-count?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "unread-count"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}]
+						}
+					}
+				},
+				{
+					"name": "Get Active Banners",
+					"request": {
+						"method": "GET",
+						"url": {"raw": "{{base_url}}/test/notifications/banners/active", "host": ["{{base_url}}"], "path": ["test", "notifications", "banners", "active"]}
+					}
+				},
+				{
+					"name": "Get Admin Logs",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/test/notifications/admin/logs?page=1&limit=20",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "admin", "logs"],
+							"query": [
+								{"key": "page", "value": "1"},
+								{"key": "limit", "value": "20"},
+								{"key": "domain_type", "value": "", "disabled": true},
+								{"key": "source_service", "value": "", "disabled": true},
+								{"key": "priority", "value": "", "disabled": true},
+								{"key": "visibility", "value": "", "disabled": true},
+								{"key": "user_id", "value": "", "disabled": true},
+								{"key": "date_from", "value": "", "disabled": true},
+								{"key": "date_to", "value": "", "disabled": true}
+							]
+						}
+					}
+				},
+				{
+					"name": "Send Push Notification",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Test Push Notification\",\n    \"message\": \"This is a test push notification sent from Postman.\",\n    \"delivery_mode\": \"push\",\n    \"domain_type\": \"manual\",\n    \"visibility\": \"public\",\n    \"priority\": \"medium\",\n    \"target_type\": \"all\",\n    \"target_id\": null\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/test/notifications/send?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "send"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}]
+						}
+					}
+				},
+				{
+					"name": "Send to Specific Users",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Targeted Notification\",\n    \"message\": \"This notification is for specific users only.\",\n    \"delivery_mode\": \"push\",\n    \"domain_type\": \"manual\",\n    \"visibility\": \"restricted\",\n    \"priority\": \"high\",\n    \"target_type\": \"user\",\n    \"target_id\": \"1,2,3\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/test/notifications/send?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "send"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}]
+						}
+					}
+				},
+				{
+					"name": "Send to Role",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Admin Alert\",\n    \"message\": \"This goes to all admins.\",\n    \"delivery_mode\": \"push\",\n    \"domain_type\": \"manual\",\n    \"visibility\": \"restricted\",\n    \"priority\": \"critical\",\n    \"target_type\": \"role\",\n    \"target_id\": \"super_admin,admin\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/test/notifications/send?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "send"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}]
+						}
+					}
+				},
+				{
+					"name": "Create Banner",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"System Maintenance\",\n    \"message\": \"Scheduled maintenance tonight 10 PM - 2 AM IST. Some services may be unavailable.\",\n    \"priority\": \"high\",\n    \"domain_type\": \"system\",\n    \"expires_at\": \"2026-04-15T00:00:00Z\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/test/notifications/banner?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "banner"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}]
+						}
+					}
+				},
+				{
+					"name": "Mark Notification Read",
+					"request": {
+						"method": "PUT",
+						"url": {
+							"raw": "{{base_url}}/test/notifications/{{notification_id}}/read?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "{{notification_id}}", "read"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}]
+						}
+					}
+				},
+				{
+					"name": "Mark All Read",
+					"request": {
+						"method": "PUT",
+						"url": {
+							"raw": "{{base_url}}/test/notifications/mark-all-read?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "mark-all-read"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}]
+						}
+					}
+				},
+				{
+					"name": "Trigger Event (auto-notification)",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"event_name\": \"illegal_login_attempt\",\n    \"data\": {\n        \"username\": \"john_doe\",\n        \"ip_address\": \"192.168.1.100\",\n        \"attempts\": 5\n    }\n}"
+						},
+						"url": {"raw": "{{base_url}}/test/notifications/event", "host": ["{{base_url}}"], "path": ["test", "notifications", "event"]}
+					}
+				},
+				{
+					"name": "Create Schedule",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Weekly Reminder\",\n    \"message\": \"Please update your candidate pipeline status.\",\n    \"delivery_mode\": \"push\",\n    \"domain_type\": \"system\",\n    \"visibility\": \"public\",\n    \"priority\": \"medium\",\n    \"target_type\": \"all\",\n    \"scheduled_at\": \"2026-04-10T09:00:00Z\",\n    \"repeat_type\": \"weekly\",\n    \"repeat_until\": \"2026-06-30T09:00:00Z\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/test/notifications/schedule?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "schedule"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}]
+						}
+					}
+				},
+				{
+					"name": "Get Schedules",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/test/notifications/schedules?page=1&limit=20",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "schedules"],
+							"query": [{"key": "page", "value": "1"}, {"key": "limit", "value": "20"}]
+						}
+					}
+				},
+				{
+					"name": "Cancel Schedule",
+					"request": {
+						"method": "PUT",
+						"url": {
+							"raw": "{{base_url}}/test/notifications/schedules/{{schedule_id}}/cancel",
+							"host": ["{{base_url}}"], "path": ["test", "notifications", "schedules", "{{schedule_id}}", "cancel"]
+						}
+					}
+				},
+				{
+					"name": "Debug: Latest Notifications",
+					"request": {
+						"method": "GET",
+						"url": {"raw": "{{base_url}}/test/debug/notifications", "host": ["{{base_url}}"], "path": ["test", "debug", "notifications"]}
+					}
+				},
+				{
+					"name": "Debug: Recipients for User",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/test/debug/recipients?user_id={{user_id}}",
+							"host": ["{{base_url}}"], "path": ["test", "debug", "recipients"],
+							"query": [{"key": "user_id", "value": "{{user_id}}"}, {"key": "notification_id", "value": "", "disabled": true}]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "2. JWT APIs (Production)",
+			"description": "Requires Bearer token. Run Login first to auto-set {{token}}.",
+			"auth": {
+				"type": "bearer",
+				"bearer": [{"key": "token", "value": "{{token}}", "type": "string"}]
+			},
+			"item": [
+				{
+					"name": "Get My Notifications",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/status/notifications/?page=1&limit=20",
+							"host": ["{{base_url}}"], "path": ["status", "notifications", ""],
+							"query": [
+								{"key": "page", "value": "1"},
+								{"key": "limit", "value": "20"},
+								{"key": "domain_type", "value": "", "disabled": true},
+								{"key": "priority", "value": "", "disabled": true},
+								{"key": "is_read", "value": "", "disabled": true},
+								{"key": "delivery_mode", "value": "", "disabled": true},
+								{"key": "date_from", "value": "", "disabled": true},
+								{"key": "date_to", "value": "", "disabled": true}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Unread Count",
+					"request": {
+						"method": "GET",
+						"url": {"raw": "{{base_url}}/status/notifications/unread-count", "host": ["{{base_url}}"], "path": ["status", "notifications", "unread-count"]}
+					}
+				},
+				{
+					"name": "Get Active Banners",
+					"request": {
+						"method": "GET",
+						"url": {"raw": "{{base_url}}/status/notifications/banners/active", "host": ["{{base_url}}"], "path": ["status", "notifications", "banners", "active"]}
+					}
+				},
+				{
+					"name": "Send Notification (admin)",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Important Update\",\n    \"message\": \"All recruiters please update your pipeline by EOD.\",\n    \"delivery_mode\": \"push\",\n    \"domain_type\": \"manual\",\n    \"visibility\": \"public\",\n    \"priority\": \"high\",\n    \"target_type\": \"all\"\n}"
+						},
+						"url": {"raw": "{{base_url}}/status/notifications/send", "host": ["{{base_url}}"], "path": ["status", "notifications", "send"]}
+					}
+				},
+				{
+					"name": "Create Banner (admin)",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Hiring Freeze Lifted\",\n    \"message\": \"All positions are now open for hiring. Target: 50 hires by June.\",\n    \"priority\": \"high\",\n    \"domain_type\": \"system\",\n    \"expires_at\": \"2026-04-20T00:00:00Z\"\n}"
+						},
+						"url": {"raw": "{{base_url}}/status/notifications/banner", "host": ["{{base_url}}"], "path": ["status", "notifications", "banner"]}
+					}
+				},
+				{
+					"name": "Mark Read",
+					"request": {
+						"method": "PUT",
+						"url": {"raw": "{{base_url}}/status/notifications/{{notification_id}}/read", "host": ["{{base_url}}"], "path": ["status", "notifications", "{{notification_id}}", "read"]}
+					}
+				},
+				{
+					"name": "Mark All Read",
+					"request": {
+						"method": "PUT",
+						"url": {"raw": "{{base_url}}/status/notifications/mark-all-read", "host": ["{{base_url}}"], "path": ["status", "notifications", "mark-all-read"]}
+					}
+				},
+				{
+					"name": "Admin Logs",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/status/notifications/admin/logs?page=1&limit=20",
+							"host": ["{{base_url}}"], "path": ["status", "notifications", "admin", "logs"],
+							"query": [
+								{"key": "page", "value": "1"},
+								{"key": "limit", "value": "20"},
+								{"key": "domain_type", "value": "", "disabled": true},
+								{"key": "source_service", "value": "", "disabled": true},
+								{"key": "priority", "value": "", "disabled": true}
+							]
+						}
+					}
+				},
+				{
+					"name": "Trigger Event",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"event_name\": \"candidate_joined\",\n    \"data\": {\n        \"candidate_name\": \"Jane Smith\",\n        \"job_title\": \"Senior Backend Engineer\",\n        \"job_id\": 42,\n        \"candidate_id\": \"CAND_042\"\n    }\n}"
+						},
+						"url": {"raw": "{{base_url}}/status/notifications/event", "host": ["{{base_url}}"], "path": ["status", "notifications", "event"]}
+					}
+				},
+				{
+					"name": "Create Schedule (admin)",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"title\": \"Daily Standup Reminder\",\n    \"message\": \"Team standup in 15 minutes.\",\n    \"delivery_mode\": \"push\",\n    \"domain_type\": \"system\",\n    \"visibility\": \"public\",\n    \"priority\": \"medium\",\n    \"target_type\": \"all\",\n    \"scheduled_at\": \"2026-04-10T09:45:00Z\",\n    \"repeat_type\": \"daily\",\n    \"repeat_until\": \"2026-06-30T09:45:00Z\"\n}"
+						},
+						"url": {"raw": "{{base_url}}/status/notifications/schedule", "host": ["{{base_url}}"], "path": ["status", "notifications", "schedule"]}
+					}
+				},
+				{
+					"name": "Get Schedules (admin)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/status/notifications/schedules?page=1&limit=20",
+							"host": ["{{base_url}}"], "path": ["status", "notifications", "schedules"],
+							"query": [{"key": "page", "value": "1"}, {"key": "limit", "value": "20"}]
+						}
+					}
+				},
+				{
+					"name": "Cancel Schedule (admin)",
+					"request": {
+						"method": "PUT",
+						"url": {"raw": "{{base_url}}/status/notifications/schedules/{{schedule_id}}/cancel", "host": ["{{base_url}}"], "path": ["status", "notifications", "schedules", "{{schedule_id}}", "cancel"]}
+					}
+				}
+			]
+		},
+		{
+			"name": "3. WebSocket",
+			"description": "WebSocket endpoints for real-time notifications.\n\n**Test WS (no auth):**\n```\nws://{{base_url}}/test/ws/notifications?user_id=1\n```\n\n**Production WS (JWT):**\n```\nws://{{base_url}}/status/notifications/ws/notifications?token={{token}}\n```\n\n**UI Proxy WS (no auth, port 5009):**\n```\nws://localhost:5009/ws/notifications?user_id=1\n```\n\n**Messages from server:**\n```json\n{\"type\": \"unread_count\", \"data\": {\"count\": 5}}\n{\"type\": \"notification\", \"data\": {\"id\": 1, \"title\": \"...\", ...}}\n{\"type\": \"banner\", \"action\": \"create\", \"data\": {...}}\n{\"type\": \"pong\"}\n```\n\n**Messages to server:**\n```json\n{\"action\": \"ping\"}\n{\"action\": \"mark_read\", \"notification_id\": 123}\n```\n\nNote: Postman supports WebSocket testing via the WebSocket Request tab (New → WebSocket Request).",
+			"item": []
+		}
+	]
+}

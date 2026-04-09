@@ -29,6 +29,8 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
     await websocket.accept()
     last_progress = -1
     last_status = None
+    not_found_count = 0
+    max_not_found = 30  # Close after 30 consecutive "not found" polls (~60 seconds)
     logger.info(f"WebSocket connection established for task: {task_id}")
 
     try:
@@ -36,21 +38,51 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
             try:
                 # Get progress data from Redis (custom progress key: task:{task_id})
                 progress_data = get_progress(task_id)
-                
+
                 if not progress_data:
+                    not_found_count += 1
+                    if not_found_count >= max_not_found:
+                        logger.info(f"Task {task_id} not found after {max_not_found} polls. Closing WebSocket.")
+                        await websocket.send_json({
+                            "task_id": task_id,
+                            "status": "NOT_FOUND",
+                            "progress": 0,
+                            "message": "Task not found. Connection closed."
+                        })
+                        await websocket.close()
+                        break
                     await asyncio.sleep(2)
                     continue
-                
+
                 current_status = progress_data.get("status")
                 # Custom progress uses "progress" field (0-100)
                 current_progress = progress_data.get("progress", 0)
-                
+
+                # Track consecutive "not found" — if task returns PENDING with
+                # "not found" message, it means the key doesn't exist in Redis
+                if current_status == "PENDING" and "not found" in progress_data.get("message", "").lower():
+                    not_found_count += 1
+                    if not_found_count >= max_not_found:
+                        logger.info(f"Task {task_id} not found in Redis after {max_not_found} polls. Closing WebSocket.")
+                        await websocket.send_json({
+                            "task_id": task_id,
+                            "status": "NOT_FOUND",
+                            "progress": 0,
+                            "message": "Task not found or already completed. Connection closed."
+                        })
+                        await websocket.close()
+                        break
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    not_found_count = 0  # Reset counter when task is actually found
+
                 # Send update if progress changed or status changed to terminal state
                 # Terminal states: SUCCESS, FAILED, ERROR, CANCELLED
                 terminal_states = ["SUCCESS", "FAILED", "ERROR", "CANCELLED"]
-                should_send = (current_progress != last_progress or 
+                should_send = (current_progress != last_progress or
                               (current_status in terminal_states and current_status != last_status))
-                
+
                 if should_send:
                     # Start with fixed fields (ensuring they are always present)
                     response_data = {
