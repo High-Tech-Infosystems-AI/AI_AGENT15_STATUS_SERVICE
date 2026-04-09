@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.api import status_api
 from app.api import notification_api
+from app.api.endpoints.notifications import test_api as notification_test_api
 
 from app.core import settings
 from app.core.consul_registration import consul_registry
@@ -82,6 +83,9 @@ app.include_router(status_api.router, prefix="/status")
 
 # Include notification API router
 app.include_router(notification_api.router, prefix="/status/notifications")
+
+# Include test API router (no JWT — for the test dashboard UI)
+app.include_router(notification_test_api.router, prefix="/test")
 
 
 # Health endpoints (gateway + Consul might probe these paths)
