@@ -49,6 +49,35 @@ def get_all_users(db: Session = Depends(get_db)):
     ]
 
 
+@router.get("/debug/recipients")
+def debug_recipients(notification_id: Optional[int] = Query(None), user_id: Optional[int] = Query(None), db: Session = Depends(get_db)):
+    """Debug: show notification recipients. Helps verify data is being created."""
+    q = "SELECT nr.id, nr.notification_id, nr.user_id, nr.is_read, n.title, n.domain_type " \
+        "FROM notification_recipients nr JOIN notifications n ON n.id = nr.notification_id WHERE 1=1"
+    params = {}
+    if notification_id:
+        q += " AND nr.notification_id = :nid"
+        params["nid"] = notification_id
+    if user_id:
+        q += " AND nr.user_id = :uid"
+        params["uid"] = user_id
+    q += " ORDER BY nr.id DESC LIMIT 50"
+    rows = db.execute(text(q), params).fetchall()
+    return [{"id": r[0], "notification_id": r[1], "user_id": r[2], "is_read": r[3], "title": r[4], "domain_type": r[5]} for r in rows]
+
+
+@router.get("/debug/notifications")
+def debug_notifications(db: Session = Depends(get_db)):
+    """Debug: show latest notifications."""
+    rows = db.execute(text(
+        "SELECT id, title, domain_type, visibility, target_type, target_id, "
+        "delivery_mode, is_active, created_at FROM notifications ORDER BY id DESC LIMIT 20"
+    )).fetchall()
+    return [{"id": r[0], "title": r[1], "domain_type": r[2], "visibility": r[3],
+             "target_type": r[4], "target_id": r[5], "delivery_mode": r[6],
+             "is_active": r[7], "created_at": str(r[8])} for r in rows]
+
+
 # --- Notifications (user_id from query param) ---
 
 @router.get("/notifications")
@@ -67,8 +96,18 @@ def get_notifications(
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
-    parsed_from = datetime.fromisoformat(date_from) if date_from else None
-    parsed_to = datetime.fromisoformat(date_to) if date_to else None
+    parsed_from = None
+    parsed_to = None
+    if date_from:
+        try:
+            parsed_from = datetime.fromisoformat(date_from)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            parsed_to = datetime.fromisoformat(date_to)
+        except ValueError:
+            pass
 
     results, total, unread = store.get_user_notifications(
         db=db, user_id=user_id, page=page, limit=limit,
@@ -191,8 +230,18 @@ def get_admin_logs(
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
-    parsed_from = datetime.fromisoformat(date_from) if date_from else None
-    parsed_to = datetime.fromisoformat(date_to) if date_to else None
+    parsed_from = None
+    parsed_to = None
+    if date_from:
+        try:
+            parsed_from = datetime.fromisoformat(date_from)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            parsed_to = datetime.fromisoformat(date_to)
+        except ValueError:
+            pass
     results, total = store.get_admin_notification_logs(
         db=db, page=page, limit=limit, domain_type=domain_type, visibility=visibility,
         date_from=parsed_from, date_to=parsed_to, priority=priority,
