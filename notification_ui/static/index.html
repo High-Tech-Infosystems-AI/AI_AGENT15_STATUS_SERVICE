@@ -107,7 +107,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <select id="userSelect" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px">
         <option value="">-- View as User --</option>
       </select>
-      <button class="btn btn-sm" onclick="relogin()">Re-Login</button>
+      <button class="btn btn-sm" onclick="location.reload()">Refresh</button>
     </div>
   </div>
 
@@ -240,62 +240,57 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
 <script>
 const API_BASE = window.location.origin;
-let TOKEN = null;  // fetched from server session
 let WS = null;
 let currentTab = 'notifications';
 let currentPage = 1;
 
-// --- SESSION (server holds the JWT — we just fetch it) ---
-function initSession() {
-  fetch(API_BASE + '/api/session').then(r => r.json()).then(d => {
-    if (d.logged_in && d.token) {
-      TOKEN = d.token;
-      document.getElementById('sessionInfo').textContent = `${d.username} (${d.role_name})`;
-      loadUsers();
-      loadNotifications();
-      loadBanners();
-      connectWS();
-    } else {
-      document.getElementById('sessionInfo').textContent = 'Not logged in — check server logs';
-      document.getElementById('sessionInfo').style.color = 'var(--red)';
-    }
-  }).catch(() => {
-    document.getElementById('sessionInfo').textContent = 'Server unavailable';
-    document.getElementById('sessionInfo').style.color = 'var(--red)';
-  });
+// Selected user_id — defaults to 1 (supriyohti), changes via dropdown
+function getSelectedUserId() {
+  const sel = document.getElementById('userSelect');
+  return sel && sel.value ? parseInt(sel.value) : 1;
 }
 
-function relogin() {
-  document.getElementById('sessionInfo').textContent = 'Re-logging in...';
-  fetch(API_BASE + '/api/relogin', {method:'POST'}).then(r => r.json()).then(() => {
-    initSession();
-  }).catch(() => {
-    document.getElementById('sessionInfo').textContent = 'Re-login failed';
-  });
-}
-
-// --- API helpers (no auth header needed — server adds it) ---
+// --- API helpers (no auth — test endpoints are open) ---
 function api(path, opts = {}) {
   const headers = {'Content-Type':'application/json'};
-  return fetch(API_BASE + path, {...opts, headers}).then(r => {
-    if (r.status === 401) {
-      relogin();
-      throw new Error('Unauthorized — re-logging in');
-    }
-    return r.json();
-  });
+  return fetch(API_BASE + path, {...opts, headers}).then(r => r.json());
+}
+
+// --- INIT ---
+function initApp() {
+  document.getElementById('sessionInfo').textContent = 'supriyohti (super_admin)';
+  loadUsers();
+  loadNotifications();
+  loadBanners();
+  connectWS();
 }
 
 // --- USERS ---
 function loadUsers() {
   api('/api/users').then(d => {
     const sel = document.getElementById('userSelect');
-    sel.innerHTML = '<option value="">-- All Users --</option>';
-    (d.users || d || []).forEach(u => {
-      sel.innerHTML += `<option value="${u.id}">${u.name} (${u.role || 'user'})</option>`;
+    const items = Array.isArray(d) ? d : (d.users || d || []);
+    sel.innerHTML = '';
+    items.forEach(u => {
+      const opt = document.createElement('option');
+      opt.value = u.id;
+      opt.textContent = `${u.name} (${u.role || 'user'})`;
+      if (u.id === 1) opt.selected = true;
+      sel.appendChild(opt);
     });
   }).catch(() => {});
 }
+
+// When user dropdown changes, reload everything for that user
+document.addEventListener('DOMContentLoaded', () => {
+  const sel = document.getElementById('userSelect');
+  if (sel) sel.addEventListener('change', () => {
+    loadNotifications();
+    loadUnreadCount();
+    if (WS) WS.close(); // reconnect with new user_id
+    connectWS();
+  });
+});
 
 // --- NOTIFICATIONS ---
 function loadNotifications() {
@@ -304,7 +299,7 @@ function loadNotifications() {
 }
 
 function fetchNotifications() {
-  let q = `?page=${currentPage}&limit=20`;
+  let q = `?user_id=${getSelectedUserId()}&page=${currentPage}&limit=20`;
   const d = document.getElementById('fDomain').value;
   const p = document.getElementById('fPriority').value;
   const r = document.getElementById('fRead').value;
@@ -404,21 +399,21 @@ function goPage(p) { currentPage = p; if (currentTab==='admin') loadAdminLogs();
 
 // --- MARK READ ---
 function markRead(id, el) {
-  api(`/api/notifications/${id}/read`, {method:'PUT'}).then(() => {
+  api(`/api/notifications/${id}/read?user_id=${getSelectedUserId()}`, {method:'PUT'}).then(() => {
     if (el) el.classList.remove('unread');
     loadUnreadCount();
   }).catch(() => {});
 }
 
 function markAllRead() {
-  api('/api/notifications/mark-all-read', {method:'PUT'}).then(() => {
+  api(`/api/notifications/mark-all-read?user_id=${getSelectedUserId()}`, {method:'PUT'}).then(() => {
     document.querySelectorAll('.notif-card.unread').forEach(c => c.classList.remove('unread'));
     updateUnread(0);
   }).catch(() => {});
 }
 
 function loadUnreadCount() {
-  api('/api/notifications/unread-count').then(d => updateUnread(d.count)).catch(() => {});
+  api(`/api/notifications/unread-count?user_id=${getSelectedUserId()}`).then(d => updateUnread(d.count)).catch(() => {});
 }
 
 function updateUnread(n) {
@@ -506,7 +501,8 @@ function toggleTargetId() { document.getElementById('mTargetId').disabled = docu
 
 function sendNotification() {
   const mode = document.getElementById('mMode').value;
-  const endpoint = mode === 'banner' ? '/api/notifications/banner' : '/api/notifications/send';
+  const uid = getSelectedUserId();
+  const endpoint = mode === 'banner' ? `/api/notifications/banner?user_id=${uid}` : `/api/notifications/send?user_id=${uid}`;
   const body = {
     title: document.getElementById('mTitle').value,
     message: document.getElementById('mMessage').value,
@@ -530,10 +526,10 @@ function sendNotification() {
 
 // --- WEBSOCKET ---
 function connectWS() {
-  if (WS) WS.close();
+  if (WS) { try { WS.close(); } catch(e){} }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // Token passed as query param — server proxy uses its own server-held JWT
-  WS = new WebSocket(`${proto}://${location.host}/ws/notifications?token=server`);
+  const uid = getSelectedUserId();
+  WS = new WebSocket(`${proto}://${location.host}/ws/notifications?user_id=${uid}`);
   WS.onopen = () => {
     document.getElementById('wsBadge').className = 'ws-badge connected';
     document.getElementById('wsBadge').textContent = 'Connected';
@@ -586,7 +582,7 @@ function timeAgo(dt) {
 
 // --- INIT ---
 window.onload = () => {
-  initSession();
+  initApp();
 };
 </script>
 </body>
