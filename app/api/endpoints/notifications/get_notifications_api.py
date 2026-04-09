@@ -22,7 +22,7 @@ logger = logging.getLogger("app_logger")
 router = APIRouter()
 
 
-@router.get("", response_model=NotificationListResponse)
+@router.get("/", response_model=NotificationListResponse)
 async def get_notifications(
     domain_type: Optional[str] = Query(None, description="Comma-separated: login,jobs,ai,candidate,security,system,user_management"),
     visibility: Optional[str] = Query(None, description="Comma-separated: personal,public,restricted"),
@@ -34,7 +34,7 @@ async def get_notifications(
     page: int = Query(1, ge=1),
     limit: int = Query(25, ge=1, le=100),
     sort_by: str = Query("created_at"),
-    sort_order: str = Query("desc", regex="^(asc|desc)$"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
