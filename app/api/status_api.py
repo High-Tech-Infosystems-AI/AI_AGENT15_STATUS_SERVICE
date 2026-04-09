@@ -21,6 +21,8 @@ NO_AUTH_PATHS = [
     "/ws/notifications",
     "/status/ws/notifications",
     "/status/notifications/ws/notifications",
+    "/test",
+    "/status/test",
 ]
 
 # Include WebSocket router

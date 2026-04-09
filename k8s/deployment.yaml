@@ -33,19 +33,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            # Notification UI routes API calls through the API Gateway (Consul-discovered)
-            - name: API_GATEWAY_URL
-              value: "http://api-gateway"
-            # Direct connection for WebSocket (gateway may not proxy WS)
+            # Notification UI connects to Status Service on localhost (same pod)
             - name: NOTIFICATION_SERVICE_URL
               value: "http://127.0.0.1:8515"
-            # Auth service for login + user list
-            - name: AUTH_SERVICE_URL
-              value: "http://auth-service:8085"
-            - name: TEST_USERNAME
-              value: "supriyohti"
-            - name: TEST_PASSWORD
-              value: "891y29hdfabsf8128"
             - name: UI_PORT
               value: "5009"
           livenessProbe:
