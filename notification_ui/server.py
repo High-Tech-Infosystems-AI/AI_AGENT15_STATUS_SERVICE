@@ -91,17 +91,30 @@ async def ws_notifications(websocket: WebSocket, user_id: int = 1):
 
     pubsub = None
     try:
-        # Send initial unread count directly via Redis-cached value or quick HTTP
+        # Send initial unread count + active banners snapshot
         try:
             async with httpx.AsyncClient(timeout=5) as c:
+                # Unread count
                 resp = await c.get(
                     f"{STATUS_SERVICE_URL}/test/notifications/unread-count",
                     params={"user_id": user_id},
                 )
                 if resp.status_code == 200:
                     await websocket.send_json(resp.json())
-        except Exception:
-            pass
+
+                # Active banners snapshot
+                banners_resp = await c.get(
+                    f"{STATUS_SERVICE_URL}/test/notifications/banners/active",
+                )
+                if banners_resp.status_code == 200:
+                    banners = banners_resp.json() or []
+                    await websocket.send_json({
+                        "type": "banners",
+                        "action": "snapshot",
+                        "data": banners,
+                    })
+        except Exception as e:
+            logger.warning("Failed to send WS initial snapshot: %s", e)
 
         # Subscribe to Redis pub/sub
         pubsub = _get_redis_pubsub()
@@ -116,20 +129,20 @@ async def ws_notifications(websocket: WebSocket, user_id: int = 1):
                         channel = msg.get("channel", "")
                         if channel == "notif:banner":
                             await websocket.send_json(payload)
+                        elif isinstance(payload, dict) and payload.get("_meta") == "unread_count":
+                            # Dedicated unread-count event from publisher
+                            await websocket.send_json({
+                                "type": "unread_count",
+                                "data": {"count": payload.get("count", 0)},
+                            })
                         else:
+                            # Notification — may include unread_count inline
                             await websocket.send_json({"type": "notification", "data": payload})
-                            # Send updated unread count via fresh HTTP call
-                            try:
-                                async with httpx.AsyncClient(timeout=3) as c:
-                                    resp = await c.get(
-                                        f"{STATUS_SERVICE_URL}/test/notifications/unread-count",
-                                        params={"user_id": user_id},
-                                    )
-                                    if resp.status_code == 200:
-                                        cnt = resp.json()
-                                        await websocket.send_json({"type": "unread_count", "data": {"count": cnt.get("count", 0)}})
-                            except Exception:
-                                pass
+                            if isinstance(payload, dict) and "unread_count" in payload:
+                                await websocket.send_json({
+                                    "type": "unread_count",
+                                    "data": {"count": payload["unread_count"]},
+                                })
                     except Exception:
                         pass
                 await asyncio.sleep(0.1)

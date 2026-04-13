@@ -133,17 +133,20 @@ def handle_event(
         "created_at": str(notif.created_at),
     }
 
+    # Invalidate unread caches first so fresh counts are accurate
+    redis_manager.invalidate_unread_count(user_ids)
+
+    # Compute fresh per-user unread counts so each WS client gets the new badge value
+    unread_counts = store.get_unread_counts_bulk(db, user_ids)
+
     if notif.visibility == "public" or target_type == "all":
-        redis_manager.publish_broadcast(pub_payload)
+        redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts)
     else:
-        redis_manager.publish_to_users(user_ids, pub_payload)
+        redis_manager.publish_to_users(user_ids, pub_payload, unread_counts=unread_counts)
 
     if notif.delivery_mode == "banner":
         redis_manager.publish_banner("create", pub_payload)
         redis_manager.invalidate_banner_cache()
-
-    # 7. Invalidate unread caches
-    redis_manager.invalidate_unread_count(user_ids)
 
     logger.info(
         "Event '%s' → notification %s sent to %d users",

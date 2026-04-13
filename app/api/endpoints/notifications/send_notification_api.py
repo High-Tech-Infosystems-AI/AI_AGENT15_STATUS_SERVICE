@@ -68,12 +68,16 @@ async def send_notification(
         "created_at": str(notif.created_at),
     }
 
-    if notif.visibility == "public" or request.target_type == "all":
-        redis_manager.publish_broadcast(pub_payload)
-    else:
-        redis_manager.publish_to_users(recipient_ids, pub_payload)
-
+    # Invalidate unread count caches first so the fresh counts are accurate
     redis_manager.invalidate_unread_count(recipient_ids)
+
+    # Compute fresh per-user unread counts so each WS client gets the new badge value
+    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
+
+    if notif.visibility == "public" or request.target_type == "all":
+        redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts)
+    else:
+        redis_manager.publish_to_users(recipient_ids, pub_payload, unread_counts=unread_counts)
 
     return SendNotificationResponse(
         success=True,
