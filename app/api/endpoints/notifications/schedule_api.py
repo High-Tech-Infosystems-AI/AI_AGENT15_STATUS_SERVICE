@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
 from app.database_Layer.db_config import get_db
 from app.notification_layer import store
+from app.notification_layer.store import TargetValidationError
 from app.notification_layer.schemas import (
     CreateScheduleRequest, ScheduleOut, ScheduleListResponse,
     PaginationDetails, MarkReadResponse,
@@ -35,6 +36,15 @@ async def create_schedule(
         raise HTTPException(status_code=403, detail="Only admin/super_admin can schedule notifications")
 
     user_id = user_info.get("user_id")
+
+    # Validate target upfront so admins get immediate feedback on bad job_id/user_id/role
+    try:
+        store.resolve_target_user_ids(
+            db, request.target_type, request.target_id,
+            include_admins=(request.target_type != "all"),
+        )
+    except TargetValidationError as e:
+        raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
 
     sched = store.create_schedule(
         db=db,

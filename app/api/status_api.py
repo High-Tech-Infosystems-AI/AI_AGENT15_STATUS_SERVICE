@@ -22,7 +22,23 @@ NO_AUTH_PATHS = [
     "/status/ws/notifications",
     "/status/notifications/ws/notifications",
     "/test",
+    "/test/",
+    "/test/users",
+    "/test/notifications",
+    "/test/notifications/unread-count",
+    "/test/notifications/banners/active",
+    "/test/notifications/admin/logs",
+    "/test/notifications/send",
+    "/test/notifications/banner",
+    "/test/notifications/event",
+    "/test/notifications/schedule",
+    "/test/notifications/schedules",
+    "/test/notifications/mark-all-read",
+    "/test/ws/notifications",
+    "/test/debug/notifications",
+    "/test/debug/recipients",
     "/status/test",
+    "/status/test/ws/notifications",
 ]
 
 # Include WebSocket router

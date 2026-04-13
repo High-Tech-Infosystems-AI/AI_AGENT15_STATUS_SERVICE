@@ -12,6 +12,7 @@ from typing import List
 from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
 from app.database_Layer.db_config import get_db
 from app.notification_layer import store, redis_manager
+from app.notification_layer.store import TargetValidationError
 from app.notification_layer.schemas import CreateBannerRequest, BannerResponse, SendNotificationResponse
 
 logger = logging.getLogger("app_logger")
@@ -31,21 +32,25 @@ async def create_banner(
 
     user_id = user_info.get("user_id")
 
-    notif, recipient_ids = store.create_notification(
-        db=db,
-        title=request.title,
-        message=request.message,
-        delivery_mode="banner",
-        domain_type=request.domain_type,
-        visibility="public",
-        priority=request.priority,
-        target_type="all",
-        target_id=None,
-        source_service="system",
-        metadata=request.metadata,
-        created_by=user_id,
-        expires_at=request.expires_at,
-    )
+    try:
+        notif, recipient_ids = store.create_notification(
+            db=db,
+            title=request.title,
+            message=request.message,
+            delivery_mode="banner",
+            domain_type=request.domain_type,
+            visibility="public",
+            priority=request.priority,
+            target_type="all",
+            target_id=None,
+            source_service="system",
+            metadata=request.metadata,
+            created_by=user_id,
+            expires_at=request.expires_at,
+        )
+    except TargetValidationError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
 
     # Publish banner event to Redis
     pub_payload = {
