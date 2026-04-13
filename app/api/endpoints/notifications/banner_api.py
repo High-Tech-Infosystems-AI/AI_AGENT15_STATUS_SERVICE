@@ -39,10 +39,10 @@ async def create_banner(
             message=request.message,
             delivery_mode="banner",
             domain_type=request.domain_type,
-            visibility="public",
+            visibility=request.visibility,
             priority=request.priority,
-            target_type="all",
-            target_id=None,
+            target_type=request.target_type,
+            target_id=request.target_id,
             source_service="system",
             metadata=request.metadata,
             created_by=user_id,
@@ -52,15 +52,20 @@ async def create_banner(
         db.rollback()
         raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
 
-    # Publish banner event to Redis
+    # Publish banner event to Redis with recipient list
+    # so the WS fan-out only delivers to actual recipients.
     pub_payload = {
         "id": notif.id,
         "title": notif.title,
         "message": notif.message,
         "priority": notif.priority,
         "domain_type": notif.domain_type,
+        "visibility": notif.visibility,
+        "target_type": notif.target_type,
         "expires_at": str(notif.expires_at) if notif.expires_at else None,
         "created_at": str(notif.created_at),
+        # Special field used by WS managers to route the banner
+        "recipient_ids": list(recipient_ids),
     }
     redis_manager.publish_banner("create", pub_payload)
     redis_manager.invalidate_banner_cache()

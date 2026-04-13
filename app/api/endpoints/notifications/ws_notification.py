@@ -79,8 +79,8 @@ async def ws_notifications(websocket: WebSocket, token: str = Query(...)):
                 count = store.get_unread_count(db, user_id)
                 redis_manager.set_cached_unread_count(user_id, count)
 
-            # Send active banners snapshot so the UI can populate the ticker
-            active_banners = store.get_active_banners(db)
+            # Send active banners snapshot — only banners this user is a recipient of
+            active_banners = store.get_active_banners_for_user(db, user_id)
         finally:
             db.close()
 

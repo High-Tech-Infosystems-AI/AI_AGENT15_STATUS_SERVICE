@@ -584,6 +584,7 @@ def mark_all_read(db: Session, user_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 def get_active_banners(db: Session) -> list:
+    """All currently-active banners (admin/global view, no user filtering)."""
     banners = (
         db.query(Notification)
         .filter(
@@ -611,11 +612,91 @@ def get_active_banners(db: Session) -> list:
             "message": b.message,
             "priority": b.priority,
             "domain_type": b.domain_type,
+            "visibility": b.visibility,
+            "target_type": b.target_type,
             "expires_at": b.expires_at,
             "created_at": b.created_at,
             "metadata": meta,
         })
     return results
+
+
+def get_active_banners_for_user(db: Session, user_id: int) -> list:
+    """
+    Active banners visible to a specific user.
+    Joins notification_recipients so users only see banners they were targeted by
+    (which includes 'all' broadcasts since those create a recipient row per user).
+    """
+    rows = (
+        db.query(Notification)
+        .join(NotificationRecipient, Notification.id == NotificationRecipient.notification_id)
+        .filter(
+            Notification.delivery_mode == "banner",
+            Notification.is_active == 1,
+            NotificationRecipient.user_id == user_id,
+            or_(
+                Notification.expires_at.is_(None),
+                Notification.expires_at > datetime.utcnow(),
+            ),
+        )
+        .order_by(Notification.created_at.desc())
+        .all()
+    )
+    results = []
+    for b in rows:
+        meta = None
+        if b.extra_metadata:
+            try:
+                meta = json.loads(b.extra_metadata)
+            except (json.JSONDecodeError, TypeError):
+                meta = b.extra_metadata
+        results.append({
+            "id": b.id,
+            "title": b.title,
+            "message": b.message,
+            "priority": b.priority,
+            "domain_type": b.domain_type,
+            "visibility": b.visibility,
+            "target_type": b.target_type,
+            "expires_at": b.expires_at,
+            "created_at": b.created_at,
+            "metadata": meta,
+        })
+    return results
+
+
+def get_banner_recipient_ids(db: Session, banner_id: int) -> List[int]:
+    """Return user_ids of all recipients of a specific banner. Used for expire fan-out."""
+    rows = (
+        db.query(NotificationRecipient.user_id)
+        .filter(NotificationRecipient.notification_id == banner_id)
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+def deactivate_expired_banners_with_recipients(db: Session) -> list:
+    """Deactivate expired banners and return [(banner_id, [recipient_user_ids]), ...]."""
+    now = datetime.utcnow()
+    expired = (
+        db.query(Notification)
+        .filter(
+            Notification.delivery_mode == "banner",
+            Notification.is_active == 1,
+            Notification.expires_at.isnot(None),
+            Notification.expires_at <= now,
+        )
+        .all()
+    )
+    result = []
+    for banner in expired:
+        recipient_ids = get_banner_recipient_ids(db, banner.id)
+        banner.is_active = 0
+        result.append((banner.id, recipient_ids))
+    if result:
+        db.commit()
+        logger.info("Deactivated %d expired banners", len(result))
+    return result
 
 
 # ---------------------------------------------------------------------------
