@@ -102,9 +102,10 @@ async def ws_notifications(websocket: WebSocket, user_id: int = 1):
                 if resp.status_code == 200:
                     await websocket.send_json(resp.json())
 
-                # Active banners snapshot
+                # Active banners snapshot — per-user
                 banners_resp = await c.get(
                     f"{STATUS_SERVICE_URL}/test/notifications/banners/active",
+                    params={"user_id": user_id},
                 )
                 if banners_resp.status_code == 200:
                     banners = banners_resp.json() or []
@@ -128,7 +129,20 @@ async def ws_notifications(websocket: WebSocket, user_id: int = 1):
                         payload = json.loads(msg["data"])
                         channel = msg.get("channel", "")
                         if channel == "notif:banner":
-                            await websocket.send_json(payload)
+                            # Filter by recipient_ids if present
+                            data_field = payload.get("data") if isinstance(payload, dict) else None
+                            recipient_ids = None
+                            if isinstance(data_field, dict):
+                                recipient_ids = data_field.get("recipient_ids")
+                            if recipient_ids and user_id not in recipient_ids:
+                                pass  # not for this user
+                            else:
+                                if isinstance(data_field, dict) and "recipient_ids" in data_field:
+                                    forward_data = dict(data_field)
+                                    forward_data.pop("recipient_ids", None)
+                                    payload = dict(payload)
+                                    payload["data"] = forward_data
+                                await websocket.send_json(payload)
                         elif isinstance(payload, dict) and payload.get("_meta") == "unread_count":
                             # Dedicated unread-count event from publisher
                             await websocket.send_json({

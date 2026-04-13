@@ -59,6 +59,9 @@ class CreateBannerRequest(BaseModel):
     message: str
     priority: str = Field("medium")
     domain_type: str = Field("system")
+    visibility: str = Field("public", description="public | restricted | personal")
+    target_type: str = Field("all", description="all | user | job | role")
+    target_id: Optional[str] = Field(None, description="csv user_ids, role name, or job id")
     expires_at: Optional[datetime] = None
     metadata: Optional[dict] = None
 

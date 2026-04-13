@@ -142,8 +142,12 @@ def _check_deadlines(db, now: datetime):
 
 
 def _expire_banners(db):
-    expired_ids = store.deactivate_expired_banners(db)
-    for banner_id in expired_ids:
-        redis_manager.publish_banner("expire", {"id": banner_id})
-    if expired_ids:
+    """Deactivate expired banners and notify their original recipients."""
+    expired = store.deactivate_expired_banners_with_recipients(db)
+    for banner_id, recipient_ids in expired:
+        redis_manager.publish_banner("expire", {
+            "id": banner_id,
+            "recipient_ids": list(recipient_ids),
+        })
+    if expired:
         redis_manager.invalidate_banner_cache()
