@@ -19,6 +19,16 @@ from app.database_Layer.db_model import User, Role, JobOpenings
 logger = logging.getLogger("app_logger")
 
 
+class TargetValidationError(Exception):
+    """Raised when target_type/target_id resolution fails validation.
+    The endpoint catches this and returns HTTP 400.
+    """
+    def __init__(self, message: str, code: str = "INVALID_TARGET"):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
 # ---------------------------------------------------------------------------
 # Target Resolution
 # ---------------------------------------------------------------------------
@@ -36,41 +46,134 @@ def resolve_target_user_ids(
         target_type: all | user | job | role
         target_id: csv user_ids | job internal id | role name
         include_admins: always include admin + super_admin users
+
+    Raises:
+        TargetValidationError: when target_type/target_id is invalid,
+        the referenced entity (job/user/role) doesn't exist, or the
+        resolution returns no recipients.
     """
+    from sqlalchemy import text
+
+    # 1. Validate target_type
+    valid_target_types = {"all", "user", "job", "role"}
+    if target_type not in valid_target_types:
+        raise TargetValidationError(
+            f"Invalid target_type '{target_type}'. Must be one of: {sorted(valid_target_types)}",
+            code="INVALID_TARGET_TYPE",
+        )
+
+    # 2. Validate target_id is required for non-'all' types
+    if target_type != "all" and not target_id:
+        raise TargetValidationError(
+            f"target_id is required when target_type is '{target_type}'",
+            code="MISSING_TARGET_ID",
+        )
+
     user_ids: set = set()
 
     if target_type == "all":
-        rows = db.query(User.id).filter(
-            User.deleted_at.is_(None),
-        ).all()
+        rows = db.query(User.id).filter(User.deleted_at.is_(None)).all()
         user_ids = {r[0] for r in rows}
 
-    elif target_type == "user" and target_id:
+    elif target_type == "user":
+        # Parse + validate ID format
+        requested_ids: set = set()
         for part in target_id.split(","):
             part = part.strip()
-            if part.isdigit():
-                user_ids.add(int(part))
+            if not part:
+                continue
+            if not part.isdigit():
+                raise TargetValidationError(
+                    f"Invalid user_id '{part}' in target_id. Must be a positive integer.",
+                    code="INVALID_USER_ID_FORMAT",
+                )
+            requested_ids.add(int(part))
 
-    elif target_type == "job" and target_id:
-        from app.database_Layer.db_model import JobOpenings
-        # Import here to avoid circular; we need user_jobs_assigned table
-        # target_id is the internal (int) job id
+        if not requested_ids:
+            raise TargetValidationError(
+                "target_id must contain at least one valid user_id",
+                code="EMPTY_USER_LIST",
+            )
+
+        # Verify all requested user IDs actually exist (and not soft-deleted)
+        existing_rows = (
+            db.query(User.id)
+            .filter(User.id.in_(list(requested_ids)), User.deleted_at.is_(None))
+            .all()
+        )
+        existing_ids = {r[0] for r in existing_rows}
+        missing = requested_ids - existing_ids
+        if missing:
+            raise TargetValidationError(
+                f"User(s) not found or deleted: {sorted(missing)}",
+                code="USER_NOT_FOUND",
+            )
+        user_ids = existing_ids
+
+    elif target_type == "job":
+        # Parse + validate ID format
         try:
             job_int_id = int(target_id)
-        except ValueError:
-            logger.warning("Invalid job target_id: %s", target_id)
-            return []
+        except (ValueError, TypeError):
+            raise TargetValidationError(
+                f"Invalid job_id '{target_id}'. Must be a positive integer (internal job id).",
+                code="INVALID_JOB_ID_FORMAT",
+            )
 
-        # Query user_jobs_assigned for this job
-        from sqlalchemy import text
+        # Verify the job exists (and not soft-deleted)
+        job = (
+            db.query(JobOpenings.id)
+            .filter(JobOpenings.id == job_int_id, JobOpenings.deleted_at.is_(None))
+            .first()
+        )
+        if not job:
+            raise TargetValidationError(
+                f"Job with id={job_int_id} not found or deleted",
+                code="JOB_NOT_FOUND",
+            )
+
+        # Get all users assigned to this job
         rows = db.execute(
             text("SELECT user_id FROM user_jobs_assigned WHERE job_id = :jid"),
             {"jid": job_int_id},
         ).fetchall()
-        user_ids = {r[0] for r in rows}
+        assigned_ids = {r[0] for r in rows}
 
-    elif target_type == "role" and target_id:
-        role_names = [r.strip().lower() for r in target_id.split(",")]
+        # Filter to only existing/active users (assigned table may have stale IDs)
+        if assigned_ids:
+            existing_rows = (
+                db.query(User.id)
+                .filter(User.id.in_(list(assigned_ids)), User.deleted_at.is_(None))
+                .all()
+            )
+            user_ids = {r[0] for r in existing_rows}
+
+        if not user_ids and not include_admins:
+            raise TargetValidationError(
+                f"Job {job_int_id} has no users assigned",
+                code="JOB_NO_RECIPIENTS",
+            )
+
+    elif target_type == "role":
+        role_names = [r.strip().lower() for r in target_id.split(",") if r.strip()]
+        if not role_names:
+            raise TargetValidationError(
+                "target_id must contain at least one role name",
+                code="EMPTY_ROLE_LIST",
+            )
+
+        # Verify all requested roles exist
+        existing_role_rows = db.query(Role.name).filter(
+            func.lower(Role.name).in_(role_names)
+        ).all()
+        existing_role_names = {r[0].lower() for r in existing_role_rows if r[0]}
+        missing_roles = set(role_names) - existing_role_names
+        if missing_roles:
+            raise TargetValidationError(
+                f"Role(s) not found: {sorted(missing_roles)}",
+                code="ROLE_NOT_FOUND",
+            )
+
         rows = (
             db.query(User.id)
             .join(Role, User.role_id == Role.id)
@@ -81,6 +184,12 @@ def resolve_target_user_ids(
             .all()
         )
         user_ids = {r[0] for r in rows}
+
+        if not user_ids and not include_admins:
+            raise TargetValidationError(
+                f"No active users found with role(s): {role_names}",
+                code="ROLE_NO_RECIPIENTS",
+            )
 
     # Always include admin/super_admin for restricted notifications
     if include_admins:
@@ -94,6 +203,25 @@ def resolve_target_user_ids(
             .all()
         )
         user_ids.update(r[0] for r in admin_rows)
+
+    # Final safety net: drop any IDs that somehow don't exist (defensive)
+    if user_ids:
+        existing_rows = (
+            db.query(User.id)
+            .filter(User.id.in_(list(user_ids)))
+            .all()
+        )
+        existing_ids = {r[0] for r in existing_rows}
+        invalid = user_ids - existing_ids
+        if invalid:
+            logger.warning("Dropped %d stale user_ids: %s", len(invalid), sorted(invalid))
+        user_ids = existing_ids
+
+    if not user_ids:
+        raise TargetValidationError(
+            f"Target '{target_type}' resolved to zero recipients",
+            code="NO_RECIPIENTS",
+        )
 
     return list(user_ids)
 
@@ -122,6 +250,13 @@ def create_notification(
     Create a notification record and resolve + insert recipients.
     Returns (notification, list_of_recipient_user_ids).
     """
+    # Resolve recipients FIRST — before any DB writes.
+    # If validation fails (invalid job/user/role), TargetValidationError
+    # is raised here and no notification row is created (clean rollback).
+    include_admins = target_type != "all"  # 'all' already includes everyone
+    user_ids = resolve_target_user_ids(db, target_type, target_id, include_admins=include_admins)
+
+    # Now safe to create the notification record
     notif = Notification(
         title=title,
         message=message,
@@ -140,18 +275,12 @@ def create_notification(
     db.add(notif)
     db.flush()  # get notif.id
 
-    # Resolve recipients — always include admins for every notification
-    # (admins act as system auditors and see everything)
-    include_admins = target_type != "all"  # 'all' already includes everyone
-    user_ids = resolve_target_user_ids(db, target_type, target_id, include_admins=include_admins)
-
     # Batch insert recipients
-    if user_ids:
-        recipient_objects = [
-            NotificationRecipient(notification_id=notif.id, user_id=uid)
-            for uid in user_ids
-        ]
-        db.bulk_save_objects(recipient_objects)
+    recipient_objects = [
+        NotificationRecipient(notification_id=notif.id, user_id=uid)
+        for uid in user_ids
+    ]
+    db.bulk_save_objects(recipient_objects)
 
     db.commit()
     db.refresh(notif)
