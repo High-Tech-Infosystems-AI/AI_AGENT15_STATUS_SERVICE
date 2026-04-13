@@ -111,7 +111,24 @@ class NotificationWSManager:
                         await self.broadcast({"type": "notification", "data": payload})
 
                     elif channel == "notif:banner":
-                        await self.broadcast(payload)  # already has type+action+data
+                        # Banner events: route to specific recipients only.
+                        # Payload format: {"type": "banner", "action": "create|expire", "data": {..., "recipient_ids": [...]}}
+                        data_field = payload.get("data") if isinstance(payload, dict) else None
+                        recipient_ids = None
+                        if isinstance(data_field, dict):
+                            recipient_ids = data_field.get("recipient_ids")
+                        if recipient_ids:
+                            # Strip recipient_ids from payload before sending to client (internal routing detail)
+                            forward_payload = dict(payload)
+                            forward_data = dict(data_field)
+                            forward_data.pop("recipient_ids", None)
+                            forward_payload["data"] = forward_data
+                            for uid in recipient_ids:
+                                if uid in self._connections:
+                                    await self.send_to_user(uid, forward_payload)
+                        else:
+                            # Backward-compat fallback: no recipient_ids → broadcast (e.g. system banners)
+                            await self.broadcast(payload)
 
                     elif channel.startswith("notif:user:"):
                         try:

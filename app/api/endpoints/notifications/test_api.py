@@ -154,7 +154,11 @@ def mark_all_read(user_id: int = Query(1), db: Session = Depends(get_db)):
 # --- Banners ---
 
 @router.get("/notifications/banners/active", response_model=List[BannerResponse])
-def get_active_banners(db: Session = Depends(get_db)):
+def get_active_banners(user_id: Optional[int] = Query(None), db: Session = Depends(get_db)):
+    """If user_id is provided, returns only banners targeted to that user.
+    Otherwise returns all active banners (admin/global view)."""
+    if user_id:
+        return store.get_active_banners_for_user(db, user_id)
     cached = redis_manager.get_cached_banners()
     if cached is not None:
         return cached
@@ -169,8 +173,8 @@ def create_banner(request: CreateBannerRequest, user_id: int = Query(1), db: Ses
         notif, recipient_ids = store.create_notification(
             db=db, title=request.title, message=request.message,
             delivery_mode="banner", domain_type=request.domain_type,
-            visibility="public", priority=request.priority,
-            target_type="all", target_id=None,
+            visibility=request.visibility, priority=request.priority,
+            target_type=request.target_type, target_id=request.target_id,
             source_service="system", metadata=request.metadata,
             created_by=user_id, expires_at=request.expires_at,
         )
@@ -179,8 +183,10 @@ def create_banner(request: CreateBannerRequest, user_id: int = Query(1), db: Ses
         raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
     pub = {"id": notif.id, "title": notif.title, "message": notif.message,
            "priority": notif.priority, "domain_type": notif.domain_type,
+           "visibility": notif.visibility, "target_type": notif.target_type,
            "expires_at": str(notif.expires_at) if notif.expires_at else None,
-           "created_at": str(notif.created_at)}
+           "created_at": str(notif.created_at),
+           "recipient_ids": list(recipient_ids)}
     redis_manager.publish_banner("create", pub)
     redis_manager.invalidate_banner_cache()
     redis_manager.invalidate_unread_count(recipient_ids)
@@ -332,11 +338,11 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
     await websocket.accept()
 
     try:
-        # Send initial unread count + active banners snapshot
+        # Send initial unread count + active banners snapshot (per-user)
         db = next(get_db())
         try:
             count = store.get_unread_count(db, user_id)
-            active_banners = store.get_active_banners(db)
+            active_banners = store.get_active_banners_for_user(db, user_id)
         finally:
             db.close()
         await websocket.send_json({"type": "unread_count", "data": {"count": count}})
@@ -370,7 +376,22 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
                         payload = json.loads(msg["data"])
                         channel = msg.get("channel", "")
                         if channel == "notif:banner":
-                            await websocket.send_json(payload)
+                            # Filter banner events: only forward if this user is a recipient
+                            data_field = payload.get("data") if isinstance(payload, dict) else None
+                            recipient_ids = None
+                            if isinstance(data_field, dict):
+                                recipient_ids = data_field.get("recipient_ids")
+                            if recipient_ids and user_id not in recipient_ids:
+                                # Not a recipient — skip
+                                pass
+                            else:
+                                # Strip recipient_ids before forwarding (internal routing detail)
+                                if isinstance(data_field, dict) and "recipient_ids" in data_field:
+                                    forward_data = dict(data_field)
+                                    forward_data.pop("recipient_ids", None)
+                                    payload = dict(payload)
+                                    payload["data"] = forward_data
+                                await websocket.send_json(payload)
                         else:
                             await websocket.send_json({"type": "notification", "data": payload})
                     except Exception:
