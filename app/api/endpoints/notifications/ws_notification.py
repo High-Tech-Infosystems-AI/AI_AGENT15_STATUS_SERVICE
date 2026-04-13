@@ -78,10 +78,29 @@ async def ws_notifications(websocket: WebSocket, token: str = Query(...)):
             else:
                 count = store.get_unread_count(db, user_id)
                 redis_manager.set_cached_unread_count(user_id, count)
+
+            # Send active banners snapshot so the UI can populate the ticker
+            active_banners = store.get_active_banners(db)
         finally:
             db.close()
 
         await websocket.send_json({"type": "unread_count", "data": {"count": count}})
+        await websocket.send_json({
+            "type": "banners",
+            "action": "snapshot",
+            "data": [
+                {
+                    "id": b["id"],
+                    "title": b["title"],
+                    "message": b["message"],
+                    "priority": b["priority"],
+                    "domain_type": b["domain_type"],
+                    "expires_at": str(b["expires_at"]) if b.get("expires_at") else None,
+                    "created_at": str(b["created_at"]) if b.get("created_at") else None,
+                }
+                for b in active_banners
+            ],
+        })
 
         # Listen for client messages
         while True:

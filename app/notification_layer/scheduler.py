@@ -87,16 +87,17 @@ def _fire_scheduled_notifications(db, now: datetime):
                 "source_service": "system", "event_type": "scheduled_notification",
                 "metadata": metadata, "created_at": str(notif.created_at),
             }
+            redis_manager.invalidate_unread_count(user_ids)
+            unread_counts = store.get_unread_counts_bulk(db, user_ids)
+
             if notif.visibility == "public" or sched.target_type == "all":
-                redis_manager.publish_broadcast(pub_payload)
+                redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts)
             else:
-                redis_manager.publish_to_users(user_ids, pub_payload)
+                redis_manager.publish_to_users(user_ids, pub_payload, unread_counts=unread_counts)
 
             if notif.delivery_mode == "banner":
                 redis_manager.publish_banner("create", pub_payload)
                 redis_manager.invalidate_banner_cache()
-
-            redis_manager.invalidate_unread_count(user_ids)
 
             sched.last_sent_at = now
             if sched.repeat_type == "once":

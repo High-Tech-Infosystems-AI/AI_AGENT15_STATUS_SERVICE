@@ -419,15 +419,44 @@ function updateUnread(n) {
 }
 
 // --- BANNERS ---
+// In-memory active banner list — kept in sync via WebSocket.
+// On WS connect: receive snapshot of all active banners.
+// On banner create:  add to list.
+// On banner expire:  remove from list (only fires while WS is connected).
+let _activeBanners = [];
+
 function loadBanners() {
+  // Initial REST fetch (also refreshed when WS sends snapshot)
   api('/api/notifications/banners/active').then(banners => {
-    const strip = document.getElementById('bannerStrip');
-    const scroll = document.getElementById('bannerScroll');
-    if (!banners || !banners.length) { strip.style.display = 'none'; return; }
-    strip.style.display = 'flex';
-    const html = banners.map(b => `<span class="banner-item"><span class="dot"></span>${esc(b.title)}: ${esc(b.message)}</span>`).join('');
-    scroll.innerHTML = html + html;
+    _activeBanners = Array.isArray(banners) ? banners : [];
+    renderBannerStrip();
   }).catch(() => {});
+}
+
+function renderBannerStrip() {
+  const strip = document.getElementById('bannerStrip');
+  const scroll = document.getElementById('bannerScroll');
+  if (!_activeBanners.length) { strip.style.display = 'none'; return; }
+  strip.style.display = 'flex';
+  const html = _activeBanners.map(b =>
+    `<span class="banner-item" data-banner-id="${b.id}"><span class="dot"></span>${esc(b.title)}: ${esc(b.message)}</span>`
+  ).join('');
+  scroll.innerHTML = html + html;  // duplicate for seamless scroll
+}
+
+function applyBannerEvent(action, data) {
+  if (action === 'snapshot') {
+    _activeBanners = Array.isArray(data) ? data : [];
+  } else if (action === 'create') {
+    if (data && data.id && !_activeBanners.find(b => b.id === data.id)) {
+      _activeBanners.push(data);
+    }
+  } else if (action === 'expire') {
+    if (data && data.id) {
+      _activeBanners = _activeBanners.filter(b => b.id !== data.id);
+    }
+  }
+  renderBannerStrip();
 }
 
 // --- SCHEDULES ---
@@ -571,9 +600,14 @@ function connectWS() {
         const n = msg.data;
         showToast(n.title, n.message, n.priority);
         if (currentTab === 'notifications') fetchNotifications();
-        loadUnreadCount();
+        // unread_count may be embedded inline
+        if (n && typeof n.unread_count === 'number') updateUnread(n.unread_count);
+      } else if (msg.type === 'banners') {
+        // Initial snapshot on WS connect
+        applyBannerEvent(msg.action || 'snapshot', msg.data);
       } else if (msg.type === 'banner') {
-        loadBanners();
+        // Live event: create or expire
+        applyBannerEvent(msg.action, msg.data);
       } else if (msg.type === 'unread_count') {
         updateUnread(msg.data.count);
       }
