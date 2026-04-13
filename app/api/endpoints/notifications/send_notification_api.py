@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
 from app.database_Layer.db_config import get_db
 from app.notification_layer import store, redis_manager
+from app.notification_layer.store import TargetValidationError
 from app.notification_layer.schemas import SendNotificationRequest, SendNotificationResponse
 
 logger = logging.getLogger("app_logger")
@@ -30,21 +31,28 @@ async def send_notification(
 
     user_id = user_info.get("user_id")
 
-    notif, recipient_ids = store.create_notification(
-        db=db,
-        title=request.title,
-        message=request.message,
-        delivery_mode=request.delivery_mode,
-        domain_type=request.domain_type,
-        visibility=request.visibility,
-        priority=request.priority,
-        target_type=request.target_type,
-        target_id=request.target_id,
-        source_service="system",
-        event_type=None,
-        metadata=request.metadata,
-        created_by=user_id,
-    )
+    try:
+        notif, recipient_ids = store.create_notification(
+            db=db,
+            title=request.title,
+            message=request.message,
+            delivery_mode=request.delivery_mode,
+            domain_type=request.domain_type,
+            visibility=request.visibility,
+            priority=request.priority,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            source_service="system",
+            event_type=None,
+            metadata=request.metadata,
+            created_by=user_id,
+        )
+    except TargetValidationError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail={"code": e.code, "message": e.message},
+        )
 
     # Publish to Redis
     pub_payload = {

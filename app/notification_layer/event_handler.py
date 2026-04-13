@@ -16,6 +16,7 @@ from typing import Optional, Tuple, List
 from sqlalchemy.orm import Session
 
 from app.notification_layer import store, redis_manager
+from app.notification_layer.store import TargetValidationError
 from app.notification_layer.models import NotificationEvent, Notification
 
 logger = logging.getLogger("app_logger")
@@ -94,20 +95,28 @@ def handle_event(
     metadata = data.copy() if data else {}
 
     # 5. Create the notification + recipients
-    notif, user_ids = store.create_notification(
-        db=db,
-        title=title,
-        message=message,
-        delivery_mode=event_config.delivery_mode,
-        domain_type=event_config.domain_type,
-        visibility=event_config.visibility,
-        priority=event_config.priority,
-        target_type=target_type,
-        target_id=target_id,
-        source_service=event_config.source_service,
-        event_type=event_name,
-        metadata=metadata,
-    )
+    try:
+        notif, user_ids = store.create_notification(
+            db=db,
+            title=title,
+            message=message,
+            delivery_mode=event_config.delivery_mode,
+            domain_type=event_config.domain_type,
+            visibility=event_config.visibility,
+            priority=event_config.priority,
+            target_type=target_type,
+            target_id=target_id,
+            source_service=event_config.source_service,
+            event_type=event_name,
+            metadata=metadata,
+        )
+    except TargetValidationError as e:
+        db.rollback()
+        logger.warning(
+            "Event '%s' skipped: %s (target_type=%s, target_id=%s)",
+            event_name, e.message, target_type, target_id,
+        )
+        return False, None, f"Validation failed: {e.message}"
 
     # 6. Publish to Redis for real-time delivery
     pub_payload = {
