@@ -527,6 +527,27 @@ def get_unread_count(db: Session, user_id: int) -> int:
     ) or 0
 
 
+def get_unread_counts_bulk(db: Session, user_ids: List[int]) -> dict:
+    """Return {user_id: unread_count} for a batch of users in a single query."""
+    if not user_ids:
+        return {}
+    rows = (
+        db.query(NotificationRecipient.user_id, func.count(NotificationRecipient.id))
+        .join(Notification, Notification.id == NotificationRecipient.notification_id)
+        .filter(
+            NotificationRecipient.user_id.in_(user_ids),
+            NotificationRecipient.is_read == 0,
+            Notification.is_active == 1,
+        )
+        .group_by(NotificationRecipient.user_id)
+        .all()
+    )
+    counts = {uid: 0 for uid in user_ids}
+    for uid, cnt in rows:
+        counts[uid] = cnt
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # Mark Read
 # ---------------------------------------------------------------------------

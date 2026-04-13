@@ -184,6 +184,10 @@ def create_banner(request: CreateBannerRequest, user_id: int = Query(1), db: Ses
     redis_manager.publish_banner("create", pub)
     redis_manager.invalidate_banner_cache()
     redis_manager.invalidate_unread_count(recipient_ids)
+    # Push fresh unread counts to each recipient's WS channel
+    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
+    for uid, cnt in unread_counts.items():
+        redis_manager.publish_to_user(uid, {"_meta": "unread_count", "user_id": uid, "count": cnt})
     return SendNotificationResponse(success=True, notification_id=notif.id,
                                     recipients_count=len(recipient_ids),
                                     message=f"Banner created for {len(recipient_ids)} users")
@@ -209,11 +213,12 @@ def send_notification(request: SendNotificationRequest, user_id: int = Query(1),
            "visibility": notif.visibility, "priority": notif.priority,
            "source_service": "system", "metadata": request.metadata,
            "created_at": str(notif.created_at)}
-    if notif.visibility == "public" or request.target_type == "all":
-        redis_manager.publish_broadcast(pub)
-    else:
-        redis_manager.publish_to_users(recipient_ids, pub)
     redis_manager.invalidate_unread_count(recipient_ids)
+    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
+    if notif.visibility == "public" or request.target_type == "all":
+        redis_manager.publish_broadcast(pub, user_unread_counts=unread_counts)
+    else:
+        redis_manager.publish_to_users(recipient_ids, pub, unread_counts=unread_counts)
     return SendNotificationResponse(success=True, notification_id=notif.id,
                                     recipients_count=len(recipient_ids),
                                     message=f"Sent to {len(recipient_ids)} recipients")
@@ -327,13 +332,30 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
     await websocket.accept()
 
     try:
-        # Send initial unread count
+        # Send initial unread count + active banners snapshot
         db = next(get_db())
         try:
             count = store.get_unread_count(db, user_id)
+            active_banners = store.get_active_banners(db)
         finally:
             db.close()
         await websocket.send_json({"type": "unread_count", "data": {"count": count}})
+        await websocket.send_json({
+            "type": "banners",
+            "action": "snapshot",
+            "data": [
+                {
+                    "id": b["id"],
+                    "title": b["title"],
+                    "message": b["message"],
+                    "priority": b["priority"],
+                    "domain_type": b["domain_type"],
+                    "expires_at": str(b["expires_at"]) if b.get("expires_at") else None,
+                    "created_at": str(b["created_at"]) if b.get("created_at") else None,
+                }
+                for b in active_banners
+            ],
+        })
 
         # Subscribe to Redis pub/sub for this user + broadcast + banner
         r = redis_manager.get_pubsub_redis()

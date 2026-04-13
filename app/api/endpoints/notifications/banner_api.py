@@ -66,6 +66,11 @@ async def create_banner(
     redis_manager.invalidate_banner_cache()
     redis_manager.invalidate_unread_count(recipient_ids)
 
+    # Push fresh unread counts to each recipient's WS channel
+    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
+    for uid, cnt in unread_counts.items():
+        redis_manager.publish_to_user(uid, {"_meta": "unread_count", "user_id": uid, "count": cnt})
+
     return SendNotificationResponse(
         success=True,
         notification_id=notif.id,
