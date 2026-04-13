@@ -114,10 +114,16 @@ class NotificationWSManager:
                         await self.broadcast(payload)  # already has type+action+data
 
                     elif channel.startswith("notif:user:"):
-                        # Extract user_id from channel pattern match
                         try:
                             user_id = int(channel.split(":")[-1])
-                            await self.send_to_user(user_id, {"type": "notification", "data": payload})
+                            # Distinguish meta messages (unread_count) from notifications
+                            if isinstance(payload, dict) and payload.get("_meta") == "unread_count":
+                                await self.send_to_user(user_id, {
+                                    "type": "unread_count",
+                                    "data": {"count": payload.get("count", 0)},
+                                })
+                            else:
+                                await self.send_to_user(user_id, {"type": "notification", "data": payload})
                         except (ValueError, IndexError):
                             pass
 
