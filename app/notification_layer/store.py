@@ -411,6 +411,18 @@ def get_user_notifications(
 # Admin Logs (paginated + filtered) — sees EVERYTHING
 # ---------------------------------------------------------------------------
 
+def _parse_csv_ints(value: Optional[str]) -> List[int]:
+    """Parse a CSV string of integers. Returns empty list for None/empty."""
+    if not value:
+        return []
+    out = []
+    for part in value.split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.append(int(part))
+    return out
+
+
 def get_admin_notification_logs(
     db: Session,
     page: int = 1,
@@ -422,14 +434,17 @@ def get_admin_notification_logs(
     priority: Optional[str] = None,
     source_service: Optional[str] = None,
     event_type: Optional[str] = None,
-    user_id: Optional[int] = None,
-    created_by: Optional[int] = None,
+    user_id: Optional[str] = None,      # now CSV string: "1,5,12"
+    job_id: Optional[str] = None,       # CSV: "42,43"
+    company_id: Optional[str] = None,   # CSV: "7,8"
+    created_by: Optional[str] = None,   # now CSV string: "1,2"
     delivery_mode: Optional[str] = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
 ) -> Tuple[list, int]:
     """
     Admin view — returns all notifications with recipient stats.
+    `user_id`, `job_id`, `company_id`, `created_by` accept comma-separated values.
     """
     query = db.query(Notification).filter(Notification.is_active == 1)
 
@@ -450,21 +465,56 @@ def get_admin_notification_logs(
         svcs = [s.strip() for s in source_service.split(",")]
         query = query.filter(Notification.source_service.in_(svcs))
     if event_type:
-        query = query.filter(Notification.event_type == event_type)
-    if created_by is not None:
-        query = query.filter(Notification.created_by == created_by)
+        etypes = [e.strip() for e in event_type.split(",") if e.strip()]
+        if etypes:
+            query = query.filter(Notification.event_type.in_(etypes))
     if delivery_mode:
-        query = query.filter(Notification.delivery_mode == delivery_mode)
+        modes = [m.strip() for m in delivery_mode.split(",") if m.strip()]
+        query = query.filter(Notification.delivery_mode.in_(modes))
 
-    # Filter by recipient user
-    if user_id is not None:
+    # Created-by (CSV user IDs)
+    created_by_ids = _parse_csv_ints(created_by)
+    if created_by_ids:
+        query = query.filter(Notification.created_by.in_(created_by_ids))
+
+    # Recipient user filter (CSV user IDs)
+    user_ids = _parse_csv_ints(user_id)
+    if user_ids:
         query = query.filter(
             Notification.id.in_(
                 db.query(NotificationRecipient.notification_id)
-                .filter(NotificationRecipient.user_id == user_id)
+                .filter(NotificationRecipient.user_id.in_(user_ids))
                 .subquery()
             )
         )
+
+    # Job-id filter: match notifications whose target_type='job' and target_id is in list,
+    # OR whose metadata JSON contains a matching job_id.
+    job_ids = _parse_csv_ints(job_id)
+    if job_ids:
+        job_id_strs = [str(j) for j in job_ids]
+        # JSON LIKE clauses for metadata.job_id (handles both numeric and string storage)
+        json_likes = [
+            Notification.extra_metadata.like(f'%"job_id": {j}%') for j in job_ids
+        ] + [
+            Notification.extra_metadata.like(f'%"job_id": "{j}"%') for j in job_ids
+        ]
+        query = query.filter(
+            or_(
+                and_(Notification.target_type == "job", Notification.target_id.in_(job_id_strs)),
+                *json_likes,
+            )
+        )
+
+    # Company-id filter: metadata JSON contains company_id
+    company_ids = _parse_csv_ints(company_id)
+    if company_ids:
+        company_likes = [
+            Notification.extra_metadata.like(f'%"company_id": {c}%') for c in company_ids
+        ] + [
+            Notification.extra_metadata.like(f'%"company_id": "{c}"%') for c in company_ids
+        ]
+        query = query.filter(or_(*company_likes))
 
     total = query.count()
 
