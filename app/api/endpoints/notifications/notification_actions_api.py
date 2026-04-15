@@ -19,12 +19,15 @@ router = APIRouter()
 
 
 def _push_fresh_count(db: Session, user_id: int) -> int:
-    """Recompute unread count, refresh cache, publish to user's WS channel. Returns the count."""
+    """Recompute unread counts (push/banner/log), refresh cache, publish to user's WS channel.
+    Returns the main (push-only) count.
+    """
     redis_manager.invalidate_unread_count([user_id])
-    count = store.get_unread_count(db, user_id)
-    redis_manager.set_cached_unread_count(user_id, count)
-    redis_manager.publish_unread_count(user_id, count)
-    return count
+    by_mode = store.get_unread_counts_by_mode(db, user_id)
+    main_count = by_mode["push"]
+    redis_manager.set_cached_unread_count(user_id, main_count)
+    redis_manager.publish_unread_count(user_id, main_count, by_mode=by_mode)
+    return main_count
 
 
 @router.put("/{notification_id}/read", response_model=MarkReadResponse)

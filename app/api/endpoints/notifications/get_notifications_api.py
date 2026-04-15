@@ -89,14 +89,21 @@ async def get_unread_count(
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
-    """Get unread notification count (cached in Redis for performance)."""
+    """Get unread counts per delivery mode.
+    - `count`: main badge (push only, excludes logs + banners)
+    - `push`: unread push notifications
+    - `banner`: unread banners
+    - `log`: unread log entries
+    - `total`: sum of all three
+    """
     user_id = user_info.get("user_id")
-
-    # Try cache first
-    cached = redis_manager.get_cached_unread_count(user_id)
-    if cached is not None:
-        return UnreadCountResponse(count=cached)
-
-    count = store.get_unread_count(db, user_id)
-    redis_manager.set_cached_unread_count(user_id, count)
-    return UnreadCountResponse(count=count)
+    by_mode = store.get_unread_counts_by_mode(db, user_id)
+    # Keep main count = push only (matches the bell badge)
+    redis_manager.set_cached_unread_count(user_id, by_mode["push"])
+    return UnreadCountResponse(
+        count=by_mode["push"],
+        push=by_mode["push"],
+        banner=by_mode["banner"],
+        log=by_mode["log"],
+        total=by_mode["total"],
+    )
