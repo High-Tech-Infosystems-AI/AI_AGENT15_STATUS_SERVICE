@@ -66,6 +66,18 @@ class NotificationWSManager:
         for user_id in list(self._connections.keys()):
             await self.send_to_user(user_id, data)
 
+    @staticmethod
+    def _msg_type_for(payload: dict) -> str:
+        """Map a notification payload's delivery_mode to its WS message type."""
+        if not isinstance(payload, dict):
+            return "notification"
+        mode = payload.get("delivery_mode")
+        if mode == "log":
+            return "log"
+        if mode == "banner":
+            return "banner"
+        return "notification"
+
     async def start_redis_subscriber(self) -> None:
         """
         Background task that subscribes to Redis Pub/Sub and delivers
@@ -106,9 +118,12 @@ class NotificationWSManager:
                     except (json.JSONDecodeError, TypeError):
                         continue
 
-                    # Route based on channel
+                    # Route based on channel.
+                    # For broadcast + per-user channels we inspect the payload's
+                    # delivery_mode so logs go out as type="log" (not "notification").
                     if channel == "notif:broadcast":
-                        await self.broadcast({"type": "notification", "data": payload})
+                        msg_type = self._msg_type_for(payload)
+                        await self.broadcast({"type": msg_type, "data": payload})
 
                     elif channel == "notif:banner":
                         # Banner events: route to specific recipients only.
@@ -133,14 +148,22 @@ class NotificationWSManager:
                     elif channel.startswith("notif:user:"):
                         try:
                             user_id = int(channel.split(":")[-1])
-                            # Distinguish meta messages (unread_count) from notifications
+                            # Distinguish meta messages from notifications
                             if isinstance(payload, dict) and payload.get("_meta") == "unread_count":
                                 await self.send_to_user(user_id, {
                                     "type": "unread_count",
                                     "data": {"count": payload.get("count", 0)},
                                 })
+                            elif isinstance(payload, dict) and payload.get("_meta") == "banners_snapshot":
+                                # Full per-user active-banner snapshot (sent on create/expire)
+                                await self.send_to_user(user_id, {
+                                    "type": "banners",
+                                    "action": "snapshot",
+                                    "data": payload.get("data", []),
+                                })
                             else:
-                                await self.send_to_user(user_id, {"type": "notification", "data": payload})
+                                msg_type = self._msg_type_for(payload)
+                                await self.send_to_user(user_id, {"type": msg_type, "data": payload})
                         except (ValueError, IndexError):
                             pass
 

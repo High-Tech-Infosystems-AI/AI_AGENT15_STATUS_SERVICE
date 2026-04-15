@@ -141,6 +141,47 @@ def publish_banner(action: str, payload: dict) -> None:
         logger.error("Failed to publish banner: %s", e)
 
 
+def publish_unread_count(user_id: int, count: int) -> None:
+    """Publish an unread-count update to the user's WS channel.
+    Called after mark-read / mark-unread / mark-all-read so all of the user's
+    connected tabs get the fresh count in real time.
+    """
+    try:
+        client = get_notification_redis()
+        client.publish(
+            f"notif:user:{user_id}",
+            json.dumps({"_meta": "unread_count", "user_id": user_id, "count": count},
+                       default=str),
+        )
+    except Exception as e:
+        logger.error("Failed to publish unread_count for user %s: %s", user_id, e)
+
+
+def publish_banner_snapshots(user_id_to_banners: dict) -> None:
+    """
+    Publish per-user banner snapshots to each user's channel.
+    Used after banner create/expire so every affected user gets the
+    full updated active-banner list (not a delta).
+
+    user_id_to_banners: {user_id: [banner_dict, ...]}
+    """
+    if not user_id_to_banners:
+        return
+    try:
+        client = get_notification_redis()
+        pipe = client.pipeline(transaction=False)
+        for uid, banners in user_id_to_banners.items():
+            payload = {
+                "_meta": "banners_snapshot",
+                "user_id": uid,
+                "data": banners,
+            }
+            pipe.publish(f"notif:user:{uid}", json.dumps(payload, default=str))
+        pipe.execute()
+    except Exception as e:
+        logger.error("Failed to publish banner snapshots: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Unread Count Cache
 # ---------------------------------------------------------------------------

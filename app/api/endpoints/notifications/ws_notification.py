@@ -119,12 +119,36 @@ async def ws_notifications(websocket: WebSocket, token: str = Query(...)):
                     try:
                         store.mark_notification_read(db, notification_id, user_id)
                         redis_manager.invalidate_unread_count([user_id])
-                        # Send updated unread count
                         new_count = store.get_unread_count(db, user_id)
                         redis_manager.set_cached_unread_count(user_id, new_count)
-                        await websocket.send_json({"type": "unread_count", "data": {"count": new_count}})
+                        # Publish to Redis so ALL of this user's tabs update, not just this socket
+                        redis_manager.publish_unread_count(user_id, new_count)
                     finally:
                         db.close()
+
+            elif action == "mark_unread":
+                notification_id = msg.get("notification_id")
+                if notification_id:
+                    db = SessionLocal()
+                    try:
+                        store.mark_notification_unread(db, notification_id, user_id)
+                        redis_manager.invalidate_unread_count([user_id])
+                        new_count = store.get_unread_count(db, user_id)
+                        redis_manager.set_cached_unread_count(user_id, new_count)
+                        redis_manager.publish_unread_count(user_id, new_count)
+                    finally:
+                        db.close()
+
+            elif action == "mark_all_read":
+                db = SessionLocal()
+                try:
+                    store.mark_all_read(db, user_id)
+                    redis_manager.invalidate_unread_count([user_id])
+                    new_count = store.get_unread_count(db, user_id)
+                    redis_manager.set_cached_unread_count(user_id, new_count)
+                    redis_manager.publish_unread_count(user_id, new_count)
+                finally:
+                    db.close()
 
             elif action == "ping":
                 await websocket.send_json({"type": "pong"})

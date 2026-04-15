@@ -135,20 +135,38 @@ def get_unread_count(user_id: int = Query(1), db: Session = Depends(get_db)):
     return UnreadCountResponse(count=count)
 
 
+def _push_fresh_count(db: Session, user_id: int) -> int:
+    """Recompute unread count, refresh cache, publish to WS channel."""
+    redis_manager.invalidate_unread_count([user_id])
+    count = store.get_unread_count(db, user_id)
+    redis_manager.set_cached_unread_count(user_id, count)
+    redis_manager.publish_unread_count(user_id, count)
+    return count
+
+
 @router.put("/notifications/{notification_id}/read")
 def mark_read(notification_id: int, user_id: int = Query(1), db: Session = Depends(get_db)):
     success = store.mark_notification_read(db, notification_id, user_id)
     if not success:
         raise HTTPException(status_code=404, detail="Notification not found for this user")
-    redis_manager.invalidate_unread_count([user_id])
-    return MarkReadResponse(success=True, message="Notification marked as read")
+    count = _push_fresh_count(db, user_id)
+    return MarkReadResponse(success=True, message=f"Notification marked as read (unread now: {count})")
+
+
+@router.put("/notifications/{notification_id}/unread")
+def mark_unread(notification_id: int, user_id: int = Query(1), db: Session = Depends(get_db)):
+    success = store.mark_notification_unread(db, notification_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Notification not found for this user")
+    count = _push_fresh_count(db, user_id)
+    return MarkReadResponse(success=True, message=f"Notification marked as unread (unread now: {count})")
 
 
 @router.put("/notifications/mark-all-read")
 def mark_all_read(user_id: int = Query(1), db: Session = Depends(get_db)):
-    count = store.mark_all_read(db, user_id)
-    redis_manager.invalidate_unread_count([user_id])
-    return MarkReadResponse(success=True, message=f"Marked {count} notifications as read")
+    updated = store.mark_all_read(db, user_id)
+    count = _push_fresh_count(db, user_id)
+    return MarkReadResponse(success=True, message=f"Marked {updated} notifications as read (unread now: {count})")
 
 
 # --- Banners ---
@@ -189,11 +207,9 @@ def create_banner(request: CreateBannerRequest, user_id: int = Query(1), db: Ses
            "recipient_ids": list(recipient_ids)}
     redis_manager.publish_banner("create", pub)
     redis_manager.invalidate_banner_cache()
-    redis_manager.invalidate_unread_count(recipient_ids)
-    # Push fresh unread counts to each recipient's WS channel
-    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
-    for uid, cnt in unread_counts.items():
-        redis_manager.publish_to_user(uid, {"_meta": "unread_count", "user_id": uid, "count": cnt})
+    # Publish full banner snapshot to each affected user
+    snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+    redis_manager.publish_banner_snapshots(snapshots)
     return SendNotificationResponse(success=True, notification_id=notif.id,
                                     recipients_count=len(recipient_ids),
                                     message=f"Banner created for {len(recipient_ids)} users")
@@ -392,6 +408,18 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
                                     payload = dict(payload)
                                     payload["data"] = forward_data
                                 await websocket.send_json(payload)
+                        elif isinstance(payload, dict) and payload.get("_meta") == "banners_snapshot":
+                            # Per-user banner snapshot (sent on banner create/expire)
+                            await websocket.send_json({
+                                "type": "banners",
+                                "action": "snapshot",
+                                "data": payload.get("data", []),
+                            })
+                        elif isinstance(payload, dict) and payload.get("_meta") == "unread_count":
+                            await websocket.send_json({
+                                "type": "unread_count",
+                                "data": {"count": payload.get("count", 0)},
+                            })
                         else:
                             await websocket.send_json({"type": "notification", "data": payload})
                     except Exception:
@@ -403,7 +431,9 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
                 raw = await websocket.receive_text()
                 try:
                     data = json.loads(raw)
-                    if data.get("action") == "mark_read":
+                    action = data.get("action")
+
+                    if action == "mark_read":
                         nid = data.get("notification_id")
                         if nid:
                             db = next(get_db())
@@ -411,10 +441,34 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
                                 store.mark_notification_read(db, nid, user_id)
                                 redis_manager.invalidate_unread_count([user_id])
                                 new_count = store.get_unread_count(db, user_id)
-                                await websocket.send_json({"type": "unread_count", "data": {"count": new_count}})
+                                redis_manager.set_cached_unread_count(user_id, new_count)
+                                # Publish to Redis so all tabs of this user update
+                                redis_manager.publish_unread_count(user_id, new_count)
                             finally:
                                 db.close()
-                    elif data.get("action") == "ping":
+                    elif action == "mark_unread":
+                        nid = data.get("notification_id")
+                        if nid:
+                            db = next(get_db())
+                            try:
+                                store.mark_notification_unread(db, nid, user_id)
+                                redis_manager.invalidate_unread_count([user_id])
+                                new_count = store.get_unread_count(db, user_id)
+                                redis_manager.set_cached_unread_count(user_id, new_count)
+                                redis_manager.publish_unread_count(user_id, new_count)
+                            finally:
+                                db.close()
+                    elif action == "mark_all_read":
+                        db = next(get_db())
+                        try:
+                            store.mark_all_read(db, user_id)
+                            redis_manager.invalidate_unread_count([user_id])
+                            new_count = store.get_unread_count(db, user_id)
+                            redis_manager.set_cached_unread_count(user_id, new_count)
+                            redis_manager.publish_unread_count(user_id, new_count)
+                        finally:
+                            db.close()
+                    elif action == "ping":
                         await websocket.send_json({"type": "pong"})
                 except Exception:
                     pass

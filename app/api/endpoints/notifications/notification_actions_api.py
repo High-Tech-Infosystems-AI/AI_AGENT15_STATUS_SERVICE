@@ -1,5 +1,8 @@
 """
-Notification Actions API — mark read / mark all read.
+Notification Actions API — mark read / mark unread / mark all read.
+
+All actions publish the fresh unread count to the user's Redis channel so
+every connected WebSocket tab for that user gets an instant badge update.
 """
 
 import logging
@@ -15,6 +18,15 @@ logger = logging.getLogger("app_logger")
 router = APIRouter()
 
 
+def _push_fresh_count(db: Session, user_id: int) -> int:
+    """Recompute unread count, refresh cache, publish to user's WS channel. Returns the count."""
+    redis_manager.invalidate_unread_count([user_id])
+    count = store.get_unread_count(db, user_id)
+    redis_manager.set_cached_unread_count(user_id, count)
+    redis_manager.publish_unread_count(user_id, count)
+    return count
+
+
 @router.put("/{notification_id}/read", response_model=MarkReadResponse)
 async def mark_read(
     notification_id: int,
@@ -27,8 +39,24 @@ async def mark_read(
     if not success:
         raise HTTPException(status_code=404, detail="Notification not found for this user")
 
-    redis_manager.invalidate_unread_count([user_id])
-    return MarkReadResponse(success=True, message="Notification marked as read")
+    count = _push_fresh_count(db, user_id)
+    return MarkReadResponse(success=True, message=f"Notification marked as read (unread now: {count})")
+
+
+@router.put("/{notification_id}/unread", response_model=MarkReadResponse)
+async def mark_unread(
+    notification_id: int,
+    user_info: dict = Depends(validate_token),
+    db: Session = Depends(get_db),
+):
+    """Mark a single notification as unread for the current user."""
+    user_id = user_info.get("user_id")
+    success = store.mark_notification_unread(db, notification_id, user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Notification not found for this user")
+
+    count = _push_fresh_count(db, user_id)
+    return MarkReadResponse(success=True, message=f"Notification marked as unread (unread now: {count})")
 
 
 @router.put("/mark-all-read", response_model=MarkReadResponse)
@@ -38,6 +66,6 @@ async def mark_all_read(
 ):
     """Mark all unread notifications as read for the current user."""
     user_id = user_info.get("user_id")
-    count = store.mark_all_read(db, user_id)
-    redis_manager.invalidate_unread_count([user_id])
-    return MarkReadResponse(success=True, message=f"Marked {count} notifications as read")
+    updated = store.mark_all_read(db, user_id)
+    count = _push_fresh_count(db, user_id)
+    return MarkReadResponse(success=True, message=f"Marked {updated} notifications as read (unread now: {count})")
