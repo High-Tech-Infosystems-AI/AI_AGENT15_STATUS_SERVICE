@@ -88,7 +88,7 @@ def _fire_scheduled_notifications(db, now: datetime):
                 "metadata": metadata, "created_at": str(notif.created_at),
             }
             redis_manager.invalidate_unread_count(user_ids)
-            unread_counts = store.get_unread_counts_bulk(db, user_ids)
+            unread_counts = store.get_unread_counts_by_mode_bulk(db, user_ids)
 
             if notif.visibility == "public" or sched.target_type == "all":
                 redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts)

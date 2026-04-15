@@ -223,7 +223,8 @@ def handle_event(
     if event_config.delivery_mode == "push":
         redis_manager.invalidate_unread_count(primary_user_ids)
 
-    unread_counts = store.get_unread_counts_bulk(db, primary_user_ids)
+    # Per-mode breakdown so WS clients receive {push, banner, log, total}
+    unread_counts = store.get_unread_counts_by_mode_bulk(db, primary_user_ids)
 
     # Dispatch to the right Redis channel based on delivery_mode
     if event_config.delivery_mode == "banner":

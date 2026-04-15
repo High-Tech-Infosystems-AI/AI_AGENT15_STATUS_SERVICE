@@ -242,11 +242,11 @@ def send_notification(request: SendNotificationRequest, user_id: int = Query(1),
            "source_service": "system", "metadata": request.metadata,
            "created_at": str(notif.created_at)}
     redis_manager.invalidate_unread_count(recipient_ids)
-    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
+    unread_counts_by_mode = store.get_unread_counts_by_mode_bulk(db, recipient_ids)
     if notif.visibility == "public" or request.target_type == "all":
-        redis_manager.publish_broadcast(pub, user_unread_counts=unread_counts)
+        redis_manager.publish_broadcast(pub, user_unread_counts=unread_counts_by_mode)
     else:
-        redis_manager.publish_to_users(recipient_ids, pub, unread_counts=unread_counts)
+        redis_manager.publish_to_users(recipient_ids, pub, unread_counts=unread_counts_by_mode)
     return SendNotificationResponse(success=True, notification_id=notif.id,
                                     recipients_count=len(recipient_ids),
                                     message=f"Sent to {len(recipient_ids)} recipients")
@@ -262,10 +262,12 @@ def get_admin_logs(
     date_to: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     source_service: Optional[str] = Query(None),
-    event_type: Optional[str] = Query(None),
-    user_id: Optional[int] = Query(None),
-    created_by: Optional[int] = Query(None),
-    delivery_mode: Optional[str] = Query(None),
+    event_type: Optional[str] = Query(None, description="Comma-separated event names"),
+    user_id: Optional[str] = Query(None, description="Comma-separated user IDs"),
+    job_id: Optional[str] = Query(None, description="Comma-separated job IDs"),
+    company_id: Optional[str] = Query(None, description="Comma-separated company IDs"),
+    created_by: Optional[str] = Query(None, description="Comma-separated admin IDs"),
+    delivery_mode: Optional[str] = Query(None, description="Comma-separated: push,banner,log"),
     page: int = Query(1, ge=1),
     limit: int = Query(25, ge=1, le=100),
     sort_by: str = Query("created_at"),
@@ -288,7 +290,8 @@ def get_admin_logs(
         db=db, page=page, limit=limit, domain_type=domain_type, visibility=visibility,
         date_from=parsed_from, date_to=parsed_to, priority=priority,
         source_service=source_service, event_type=event_type,
-        user_id=user_id, created_by=created_by, delivery_mode=delivery_mode,
+        user_id=user_id, job_id=job_id, company_id=company_id,
+        created_by=created_by, delivery_mode=delivery_mode,
         sort_by=sort_by, sort_order=sort_order,
     )
     total_pages = math.ceil(total / limit) if total > 0 else 1

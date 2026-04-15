@@ -23,16 +23,18 @@ router = APIRouter()
 
 @router.get("/admin/logs", response_model=AdminNotificationListResponse)
 async def get_admin_notification_logs(
-    domain_type: Optional[str] = Query(None, description="Comma-separated: login,jobs,ai,candidate,security,system,user_management"),
+    domain_type: Optional[str] = Query(None, description="Comma-separated: login,jobs,ai,candidate,security,system,user_management,manual"),
     visibility: Optional[str] = Query(None, description="Comma-separated: personal,public,restricted"),
     date_from: Optional[str] = Query(None, description="ISO date: 2026-04-01"),
     date_to: Optional[str] = Query(None, description="ISO date: 2026-04-09"),
     priority: Optional[str] = Query(None, description="Comma-separated: low,medium,high,critical"),
     source_service: Optional[str] = Query(None, description="Comma-separated: login,job,candidate,resume_analyzer,rbac,bulk_candidate,system"),
-    event_type: Optional[str] = Query(None, description="Specific event name, e.g. illegal_login_attempt"),
-    user_id: Optional[int] = Query(None, description="Filter notifications sent to this user"),
-    created_by: Optional[int] = Query(None, description="Filter notifications created by this admin user"),
-    delivery_mode: Optional[str] = Query(None, description="push or banner"),
+    event_type: Optional[str] = Query(None, description="Comma-separated event names"),
+    user_id: Optional[str] = Query(None, description="Comma-separated user IDs — notifications sent to these users"),
+    job_id: Optional[str] = Query(None, description="Comma-separated job IDs — matches target_id (when target_type=job) OR metadata.job_id"),
+    company_id: Optional[str] = Query(None, description="Comma-separated company IDs — matches metadata.company_id"),
+    created_by: Optional[str] = Query(None, description="Comma-separated admin user IDs who created the notifications"),
+    delivery_mode: Optional[str] = Query(None, description="Comma-separated: push,banner,log"),
     page: int = Query(1, ge=1),
     limit: int = Query(25, ge=1, le=100),
     sort_by: str = Query("created_at"),
@@ -42,8 +44,7 @@ async def get_admin_notification_logs(
 ):
     """
     Admin audit log — view ALL notifications in the system with full filtering.
-    Super_admin and admin can see every notification, every event, every user's activity.
-    Supports filtering by domain_type, visibility, date range, priority, source_service, event_type, user_id, created_by.
+    Every ID filter (user_id, job_id, company_id, created_by) accepts comma-separated values.
     """
     role_name = user_info.get("role_name", "")
     if not check_admin_access(role_name):
@@ -74,6 +75,8 @@ async def get_admin_notification_logs(
         source_service=source_service,
         event_type=event_type,
         user_id=user_id,
+        job_id=job_id,
+        company_id=company_id,
         created_by=created_by,
         delivery_mode=delivery_mode,
         sort_by=sort_by,
