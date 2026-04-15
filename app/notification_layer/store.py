@@ -411,6 +411,18 @@ def get_user_notifications(
 # Admin Logs (paginated + filtered) — sees EVERYTHING
 # ---------------------------------------------------------------------------
 
+def _parse_csv_ints(value: Optional[str]) -> List[int]:
+    """Parse a CSV string of integers. Returns empty list for None/empty."""
+    if not value:
+        return []
+    out = []
+    for part in value.split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.append(int(part))
+    return out
+
+
 def get_admin_notification_logs(
     db: Session,
     page: int = 1,
@@ -422,14 +434,17 @@ def get_admin_notification_logs(
     priority: Optional[str] = None,
     source_service: Optional[str] = None,
     event_type: Optional[str] = None,
-    user_id: Optional[int] = None,
-    created_by: Optional[int] = None,
+    user_id: Optional[str] = None,      # now CSV string: "1,5,12"
+    job_id: Optional[str] = None,       # CSV: "42,43"
+    company_id: Optional[str] = None,   # CSV: "7,8"
+    created_by: Optional[str] = None,   # now CSV string: "1,2"
     delivery_mode: Optional[str] = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
 ) -> Tuple[list, int]:
     """
     Admin view — returns all notifications with recipient stats.
+    `user_id`, `job_id`, `company_id`, `created_by` accept comma-separated values.
     """
     query = db.query(Notification).filter(Notification.is_active == 1)
 
@@ -450,21 +465,56 @@ def get_admin_notification_logs(
         svcs = [s.strip() for s in source_service.split(",")]
         query = query.filter(Notification.source_service.in_(svcs))
     if event_type:
-        query = query.filter(Notification.event_type == event_type)
-    if created_by is not None:
-        query = query.filter(Notification.created_by == created_by)
+        etypes = [e.strip() for e in event_type.split(",") if e.strip()]
+        if etypes:
+            query = query.filter(Notification.event_type.in_(etypes))
     if delivery_mode:
-        query = query.filter(Notification.delivery_mode == delivery_mode)
+        modes = [m.strip() for m in delivery_mode.split(",") if m.strip()]
+        query = query.filter(Notification.delivery_mode.in_(modes))
 
-    # Filter by recipient user
-    if user_id is not None:
+    # Created-by (CSV user IDs)
+    created_by_ids = _parse_csv_ints(created_by)
+    if created_by_ids:
+        query = query.filter(Notification.created_by.in_(created_by_ids))
+
+    # Recipient user filter (CSV user IDs)
+    user_ids = _parse_csv_ints(user_id)
+    if user_ids:
         query = query.filter(
             Notification.id.in_(
                 db.query(NotificationRecipient.notification_id)
-                .filter(NotificationRecipient.user_id == user_id)
+                .filter(NotificationRecipient.user_id.in_(user_ids))
                 .subquery()
             )
         )
+
+    # Job-id filter: match notifications whose target_type='job' and target_id is in list,
+    # OR whose metadata JSON contains a matching job_id.
+    job_ids = _parse_csv_ints(job_id)
+    if job_ids:
+        job_id_strs = [str(j) for j in job_ids]
+        # JSON LIKE clauses for metadata.job_id (handles both numeric and string storage)
+        json_likes = [
+            Notification.extra_metadata.like(f'%"job_id": {j}%') for j in job_ids
+        ] + [
+            Notification.extra_metadata.like(f'%"job_id": "{j}"%') for j in job_ids
+        ]
+        query = query.filter(
+            or_(
+                and_(Notification.target_type == "job", Notification.target_id.in_(job_id_strs)),
+                *json_likes,
+            )
+        )
+
+    # Company-id filter: metadata JSON contains company_id
+    company_ids = _parse_csv_ints(company_id)
+    if company_ids:
+        company_likes = [
+            Notification.extra_metadata.like(f'%"company_id": {c}%') for c in company_ids
+        ] + [
+            Notification.extra_metadata.like(f'%"company_id": "{c}"%') for c in company_ids
+        ]
+        query = query.filter(or_(*company_likes))
 
     total = query.count()
 
@@ -474,24 +524,69 @@ def get_admin_notification_logs(
 
     offset = (page - 1) * limit
     notifications = query.offset(offset).limit(limit).all()
+    notif_ids = [n.id for n in notifications]
+
+    # Bulk fetch all recipients (with user name) for the paginated notifications in one query.
+    recipients_by_notif: dict = {nid: [] for nid in notif_ids}
+    if notif_ids:
+        rows = (
+            db.query(
+                NotificationRecipient.notification_id,
+                NotificationRecipient.user_id,
+                NotificationRecipient.is_read,
+                NotificationRecipient.read_at,
+                User.name,
+            )
+            .join(User, User.id == NotificationRecipient.user_id)
+            .filter(NotificationRecipient.notification_id.in_(notif_ids))
+            .all()
+        )
+        for nid, uid, is_read, read_at, uname in rows:
+            recipients_by_notif.setdefault(nid, []).append({
+                "user_id": uid,
+                "user_name": uname,
+                "is_read": bool(is_read),
+                "read_at": read_at,
+            })
+
+    # Bulk fetch creator names for all notifications in one query
+    creator_ids = {n.created_by for n in notifications if n.created_by}
+    creator_names: dict = {}
+    if creator_ids:
+        for uid, uname in db.query(User.id, User.name).filter(User.id.in_(creator_ids)).all():
+            creator_names[uid] = uname
+
+    # Resolve "intended" user set for each notification (who SHOULD have received it).
+    # We compare against the actual recipients to find users who didn't get it
+    # (e.g. because they were deleted/disabled after the notification was sent).
+    def _intended_users(notif) -> List[int]:
+        try:
+            return resolve_target_user_ids(
+                db,
+                notif.target_type,
+                notif.target_id,
+                include_admins=(notif.target_type != "all"),
+            )
+        except Exception:
+            return []
 
     results = []
     for notif in notifications:
-        # Get recipient stats
-        recipients_count = db.query(func.count(NotificationRecipient.id)).filter(
-            NotificationRecipient.notification_id == notif.id
-        ).scalar() or 0
+        recipients = recipients_by_notif.get(notif.id, [])
 
-        read_count = db.query(func.count(NotificationRecipient.id)).filter(
-            NotificationRecipient.notification_id == notif.id,
-            NotificationRecipient.is_read == 1,
-        ).scalar() or 0
+        # Partition into read / unread lists
+        read_users = [r for r in recipients if r["is_read"]]
+        unread_users = [r for r in recipients if not r["is_read"]]
 
-        # Creator name
-        creator_name = None
-        if notif.created_by:
-            creator = db.query(User.name).filter(User.id == notif.created_by).scalar()
-            creator_name = creator
+        # Not-received: intended recipients who are NOT in notification_recipients
+        # (user was deleted/disabled between resolution and now, or resolution failed).
+        recipient_ids_set = {r["user_id"] for r in recipients}
+        intended_ids = set(_intended_users(notif))
+        not_received_ids = list(intended_ids - recipient_ids_set)
+        not_received_users = []
+        if not_received_ids:
+            nr_rows = db.query(User.id, User.name).filter(User.id.in_(not_received_ids)).all()
+            not_received_users = [{"user_id": uid, "user_name": uname} for uid, uname in nr_rows]
 
         meta = None
         if notif.extra_metadata:
@@ -514,12 +609,21 @@ def get_admin_notification_logs(
             "event_type": notif.event_type,
             "metadata": meta,
             "created_by": notif.created_by,
-            "created_by_name": creator_name,
+            "created_by_name": creator_names.get(notif.created_by),
             "created_at": notif.created_at,
             "expires_at": notif.expires_at,
             "is_active": bool(notif.is_active),
-            "recipients_count": recipients_count,
-            "read_count": read_count,
+
+            # Summary counts
+            "recipients_count": len(recipients),
+            "read_count": len(read_users),
+            "unread_count": len(unread_users),
+            "not_received_count": len(not_received_users),
+
+            # Detailed per-user breakdown
+            "read_by": read_users,              # [{user_id, user_name, is_read=True, read_at}]
+            "unread_by": unread_users,          # [{user_id, user_name, is_read=False, read_at=None}]
+            "not_received_by": not_received_users,  # [{user_id, user_name}]
         })
 
     return results, total
