@@ -110,6 +110,13 @@ class NotificationListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Admin Log (extended fields)
 # ---------------------------------------------------------------------------
+class RecipientInfo(BaseModel):
+    user_id: int
+    user_name: Optional[str] = None
+    is_read: Optional[bool] = None
+    read_at: Optional[datetime] = None
+
+
 class AdminNotificationOut(BaseModel):
     id: int
     title: str
@@ -128,8 +135,17 @@ class AdminNotificationOut(BaseModel):
     created_at: datetime
     expires_at: Optional[datetime] = None
     is_active: bool = True
+
+    # Summary counts
     recipients_count: int = 0
     read_count: int = 0
+    unread_count: int = 0
+    not_received_count: int = 0
+
+    # Per-user breakdown
+    read_by: List[RecipientInfo] = Field(default_factory=list)
+    unread_by: List[RecipientInfo] = Field(default_factory=list)
+    not_received_by: List[RecipientInfo] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
