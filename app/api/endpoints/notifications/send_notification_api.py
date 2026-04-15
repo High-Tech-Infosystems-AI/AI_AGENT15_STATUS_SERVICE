@@ -71,13 +71,13 @@ async def send_notification(
     # Invalidate unread count caches first so the fresh counts are accurate
     redis_manager.invalidate_unread_count(recipient_ids)
 
-    # Compute fresh per-user unread counts so each WS client gets the new badge value
-    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
+    # Per-user per-mode unread counts — WS receives the full {push, banner, log, total} breakdown
+    unread_counts_by_mode = store.get_unread_counts_by_mode_bulk(db, recipient_ids)
 
     if notif.visibility == "public" or request.target_type == "all":
-        redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts)
+        redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts_by_mode)
     else:
-        redis_manager.publish_to_users(recipient_ids, pub_payload, unread_counts=unread_counts)
+        redis_manager.publish_to_users(recipient_ids, pub_payload, unread_counts=unread_counts_by_mode)
 
     return SendNotificationResponse(
         success=True,

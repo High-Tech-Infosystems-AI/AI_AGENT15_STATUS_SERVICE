@@ -242,11 +242,11 @@ def send_notification(request: SendNotificationRequest, user_id: int = Query(1),
            "source_service": "system", "metadata": request.metadata,
            "created_at": str(notif.created_at)}
     redis_manager.invalidate_unread_count(recipient_ids)
-    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
+    unread_counts_by_mode = store.get_unread_counts_by_mode_bulk(db, recipient_ids)
     if notif.visibility == "public" or request.target_type == "all":
-        redis_manager.publish_broadcast(pub, user_unread_counts=unread_counts)
+        redis_manager.publish_broadcast(pub, user_unread_counts=unread_counts_by_mode)
     else:
-        redis_manager.publish_to_users(recipient_ids, pub, unread_counts=unread_counts)
+        redis_manager.publish_to_users(recipient_ids, pub, unread_counts=unread_counts_by_mode)
     return SendNotificationResponse(success=True, notification_id=notif.id,
                                     recipients_count=len(recipient_ids),
                                     message=f"Sent to {len(recipient_ids)} recipients")
