@@ -85,9 +85,27 @@ def publish_to_user(user_id: int, payload: dict, unread_count: Optional[int] = N
         logger.error("Failed to publish to user %s: %s", user_id, e)
 
 
+def _unread_count_payload(uid: int, counts) -> dict:
+    """Build a per-mode unread_count payload from either an int (legacy)
+    or a {push, banner, log, total} dict (current).
+    """
+    if isinstance(counts, dict):
+        return {
+            "_meta": "unread_count",
+            "user_id": uid,
+            "count": counts.get("push", 0),
+            "push": counts.get("push", 0),
+            "banner": counts.get("banner", 0),
+            "log": counts.get("log", 0),
+            "total": counts.get("total", 0),
+        }
+    # Legacy int fallback
+    return {"_meta": "unread_count", "user_id": uid, "count": int(counts or 0)}
+
+
 def publish_to_users(user_ids: List[int], payload: dict, unread_counts: Optional[dict] = None) -> None:
     """Publish a notification to multiple user channels.
-    `unread_counts` is an optional {user_id: count} dict to embed per-user.
+    `unread_counts`: {user_id: {push, banner, log, total}} or {user_id: int} (legacy).
     """
     try:
         client = get_notification_redis()
@@ -95,15 +113,18 @@ def publish_to_users(user_ids: List[int], payload: dict, unread_counts: Optional
         for uid in user_ids:
             enriched = dict(payload)
             if unread_counts and uid in unread_counts:
-                enriched["unread_count"] = unread_counts[uid]
+                cnt = unread_counts[uid]
+                if isinstance(cnt, dict):
+                    enriched["unread_count"] = cnt.get("push", 0)
+                else:
+                    enriched["unread_count"] = cnt
             pipe.publish(f"notif:user:{uid}", json.dumps(enriched, default=str))
-            # Dedicated unread_count event
+            # Dedicated unread_count event with per-mode breakdown
             if unread_counts and uid in unread_counts:
-                pipe.publish(f"notif:user:{uid}", json.dumps({
-                    "_meta": "unread_count",
-                    "user_id": uid,
-                    "count": unread_counts[uid],
-                }, default=str))
+                pipe.publish(
+                    f"notif:user:{uid}",
+                    json.dumps(_unread_count_payload(uid, unread_counts[uid]), default=str),
+                )
         pipe.execute()
     except Exception as e:
         logger.error("Failed to publish to users: %s", e)
@@ -112,20 +133,19 @@ def publish_to_users(user_ids: List[int], payload: dict, unread_counts: Optional
 def publish_broadcast(payload: dict, user_unread_counts: Optional[dict] = None) -> None:
     """Publish to the broadcast channel (all users).
     Optionally also publish per-user unread_count updates to each user's channel.
+    `user_unread_counts`: {user_id: {push, banner, log, total}} or {user_id: int} (legacy).
     """
     try:
         client = get_notification_redis()
         client.publish("notif:broadcast", json.dumps(payload, default=str))
 
-        # If per-user unread counts provided, publish unread_count to each user's channel
         if user_unread_counts:
             pipe = client.pipeline(transaction=False)
-            for uid, count in user_unread_counts.items():
-                pipe.publish(f"notif:user:{uid}", json.dumps({
-                    "_meta": "unread_count",
-                    "user_id": uid,
-                    "count": count,
-                }, default=str))
+            for uid, counts in user_unread_counts.items():
+                pipe.publish(
+                    f"notif:user:{uid}",
+                    json.dumps(_unread_count_payload(uid, counts), default=str),
+                )
             pipe.execute()
     except Exception as e:
         logger.error("Failed to publish broadcast: %s", e)
