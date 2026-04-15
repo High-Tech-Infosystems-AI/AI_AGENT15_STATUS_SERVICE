@@ -142,12 +142,24 @@ def _check_deadlines(db, now: datetime):
 
 
 def _expire_banners(db):
-    """Deactivate expired banners and notify their original recipients."""
+    """Deactivate expired banners and notify their original recipients with full snapshot."""
     expired = store.deactivate_expired_banners_with_recipients(db)
+    if not expired:
+        return
+
+    # Send the legacy 'expire' event for backward-compat clients
+    affected_users = set()
     for banner_id, recipient_ids in expired:
         redis_manager.publish_banner("expire", {
             "id": banner_id,
             "recipient_ids": list(recipient_ids),
         })
-    if expired:
-        redis_manager.invalidate_banner_cache()
+        affected_users.update(recipient_ids)
+
+    # Publish full updated snapshot so each affected user has the
+    # complete current active-banner list (without the expired ones).
+    if affected_users:
+        snapshots = store.get_active_banners_for_users_bulk(db, list(affected_users))
+        redis_manager.publish_banner_snapshots(snapshots)
+
+    redis_manager.invalidate_banner_cache()

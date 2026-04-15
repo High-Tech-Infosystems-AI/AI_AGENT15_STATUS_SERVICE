@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # Enums as string literals (kept simple — no Python Enum overhead)
 # ---------------------------------------------------------------------------
-DELIVERY_MODES = ("push", "banner")
+DELIVERY_MODES = ("push", "banner", "log")
 DOMAIN_TYPES = ("login", "jobs", "ai", "candidate", "security", "system", "user_management", "manual")
 VISIBILITY_LEVELS = ("personal", "public", "restricted")
 PRIORITIES = ("low", "medium", "high", "critical")

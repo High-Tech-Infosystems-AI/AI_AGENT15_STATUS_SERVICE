@@ -69,12 +69,11 @@ async def create_banner(
     }
     redis_manager.publish_banner("create", pub_payload)
     redis_manager.invalidate_banner_cache()
-    redis_manager.invalidate_unread_count(recipient_ids)
 
-    # Push fresh unread counts to each recipient's WS channel
-    unread_counts = store.get_unread_counts_bulk(db, recipient_ids)
-    for uid, cnt in unread_counts.items():
-        redis_manager.publish_to_user(uid, {"_meta": "unread_count", "user_id": uid, "count": cnt})
+    # Publish updated full banner snapshot to each affected user
+    # so clients always have the complete current state, not deltas.
+    snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+    redis_manager.publish_banner_snapshots(snapshots)
 
     return SendNotificationResponse(
         success=True,
