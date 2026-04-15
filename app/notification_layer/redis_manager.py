@@ -141,17 +141,26 @@ def publish_banner(action: str, payload: dict) -> None:
         logger.error("Failed to publish banner: %s", e)
 
 
-def publish_unread_count(user_id: int, count: int) -> None:
+def publish_unread_count(user_id: int, count: int, by_mode: Optional[dict] = None) -> None:
     """Publish an unread-count update to the user's WS channel.
-    Called after mark-read / mark-unread / mark-all-read so all of the user's
-    connected tabs get the fresh count in real time.
+    If `by_mode` is provided (e.g. {"push": N, "banner": N, "log": N, "total": N})
+    it is included in the payload so all three badges update together.
     """
     try:
         client = get_notification_redis()
+        payload = {
+            "_meta": "unread_count",
+            "user_id": user_id,
+            "count": count,
+        }
+        if by_mode:
+            payload["push"] = by_mode.get("push", 0)
+            payload["banner"] = by_mode.get("banner", 0)
+            payload["log"] = by_mode.get("log", 0)
+            payload["total"] = by_mode.get("total", 0)
         client.publish(
             f"notif:user:{user_id}",
-            json.dumps({"_meta": "unread_count", "user_id": user_id, "count": count},
-                       default=str),
+            json.dumps(payload, default=str),
         )
     except Exception as e:
         logger.error("Failed to publish unread_count for user %s: %s", user_id, e)

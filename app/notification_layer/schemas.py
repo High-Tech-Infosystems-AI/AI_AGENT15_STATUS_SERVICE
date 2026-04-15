@@ -144,7 +144,11 @@ class AdminNotificationListResponse(BaseModel):
 # Unread Count
 # ---------------------------------------------------------------------------
 class UnreadCountResponse(BaseModel):
-    count: int
+    count: int  # Main badge count (push only)
+    push: int = 0
+    banner: int = 0
+    log: int = 0
+    total: int = 0  # push + banner + log
 
 
 # ---------------------------------------------------------------------------

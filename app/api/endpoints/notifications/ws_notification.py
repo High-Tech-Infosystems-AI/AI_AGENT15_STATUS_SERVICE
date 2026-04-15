@@ -69,22 +69,27 @@ async def ws_notifications(websocket: WebSocket, token: str = Query(...)):
     await ws_manager.connect(websocket, user_id)
 
     try:
-        # Send initial unread count
+        # Send initial unread counts (per-mode) + active banners snapshot
         db = SessionLocal()
         try:
-            cached = redis_manager.get_cached_unread_count(user_id)
-            if cached is not None:
-                count = cached
-            else:
-                count = store.get_unread_count(db, user_id)
-                redis_manager.set_cached_unread_count(user_id, count)
+            by_mode = store.get_unread_counts_by_mode(db, user_id)
+            redis_manager.set_cached_unread_count(user_id, by_mode["push"])
 
             # Send active banners snapshot — only banners this user is a recipient of
             active_banners = store.get_active_banners_for_user(db, user_id)
         finally:
             db.close()
 
-        await websocket.send_json({"type": "unread_count", "data": {"count": count}})
+        await websocket.send_json({
+            "type": "unread_count",
+            "data": {
+                "count": by_mode["push"],
+                "push": by_mode["push"],
+                "banner": by_mode["banner"],
+                "log": by_mode["log"],
+                "total": by_mode["total"],
+            },
+        })
         await websocket.send_json({
             "type": "banners",
             "action": "snapshot",
@@ -112,17 +117,20 @@ async def ws_notifications(websocket: WebSocket, token: str = Query(...)):
 
             action = msg.get("action")
 
+            def _publish_fresh():
+                """Recompute per-mode counts and publish to user's WS channel."""
+                redis_manager.invalidate_unread_count([user_id])
+                by_mode = store.get_unread_counts_by_mode(db, user_id)
+                redis_manager.set_cached_unread_count(user_id, by_mode["push"])
+                redis_manager.publish_unread_count(user_id, by_mode["push"], by_mode=by_mode)
+
             if action == "mark_read":
                 notification_id = msg.get("notification_id")
                 if notification_id:
                     db = SessionLocal()
                     try:
                         store.mark_notification_read(db, notification_id, user_id)
-                        redis_manager.invalidate_unread_count([user_id])
-                        new_count = store.get_unread_count(db, user_id)
-                        redis_manager.set_cached_unread_count(user_id, new_count)
-                        # Publish to Redis so ALL of this user's tabs update, not just this socket
-                        redis_manager.publish_unread_count(user_id, new_count)
+                        _publish_fresh()
                     finally:
                         db.close()
 
@@ -132,10 +140,7 @@ async def ws_notifications(websocket: WebSocket, token: str = Query(...)):
                     db = SessionLocal()
                     try:
                         store.mark_notification_unread(db, notification_id, user_id)
-                        redis_manager.invalidate_unread_count([user_id])
-                        new_count = store.get_unread_count(db, user_id)
-                        redis_manager.set_cached_unread_count(user_id, new_count)
-                        redis_manager.publish_unread_count(user_id, new_count)
+                        _publish_fresh()
                     finally:
                         db.close()
 
@@ -143,10 +148,7 @@ async def ws_notifications(websocket: WebSocket, token: str = Query(...)):
                 db = SessionLocal()
                 try:
                     store.mark_all_read(db, user_id)
-                    redis_manager.invalidate_unread_count([user_id])
-                    new_count = store.get_unread_count(db, user_id)
-                    redis_manager.set_cached_unread_count(user_id, new_count)
-                    redis_manager.publish_unread_count(user_id, new_count)
+                    _publish_fresh()
                 finally:
                     db.close()
 
