@@ -301,6 +301,75 @@ def get_admin_logs(
     )
 
 
+# --- Admin Stats + Management (test, no auth) ---
+
+@router.get("/notifications/admin/stats")
+def test_admin_stats(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    parsed_from = datetime.fromisoformat(date_from) if date_from else None
+    parsed_to = datetime.fromisoformat(date_to) if date_to else None
+    return store.get_admin_stats(db=db, date_from=parsed_from, date_to=parsed_to)
+
+
+@router.put("/notifications/admin/banners/{banner_id}/expiry")
+def test_change_banner_expiry(banner_id: int, expires_at: Optional[str] = Query(None),
+                               db: Session = Depends(get_db)):
+    parsed = datetime.fromisoformat(expires_at) if expires_at else None
+    banner = store.update_banner_expiry(db, banner_id, parsed)
+    if not banner:
+        raise HTTPException(status_code=404, detail="Banner not found")
+    redis_manager.invalidate_banner_cache()
+    if banner.is_active == 0:
+        recipient_ids = store.get_banner_recipient_ids(db, banner_id)
+        redis_manager.publish_banner("expire", {"id": banner_id, "recipient_ids": list(recipient_ids)})
+        if recipient_ids:
+            snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+            redis_manager.publish_banner_snapshots(snapshots)
+    return {"success": True, "banner_id": banner_id, "is_active": bool(banner.is_active),
+            "expires_at": banner.expires_at}
+
+
+@router.put("/notifications/admin/banners/{banner_id}/expire-now")
+def test_expire_banner_now(banner_id: int, db: Session = Depends(get_db)):
+    result = store.expire_banner_now(db, banner_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Banner not found")
+    banner, recipient_ids = result
+    redis_manager.publish_banner("expire", {"id": banner_id, "recipient_ids": list(recipient_ids)})
+    redis_manager.invalidate_banner_cache()
+    if recipient_ids:
+        snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+        redis_manager.publish_banner_snapshots(snapshots)
+    return {"success": True, "banner_id": banner_id, "recipients_notified": len(recipient_ids)}
+
+
+@router.delete("/notifications/admin/{notification_id}")
+def test_delete_notification(notification_id: int, db: Session = Depends(get_db)):
+    recipient_ids = store.get_notification_recipient_ids(db, notification_id)
+    notif = store.soft_delete_notification(db, notification_id)
+    if not notif:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    if notif.delivery_mode == "banner":
+        redis_manager.publish_banner("expire", {"id": notification_id, "recipient_ids": list(recipient_ids)})
+        redis_manager.invalidate_banner_cache()
+        if recipient_ids:
+            snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+            redis_manager.publish_banner_snapshots(snapshots)
+
+    if recipient_ids:
+        redis_manager.invalidate_unread_count(recipient_ids)
+        counts_by_mode = store.get_unread_counts_by_mode_bulk(db, recipient_ids)
+        for uid, counts in counts_by_mode.items():
+            redis_manager.publish_unread_count(uid, counts.get("push", 0), by_mode=counts)
+
+    return {"success": True, "notification_id": notification_id,
+            "delivery_mode": notif.delivery_mode, "recipients_notified": len(recipient_ids)}
+
+
 # --- Schedules ---
 
 @router.post("/notifications/schedule")

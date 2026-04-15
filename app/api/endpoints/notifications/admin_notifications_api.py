@@ -12,9 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
 from app.database_Layer.db_config import get_db
-from app.notification_layer import store
+from app.notification_layer import store, redis_manager
 from app.notification_layer.schemas import (
     AdminNotificationListResponse, AdminNotificationOut, PaginationDetails,
+    AdminStatsResponse, UpdateBannerExpiryRequest, BannerActionResponse,
+    DeleteNotificationResponse,
 )
 
 logger = logging.getLogger("app_logger")
@@ -93,4 +95,177 @@ async def get_admin_notification_logs(
             total_pages=total_pages,
             total_elements=total,
         ),
+    )
+
+
+def _require_admin(user_info: dict):
+    role_name = user_info.get("role_name", "")
+    if not check_admin_access(role_name):
+        raise HTTPException(status_code=403, detail="Only admin/super_admin can perform this action")
+
+
+def _parse_iso_date(v: Optional[str]) -> Optional[datetime]:
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(v)
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Admin Stats Summary
+# ---------------------------------------------------------------------------
+
+@router.get("/admin/stats", response_model=AdminStatsResponse)
+async def get_admin_stats(
+    date_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD). Inclusive."),
+    date_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD). Inclusive."),
+    user_info: dict = Depends(validate_token),
+    db=Depends(get_db),
+):
+    """
+    Summary stats for the admin dashboard:
+    - total_notifications_sent — active notifications in the date range
+    - notifications_scheduled — pending scheduled notifications
+    - engagement_rate — % of delivered recipients that read the notification
+    - delivery_success — % of notifications that reached at least one recipient
+    """
+    _require_admin(user_info)
+
+    parsed_from = _parse_iso_date(date_from)
+    parsed_to = _parse_iso_date(date_to)
+
+    stats = store.get_admin_stats(db=db, date_from=parsed_from, date_to=parsed_to)
+    return AdminStatsResponse(
+        total_notifications_sent=stats["total_notifications_sent"],
+        notifications_scheduled=stats["notifications_scheduled"],
+        engagement_rate=stats["engagement_rate"],
+        delivery_success=stats["delivery_success"],
+        total_recipients=stats["total_recipients"],
+        total_read=stats["total_read"],
+        date_from=parsed_from,
+        date_to=parsed_to,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Banner Management (admin/super_admin)
+# ---------------------------------------------------------------------------
+
+@router.put("/admin/banners/{banner_id}/expiry", response_model=BannerActionResponse)
+async def change_banner_expiry(
+    banner_id: int,
+    request: UpdateBannerExpiryRequest,
+    user_info: dict = Depends(validate_token),
+    db=Depends(get_db),
+):
+    """Update the expiry date of an existing banner notification."""
+    _require_admin(user_info)
+
+    banner = store.update_banner_expiry(db, banner_id, request.expires_at)
+    if not banner:
+        raise HTTPException(status_code=404, detail="Banner not found")
+
+    redis_manager.invalidate_banner_cache()
+
+    # If this change expired the banner immediately, notify recipients
+    if banner.is_active == 0:
+        recipient_ids = store.get_banner_recipient_ids(db, banner_id)
+        redis_manager.publish_banner("expire", {
+            "id": banner_id,
+            "recipient_ids": list(recipient_ids),
+        })
+        if recipient_ids:
+            snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+            redis_manager.publish_banner_snapshots(snapshots)
+
+    return BannerActionResponse(
+        success=True,
+        banner_id=banner_id,
+        is_active=bool(banner.is_active),
+        expires_at=banner.expires_at,
+        message="Banner expiry updated",
+    )
+
+
+@router.put("/admin/banners/{banner_id}/expire-now", response_model=BannerActionResponse)
+async def expire_banner_now(
+    banner_id: int,
+    user_info: dict = Depends(validate_token),
+    db=Depends(get_db),
+):
+    """Expire a banner immediately (one-click expire). Notifies all connected recipients."""
+    _require_admin(user_info)
+
+    result = store.expire_banner_now(db, banner_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Banner not found")
+
+    banner, recipient_ids = result
+
+    # Publish expire event + updated snapshot to each affected user
+    redis_manager.publish_banner("expire", {
+        "id": banner_id,
+        "recipient_ids": list(recipient_ids),
+    })
+    redis_manager.invalidate_banner_cache()
+    if recipient_ids:
+        snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+        redis_manager.publish_banner_snapshots(snapshots)
+
+    return BannerActionResponse(
+        success=True,
+        banner_id=banner_id,
+        is_active=False,
+        expires_at=banner.expires_at,
+        message=f"Banner expired. {len(recipient_ids)} users notified.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Delete Notification (soft delete)
+# ---------------------------------------------------------------------------
+
+@router.delete("/admin/{notification_id}", response_model=DeleteNotificationResponse)
+async def delete_notification(
+    notification_id: int,
+    user_info: dict = Depends(validate_token),
+    db=Depends(get_db),
+):
+    """Soft-delete a notification (sets is_active=0). Admin/super_admin only.
+    If it's a banner, connected recipients get an expire event immediately.
+    Unread caches for all recipients are invalidated.
+    """
+    _require_admin(user_info)
+
+    # Get recipient list BEFORE delete so we can notify them
+    recipient_ids = store.get_notification_recipient_ids(db, notification_id)
+
+    notif = store.soft_delete_notification(db, notification_id)
+    if not notif:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    # If banner, notify connected clients to remove it from the ticker
+    if notif.delivery_mode == "banner":
+        redis_manager.publish_banner("expire", {
+            "id": notification_id,
+            "recipient_ids": list(recipient_ids),
+        })
+        redis_manager.invalidate_banner_cache()
+        if recipient_ids:
+            snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+            redis_manager.publish_banner_snapshots(snapshots)
+
+    # Invalidate unread counts + push fresh counts to WS so deleted notif drops off
+    if recipient_ids:
+        redis_manager.invalidate_unread_count(recipient_ids)
+        counts_by_mode = store.get_unread_counts_by_mode_bulk(db, recipient_ids)
+        for uid, counts in counts_by_mode.items():
+            redis_manager.publish_unread_count(uid, counts.get("push", 0), by_mode=counts)
+
+    return DeleteNotificationResponse(
+        success=True,
+        notification_id=notification_id,
+        message=f"Notification {notification_id} deleted ({notif.delivery_mode})",
     )

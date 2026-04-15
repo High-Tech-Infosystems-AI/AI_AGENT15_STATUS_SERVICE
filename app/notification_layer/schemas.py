@@ -157,6 +157,46 @@ class AdminNotificationListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Admin Stats Summary
+# ---------------------------------------------------------------------------
+class AdminStatsResponse(BaseModel):
+    total_notifications_sent: int
+    notifications_scheduled: int
+    engagement_rate: float       # percentage
+    delivery_success: float      # percentage
+    total_recipients: int
+    total_read: int
+    date_from: Optional[datetime] = None
+    date_to: Optional[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# Banner Management
+# ---------------------------------------------------------------------------
+class UpdateBannerExpiryRequest(BaseModel):
+    expires_at: Optional[datetime] = Field(
+        None, description="New expiry datetime. Null = never expires."
+    )
+
+
+class BannerActionResponse(BaseModel):
+    success: bool
+    banner_id: int
+    is_active: bool
+    expires_at: Optional[datetime] = None
+    message: str
+
+
+# ---------------------------------------------------------------------------
+# Delete Notification
+# ---------------------------------------------------------------------------
+class DeleteNotificationResponse(BaseModel):
+    success: bool
+    notification_id: int
+    message: str
+
+
+# ---------------------------------------------------------------------------
 # Unread Count
 # ---------------------------------------------------------------------------
 class UnreadCountResponse(BaseModel):
