@@ -1054,3 +1054,151 @@ def get_jobs_with_deadline_approaching(db: Session, target_date) -> list:
         )
         .all()
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin Stats & Management
+# ---------------------------------------------------------------------------
+
+def get_admin_stats(
+    db: Session,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> dict:
+    """
+    Aggregate stats for the admin dashboard, optionally date-filtered.
+
+    Returns:
+        total_notifications_sent: int
+        notifications_scheduled: int   (pending schedules)
+        engagement_rate: float   (% of delivered recipients that read the notification)
+        delivery_success: float  (% of notifications that reached at least one recipient)
+    """
+    # --- Total notifications sent (all delivery modes, only active + in date range)
+    notif_q = db.query(Notification).filter(Notification.is_active == 1)
+    if date_from:
+        notif_q = notif_q.filter(Notification.created_at >= date_from)
+    if date_to:
+        notif_q = notif_q.filter(Notification.created_at <= date_to)
+    total_notifications_sent = notif_q.count()
+
+    # --- Pending scheduled notifications (date-filtered by scheduled_at if provided)
+    sched_q = db.query(NotificationSchedule).filter(NotificationSchedule.status == "pending")
+    if date_from:
+        sched_q = sched_q.filter(NotificationSchedule.scheduled_at >= date_from)
+    if date_to:
+        sched_q = sched_q.filter(NotificationSchedule.scheduled_at <= date_to)
+    notifications_scheduled = sched_q.count()
+
+    # --- Engagement rate: sum(read) / sum(recipients) * 100
+    recipients_stats = (
+        db.query(
+            func.count(NotificationRecipient.id).label("total"),
+            func.sum(case((NotificationRecipient.is_read == 1, 1), else_=0)).label("read"),
+        )
+        .join(Notification, Notification.id == NotificationRecipient.notification_id)
+        .filter(Notification.is_active == 1)
+    )
+    if date_from:
+        recipients_stats = recipients_stats.filter(Notification.created_at >= date_from)
+    if date_to:
+        recipients_stats = recipients_stats.filter(Notification.created_at <= date_to)
+    row = recipients_stats.one()
+    total_recipients = row.total or 0
+    total_read = int(row.read or 0)
+    engagement_rate = round((total_read / total_recipients) * 100, 2) if total_recipients > 0 else 0.0
+
+    # --- Delivery success: % of notifications that reached at least one recipient
+    if total_notifications_sent > 0:
+        # Subquery: notification IDs that have >=1 recipient
+        notif_with_recipients = (
+            db.query(NotificationRecipient.notification_id)
+            .distinct()
+            .subquery()
+        )
+        delivered_q = db.query(Notification).filter(
+            Notification.is_active == 1,
+            Notification.id.in_(db.query(notif_with_recipients.c.notification_id)),
+        )
+        if date_from:
+            delivered_q = delivered_q.filter(Notification.created_at >= date_from)
+        if date_to:
+            delivered_q = delivered_q.filter(Notification.created_at <= date_to)
+        delivered_count = delivered_q.count()
+        delivery_success = round((delivered_count / total_notifications_sent) * 100, 2)
+    else:
+        delivery_success = 0.0
+
+    return {
+        "total_notifications_sent": total_notifications_sent,
+        "notifications_scheduled": notifications_scheduled,
+        "engagement_rate": engagement_rate,
+        "delivery_success": delivery_success,
+        "total_recipients": total_recipients,
+        "total_read": total_read,
+    }
+
+
+def update_banner_expiry(
+    db: Session, banner_id: int, new_expires_at: Optional[datetime]
+) -> Optional[Notification]:
+    """Update the expiry date of an existing banner. Returns the banner or None if not found."""
+    banner = (
+        db.query(Notification)
+        .filter(
+            Notification.id == banner_id,
+            Notification.delivery_mode == "banner",
+        )
+        .first()
+    )
+    if not banner:
+        return None
+    banner.expires_at = new_expires_at
+    # If expiry is in the past, also deactivate
+    if new_expires_at and new_expires_at <= datetime.utcnow():
+        banner.is_active = 0
+    else:
+        banner.is_active = 1
+    db.commit()
+    db.refresh(banner)
+    return banner
+
+
+def expire_banner_now(db: Session, banner_id: int) -> Optional[Tuple[Notification, List[int]]]:
+    """Expire a banner immediately. Returns (banner, recipient_ids) or None if not found."""
+    banner = (
+        db.query(Notification)
+        .filter(
+            Notification.id == banner_id,
+            Notification.delivery_mode == "banner",
+        )
+        .first()
+    )
+    if not banner:
+        return None
+    banner.is_active = 0
+    banner.expires_at = datetime.utcnow()
+    recipient_ids = get_banner_recipient_ids(db, banner_id)
+    db.commit()
+    return banner, recipient_ids
+
+
+def get_notification_recipient_ids(db: Session, notification_id: int) -> List[int]:
+    """Return the list of user_ids who were recipients of this notification."""
+    rows = (
+        db.query(NotificationRecipient.user_id)
+        .filter(NotificationRecipient.notification_id == notification_id)
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+def soft_delete_notification(db: Session, notification_id: int) -> Optional[Notification]:
+    """Soft-delete a notification (sets is_active=0). Returns the notification or None."""
+    notif = db.query(Notification).filter(Notification.id == notification_id).first()
+    if not notif:
+        return None
+    notif.is_active = 0
+    db.commit()
+    db.refresh(notif)
+    return notif
