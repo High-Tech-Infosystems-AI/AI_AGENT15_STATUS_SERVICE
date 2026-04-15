@@ -515,6 +515,7 @@ def get_admin_notification_logs(
 # ---------------------------------------------------------------------------
 
 def get_unread_count(db: Session, user_id: int) -> int:
+    # Logs are audit-trail only — they must NOT inflate the notification badge.
     return (
         db.query(func.count(NotificationRecipient.id))
         .join(Notification, Notification.id == NotificationRecipient.notification_id)
@@ -522,6 +523,7 @@ def get_unread_count(db: Session, user_id: int) -> int:
             NotificationRecipient.user_id == user_id,
             NotificationRecipient.is_read == 0,
             Notification.is_active == 1,
+            Notification.delivery_mode != "log",
         )
         .scalar()
     ) or 0
@@ -538,6 +540,7 @@ def get_unread_counts_bulk(db: Session, user_ids: List[int]) -> dict:
             NotificationRecipient.user_id.in_(user_ids),
             NotificationRecipient.is_read == 0,
             Notification.is_active == 1,
+            Notification.delivery_mode != "log",
         )
         .group_by(NotificationRecipient.user_id)
         .all()
@@ -577,6 +580,20 @@ def mark_all_read(db: Session, user_id: int) -> int:
     )
     db.commit()
     return count
+
+
+def mark_notification_unread(db: Session, notification_id: int, user_id: int) -> bool:
+    """Mark a notification as unread for the given user. Returns True if updated."""
+    recipient = db.query(NotificationRecipient).filter(
+        NotificationRecipient.notification_id == notification_id,
+        NotificationRecipient.user_id == user_id,
+    ).first()
+    if not recipient:
+        return False
+    recipient.is_read = 0
+    recipient.read_at = None
+    db.commit()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +680,55 @@ def get_active_banners_for_user(db: Session, user_id: int) -> list:
             "metadata": meta,
         })
     return results
+
+
+def get_active_banners_for_users_bulk(db: Session, user_ids: List[int]) -> dict:
+    """
+    Bulk query: returns {user_id: [banner_dict, ...]} for each user_id provided.
+    One SQL round-trip joining notifications + notification_recipients,
+    then grouped in Python. Used to publish per-user banner snapshots after
+    create/expire events.
+    """
+    if not user_ids:
+        return {}
+
+    rows = (
+        db.query(NotificationRecipient.user_id, Notification)
+        .join(Notification, Notification.id == NotificationRecipient.notification_id)
+        .filter(
+            Notification.delivery_mode == "banner",
+            Notification.is_active == 1,
+            NotificationRecipient.user_id.in_(user_ids),
+            or_(
+                Notification.expires_at.is_(None),
+                Notification.expires_at > datetime.utcnow(),
+            ),
+        )
+        .order_by(Notification.created_at.desc())
+        .all()
+    )
+
+    result = {uid: [] for uid in user_ids}
+    for uid, b in rows:
+        meta = None
+        if b.extra_metadata:
+            try:
+                meta = json.loads(b.extra_metadata)
+            except (json.JSONDecodeError, TypeError):
+                meta = b.extra_metadata
+        result.setdefault(uid, []).append({
+            "id": b.id,
+            "title": b.title,
+            "message": b.message,
+            "priority": b.priority,
+            "domain_type": b.domain_type,
+            "visibility": b.visibility,
+            "target_type": b.target_type,
+            "expires_at": str(b.expires_at) if b.expires_at else None,
+            "created_at": str(b.created_at) if b.created_at else None,
+            "metadata": meta,
+        })
+    return result
 
 
 def get_banner_recipient_ids(db: Session, banner_id: int) -> List[int]:

@@ -27,7 +27,10 @@ class Notification(Base):
     title = Column(String(255), nullable=False)
     message = Column(Text, nullable=False)
 
-    # Delivery: push | banner
+    # Delivery: push | banner | log
+    # - push   → WS type "notification" (shown in notification feed, counts toward unread)
+    # - banner → WS type "banner"       (top-of-page announcement, active banners API)
+    # - log    → WS type "log"          (audit trail only, excluded from unread count)
     delivery_mode = Column(String(20), nullable=False)
 
     # Domain type for filtering: login, jobs, ai, candidate, security, system, user_management
@@ -146,7 +149,17 @@ class NotificationEvent(Base):
     target_roles = Column(String(255), nullable=True)       # csv roles (when target_type=role)
     source_service = Column(String(50), nullable=False)
     priority = Column(String(20), nullable=False, server_default="medium")
+    # push | banner | log (see Notification.delivery_mode above)
     delivery_mode = Column(String(20), nullable=False, server_default="push")
+
+    # Dual-delivery: when also_banner=1, a second banner notification is created alongside the primary push.
+    # If banner_* fields are NULL, the default templates/target are reused for the banner.
+    also_banner = Column(TINYINT(1), nullable=False, server_default="0")
+    banner_title_template = Column(String(255), nullable=True)
+    banner_message_template = Column(Text, nullable=True)
+    banner_target_type = Column(String(20), nullable=True)       # role | job | user | all
+    banner_target_roles = Column(String(255), nullable=True)
+    banner_expires_hours = Column(Integer, nullable=True)        # default handled in event_handler
 
     is_enabled = Column(TINYINT(1), nullable=False, server_default="1")
     created_at = Column(TIMESTAMP, nullable=False, server_default=func.now())

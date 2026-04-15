@@ -1,6 +1,10 @@
 -- ============================================================================
 -- Notification Service Tables — Migration Script
 -- Run against the same MySQL database used by the Status Service (ats_staging)
+--
+-- For FRESH installs: run this file then v2_delivery_modes_and_banners.sql
+--   to add log/dual-banner columns and re-classify seed events.
+-- For EXISTING installs upgrading to v2: just run v2_delivery_modes_and_banners.sql.
 -- ============================================================================
 
 -- 1. Core notifications table
@@ -8,7 +12,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     id INT AUTO_INCREMENT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
     message TEXT NOT NULL,
-    delivery_mode VARCHAR(20) NOT NULL COMMENT 'push | banner',
+    delivery_mode VARCHAR(20) NOT NULL COMMENT 'push | banner | log',
     domain_type VARCHAR(30) NOT NULL COMMENT 'login | jobs | ai | candidate | security | system | user_management',
     visibility VARCHAR(20) NOT NULL COMMENT 'personal | public | restricted',
     priority VARCHAR(20) NOT NULL DEFAULT 'medium' COMMENT 'low | medium | high | critical',
