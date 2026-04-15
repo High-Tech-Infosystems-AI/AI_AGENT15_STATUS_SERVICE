@@ -323,6 +323,15 @@ def get_user_notifications(
         )
     )
 
+    # By default, exclude 'log' notifications from the user-facing list.
+    # Logs are audit-trail only — they must NOT appear in the bell/list either,
+    # otherwise the list shows "unread" items that don't increment the badge
+    # (get_unread_count also excludes logs). Honor explicit delivery_mode filters.
+    if delivery_mode:
+        query = query.filter(Notification.delivery_mode == delivery_mode)
+    else:
+        query = query.filter(Notification.delivery_mode != "log")
+
     # Filters
     if domain_type:
         types = [t.strip() for t in domain_type.split(",")]
@@ -339,13 +348,12 @@ def get_user_notifications(
         query = query.filter(Notification.priority.in_(pris))
     if is_read is not None:
         query = query.filter(NotificationRecipient.is_read == (1 if is_read else 0))
-    if delivery_mode:
-        query = query.filter(Notification.delivery_mode == delivery_mode)
 
     total = query.count()
 
-    # Unread count (for this user, unfiltered)
-    unread = (
+    # Unread count scoped to the same filter set as the list
+    # (so list and unread are always consistent).
+    unread_query = (
         db.query(func.count(NotificationRecipient.id))
         .join(Notification, Notification.id == NotificationRecipient.notification_id)
         .filter(
@@ -353,8 +361,15 @@ def get_user_notifications(
             NotificationRecipient.is_read == 0,
             Notification.is_active == 1,
         )
-        .scalar()
-    ) or 0
+    )
+    if delivery_mode:
+        unread_query = unread_query.filter(Notification.delivery_mode == delivery_mode)
+    else:
+        # Default list excludes logs → unread count here matches
+        unread_query = unread_query.filter(Notification.delivery_mode != "log")
+    if domain_type:
+        unread_query = unread_query.filter(Notification.domain_type.in_([t.strip() for t in domain_type.split(",")]))
+    unread = unread_query.scalar() or 0
 
     # Sorting
     sort_col = getattr(Notification, sort_by, Notification.created_at)
@@ -515,7 +530,9 @@ def get_admin_notification_logs(
 # ---------------------------------------------------------------------------
 
 def get_unread_count(db: Session, user_id: int) -> int:
-    # Logs are audit-trail only — they must NOT inflate the notification badge.
+    """Unread count for the main notification badge (push only).
+    Logs and banners have their own badges via get_unread_counts_by_mode().
+    """
     return (
         db.query(func.count(NotificationRecipient.id))
         .join(Notification, Notification.id == NotificationRecipient.notification_id)
@@ -529,8 +546,33 @@ def get_unread_count(db: Session, user_id: int) -> int:
     ) or 0
 
 
+def get_unread_counts_by_mode(db: Session, user_id: int) -> dict:
+    """Return per-delivery-mode unread counts for a user.
+    {"push": N, "banner": N, "log": N, "total": N}
+    """
+    rows = (
+        db.query(Notification.delivery_mode, func.count(NotificationRecipient.id))
+        .join(NotificationRecipient, Notification.id == NotificationRecipient.notification_id)
+        .filter(
+            NotificationRecipient.user_id == user_id,
+            NotificationRecipient.is_read == 0,
+            Notification.is_active == 1,
+        )
+        .group_by(Notification.delivery_mode)
+        .all()
+    )
+    counts = {"push": 0, "banner": 0, "log": 0}
+    total = 0
+    for mode, cnt in rows:
+        counts[mode] = cnt
+        total += cnt
+    counts["total"] = total
+    return counts
+
+
 def get_unread_counts_bulk(db: Session, user_ids: List[int]) -> dict:
-    """Return {user_id: unread_count} for a batch of users in a single query."""
+    """Return {user_id: unread_count} for a batch of users in a single query.
+    Count excludes logs (matches the main notification badge)."""
     if not user_ids:
         return {}
     rows = (
@@ -549,6 +591,30 @@ def get_unread_counts_bulk(db: Session, user_ids: List[int]) -> dict:
     for uid, cnt in rows:
         counts[uid] = cnt
     return counts
+
+
+def get_unread_counts_by_mode_bulk(db: Session, user_ids: List[int]) -> dict:
+    """Return {user_id: {"push": N, "banner": N, "log": N, "total": N}} for a batch."""
+    if not user_ids:
+        return {}
+    rows = (
+        db.query(NotificationRecipient.user_id, Notification.delivery_mode,
+                 func.count(NotificationRecipient.id))
+        .join(Notification, Notification.id == NotificationRecipient.notification_id)
+        .filter(
+            NotificationRecipient.user_id.in_(user_ids),
+            NotificationRecipient.is_read == 0,
+            Notification.is_active == 1,
+        )
+        .group_by(NotificationRecipient.user_id, Notification.delivery_mode)
+        .all()
+    )
+    result = {uid: {"push": 0, "banner": 0, "log": 0, "total": 0} for uid in user_ids}
+    for uid, mode, cnt in rows:
+        if uid in result:
+            result[uid][mode] = cnt
+            result[uid]["total"] += cnt
+    return result
 
 
 # ---------------------------------------------------------------------------

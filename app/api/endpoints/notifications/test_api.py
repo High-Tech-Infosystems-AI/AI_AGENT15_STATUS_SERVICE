@@ -127,21 +127,27 @@ def get_notifications(
 
 @router.get("/notifications/unread-count")
 def get_unread_count(user_id: int = Query(1), db: Session = Depends(get_db)):
-    cached = redis_manager.get_cached_unread_count(user_id)
-    if cached is not None:
-        return UnreadCountResponse(count=cached)
-    count = store.get_unread_count(db, user_id)
-    redis_manager.set_cached_unread_count(user_id, count)
-    return UnreadCountResponse(count=count)
+    by_mode = store.get_unread_counts_by_mode(db, user_id)
+    redis_manager.set_cached_unread_count(user_id, by_mode["push"])
+    return UnreadCountResponse(
+        count=by_mode["push"],
+        push=by_mode["push"],
+        banner=by_mode["banner"],
+        log=by_mode["log"],
+        total=by_mode["total"],
+    )
 
 
 def _push_fresh_count(db: Session, user_id: int) -> int:
-    """Recompute unread count, refresh cache, publish to WS channel."""
+    """Recompute per-mode unread counts, refresh cache, publish to WS channel.
+    Returns the main (push) count.
+    """
     redis_manager.invalidate_unread_count([user_id])
-    count = store.get_unread_count(db, user_id)
-    redis_manager.set_cached_unread_count(user_id, count)
-    redis_manager.publish_unread_count(user_id, count)
-    return count
+    by_mode = store.get_unread_counts_by_mode(db, user_id)
+    main_count = by_mode["push"]
+    redis_manager.set_cached_unread_count(user_id, main_count)
+    redis_manager.publish_unread_count(user_id, main_count, by_mode=by_mode)
+    return main_count
 
 
 @router.put("/notifications/{notification_id}/read")
@@ -354,14 +360,23 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
     await websocket.accept()
 
     try:
-        # Send initial unread count + active banners snapshot (per-user)
+        # Send initial unread counts (per-mode) + active banners snapshot
         db = next(get_db())
         try:
-            count = store.get_unread_count(db, user_id)
+            by_mode = store.get_unread_counts_by_mode(db, user_id)
             active_banners = store.get_active_banners_for_user(db, user_id)
         finally:
             db.close()
-        await websocket.send_json({"type": "unread_count", "data": {"count": count}})
+        await websocket.send_json({
+            "type": "unread_count",
+            "data": {
+                "count": by_mode["push"],
+                "push": by_mode["push"],
+                "banner": by_mode["banner"],
+                "log": by_mode["log"],
+                "total": by_mode["total"],
+            },
+        })
         await websocket.send_json({
             "type": "banners",
             "action": "snapshot",
@@ -416,9 +431,13 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
                                 "data": payload.get("data", []),
                             })
                         elif isinstance(payload, dict) and payload.get("_meta") == "unread_count":
+                            data_out = {"count": payload.get("count", 0)}
+                            for k in ("push", "banner", "log", "total"):
+                                if k in payload:
+                                    data_out[k] = payload[k]
                             await websocket.send_json({
                                 "type": "unread_count",
-                                "data": {"count": payload.get("count", 0)},
+                                "data": data_out,
                             })
                         else:
                             await websocket.send_json({"type": "notification", "data": payload})
@@ -433,17 +452,19 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
                     data = json.loads(raw)
                     action = data.get("action")
 
+                    def _publish_fresh_for_ws(_db):
+                        redis_manager.invalidate_unread_count([user_id])
+                        by_mode = store.get_unread_counts_by_mode(_db, user_id)
+                        redis_manager.set_cached_unread_count(user_id, by_mode["push"])
+                        redis_manager.publish_unread_count(user_id, by_mode["push"], by_mode=by_mode)
+
                     if action == "mark_read":
                         nid = data.get("notification_id")
                         if nid:
                             db = next(get_db())
                             try:
                                 store.mark_notification_read(db, nid, user_id)
-                                redis_manager.invalidate_unread_count([user_id])
-                                new_count = store.get_unread_count(db, user_id)
-                                redis_manager.set_cached_unread_count(user_id, new_count)
-                                # Publish to Redis so all tabs of this user update
-                                redis_manager.publish_unread_count(user_id, new_count)
+                                _publish_fresh_for_ws(db)
                             finally:
                                 db.close()
                     elif action == "mark_unread":
@@ -452,20 +473,14 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
                             db = next(get_db())
                             try:
                                 store.mark_notification_unread(db, nid, user_id)
-                                redis_manager.invalidate_unread_count([user_id])
-                                new_count = store.get_unread_count(db, user_id)
-                                redis_manager.set_cached_unread_count(user_id, new_count)
-                                redis_manager.publish_unread_count(user_id, new_count)
+                                _publish_fresh_for_ws(db)
                             finally:
                                 db.close()
                     elif action == "mark_all_read":
                         db = next(get_db())
                         try:
                             store.mark_all_read(db, user_id)
-                            redis_manager.invalidate_unread_count([user_id])
-                            new_count = store.get_unread_count(db, user_id)
-                            redis_manager.set_cached_unread_count(user_id, new_count)
-                            redis_manager.publish_unread_count(user_id, new_count)
+                            _publish_fresh_for_ws(db)
                         finally:
                             db.close()
                     elif action == "ping":
