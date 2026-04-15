@@ -150,9 +150,14 @@ class NotificationWSManager:
                             user_id = int(channel.split(":")[-1])
                             # Distinguish meta messages from notifications
                             if isinstance(payload, dict) and payload.get("_meta") == "unread_count":
+                                data_out = {"count": payload.get("count", 0)}
+                                # Forward per-mode counts if present
+                                for k in ("push", "banner", "log", "total"):
+                                    if k in payload:
+                                        data_out[k] = payload[k]
                                 await self.send_to_user(user_id, {
                                     "type": "unread_count",
-                                    "data": {"count": payload.get("count", 0)},
+                                    "data": data_out,
                                 })
                             elif isinstance(payload, dict) and payload.get("_meta") == "banners_snapshot":
                                 # Full per-user active-banner snapshot (sent on create/expire)
