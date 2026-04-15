@@ -149,6 +149,13 @@ async def ws_notifications(websocket: WebSocket, user_id: int = 1):
                                 "type": "unread_count",
                                 "data": {"count": payload.get("count", 0)},
                             })
+                        elif isinstance(payload, dict) and payload.get("_meta") == "banners_snapshot":
+                            # Per-user banner snapshot (sent on banner create/expire)
+                            await websocket.send_json({
+                                "type": "banners",
+                                "action": "snapshot",
+                                "data": payload.get("data", []),
+                            })
                         else:
                             # Notification — may include unread_count inline
                             await websocket.send_json({"type": "notification", "data": payload})
