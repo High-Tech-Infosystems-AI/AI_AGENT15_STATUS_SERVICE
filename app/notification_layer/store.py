@@ -965,6 +965,10 @@ def get_schedules(
     return schedules, total
 
 
+def get_schedule_by_id(db: Session, schedule_id: int) -> Optional[NotificationSchedule]:
+    return db.query(NotificationSchedule).filter(NotificationSchedule.id == schedule_id).first()
+
+
 def cancel_schedule(db: Session, schedule_id: int) -> bool:
     sched = db.query(NotificationSchedule).filter(
         NotificationSchedule.id == schedule_id,
@@ -975,6 +979,23 @@ def cancel_schedule(db: Session, schedule_id: int) -> bool:
     sched.status = "cancelled"
     db.commit()
     return True
+
+
+def update_schedule(db: Session, schedule_id: int, updates: dict) -> Optional[NotificationSchedule]:
+    """Update a pending schedule and return it; None if not editable/not found."""
+    sched = db.query(NotificationSchedule).filter(
+        NotificationSchedule.id == schedule_id,
+        NotificationSchedule.status == "pending",
+    ).first()
+    if not sched:
+        return None
+
+    for field_name, field_value in updates.items():
+        setattr(sched, field_name, field_value)
+
+    db.commit()
+    db.refresh(sched)
+    return sched
 
 
 def get_pending_schedules(db: Session, now: datetime) -> List[NotificationSchedule]:

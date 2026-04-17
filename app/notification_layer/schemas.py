@@ -233,6 +233,21 @@ class CreateScheduleRequest(BaseModel):
     repeat_until: Optional[datetime] = None
 
 
+class UpdateScheduleRequest(BaseModel):
+    title: Optional[str] = Field(None, max_length=255)
+    message: Optional[str] = None
+    delivery_mode: Optional[str] = None
+    domain_type: Optional[str] = None
+    visibility: Optional[str] = None
+    priority: Optional[str] = None
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    metadata: Optional[dict] = None
+    scheduled_at: Optional[datetime] = None
+    repeat_type: Optional[str] = None
+    repeat_until: Optional[datetime] = None
+
+
 class ScheduleOut(BaseModel):
     id: int
     title: str
