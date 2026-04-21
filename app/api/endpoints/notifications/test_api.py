@@ -512,7 +512,16 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
                                 "data": data_out,
                             })
                         else:
-                            await websocket.send_json({"type": "notification", "data": payload})
+                            # Route by delivery_mode so client can distinguish
+                            # notification / log / banner messages.
+                            mode = payload.get("delivery_mode") if isinstance(payload, dict) else None
+                            if mode == "log":
+                                msg_type = "log"
+                            elif mode == "banner":
+                                msg_type = "banner"
+                            else:
+                                msg_type = "notification"
+                            await websocket.send_json({"type": msg_type, "data": payload})
                     except Exception:
                         pass
                 await asyncio.sleep(0.1)

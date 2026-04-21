@@ -600,13 +600,17 @@ function connectWS() {
         const n = msg.data;
         showToast(n.title, n.message, n.priority);
         if (currentTab === 'notifications') fetchNotifications();
-        // unread_count may be embedded inline
         if (n && typeof n.unread_count === 'number') updateUnread(n.unread_count);
+      } else if (msg.type === 'log') {
+        // Log / audit-trail event — don't bump the badge, just toast + refresh
+        const n = msg.data;
+        showToast('[LOG] ' + (n.title || ''), n.message || '', 'low');
+        if (currentTab === 'admin') loadAdminLogs();
       } else if (msg.type === 'banners') {
-        // Initial snapshot on WS connect
+        // Initial snapshot on WS connect or after banner create/expire
         applyBannerEvent(msg.action || 'snapshot', msg.data);
       } else if (msg.type === 'banner') {
-        // Live event: create or expire
+        // Live delta event: create or expire
         applyBannerEvent(msg.action, msg.data);
       } else if (msg.type === 'unread_count') {
         updateUnread(msg.data.count);
