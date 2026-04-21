@@ -21,6 +21,9 @@ NO_AUTH_PATHS = [
     "/ws/notifications",
     "/status/ws/notifications",
     "/status/notifications/ws/notifications",
+    # Event trigger — called by other microservices without JWT (signup, login, etc.)
+    "/notifications/event",
+    "/status/notifications/event",
     "/test",
     "/test/",
     "/test/users",

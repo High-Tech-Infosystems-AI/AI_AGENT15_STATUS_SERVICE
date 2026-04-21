@@ -160,13 +160,29 @@ async def ws_notifications(websocket: WebSocket, user_id: int = 1):
                                 "data": payload.get("data", []),
                             })
                         else:
-                            # Notification — may include unread_count inline
-                            await websocket.send_json({"type": "notification", "data": payload})
-                            if isinstance(payload, dict) and "unread_count" in payload:
-                                await websocket.send_json({
-                                    "type": "unread_count",
-                                    "data": {"count": payload["unread_count"]},
-                                })
+                            # Route by delivery_mode so the client can tell apart
+                            # notification / log / banner messages.
+                            mode = payload.get("delivery_mode") if isinstance(payload, dict) else None
+                            if mode == "log":
+                                msg_type = "log"
+                            elif mode == "banner":
+                                msg_type = "banner"
+                            else:
+                                msg_type = "notification"
+                            await websocket.send_json({"type": msg_type, "data": payload})
+
+                            # Inline unread_count breakdown, if present
+                            if isinstance(payload, dict):
+                                count_fields = {}
+                                for k in ("count", "push", "banner", "log", "total"):
+                                    # The notification payload uses "unread_count" for the main count
+                                    pass
+                                if "unread_count" in payload or "push" in payload:
+                                    cd = {"count": payload.get("unread_count", payload.get("push", 0))}
+                                    for k in ("push", "banner", "log", "total"):
+                                        if k in payload:
+                                            cd[k] = payload[k]
+                                    await websocket.send_json({"type": "unread_count", "data": cd})
                     except Exception:
                         pass
                 await asyncio.sleep(0.1)
