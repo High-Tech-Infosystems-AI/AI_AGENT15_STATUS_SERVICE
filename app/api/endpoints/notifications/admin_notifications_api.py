@@ -37,6 +37,7 @@ async def get_admin_notification_logs(
     company_id: Optional[str] = Query(None, description="Comma-separated company IDs — matches metadata.company_id"),
     created_by: Optional[str] = Query(None, description="Comma-separated admin user IDs who created the notifications"),
     delivery_mode: Optional[str] = Query(None, description="Comma-separated: push,banner,log"),
+    include_not_received: bool = Query(False, description="Slow — resolves intended recipients (N+1). Default off."),
     page: int = Query(1, ge=1),
     limit: int = Query(25, ge=1, le=100),
     sort_by: str = Query("created_at"),
@@ -83,6 +84,7 @@ async def get_admin_notification_logs(
         delivery_mode=delivery_mode,
         sort_by=sort_by,
         sort_order=sort_order,
+        include_not_received=include_not_received,
     )
 
     total_pages = math.ceil(total / limit) if total > 0 else 1

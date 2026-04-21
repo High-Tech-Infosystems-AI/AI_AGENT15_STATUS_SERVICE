@@ -88,7 +88,18 @@ class NotificationWSManager:
         self._subscriber_task = asyncio.create_task(self._redis_listener())
 
     async def _redis_listener(self) -> None:
-        """Long-running coroutine: listens to Redis and dispatches to WebSockets."""
+        """Long-running coroutine: listens to Redis and dispatches to WebSockets.
+
+        The sync `pubsub.get_message()` call is blocking — we run it in a
+        thread executor via `asyncio.to_thread` so it doesn't freeze the
+        FastAPI event loop (which would slow down every API request).
+        """
+        loop = asyncio.get_event_loop()
+
+        def _poll(pubsub_client):
+            """Blocking poll — runs in thread executor."""
+            return pubsub_client.get_message(ignore_subscribe_messages=True, timeout=0.5)
+
         while True:
             try:
                 r = redis_manager.get_pubsub_redis()
@@ -96,16 +107,15 @@ class NotificationWSManager:
 
                 # Subscribe to broadcast + banner channels
                 pubsub.subscribe("notif:broadcast", "notif:banner")
-
-                # We use pattern subscribe for per-user channels
+                # Pattern subscribe for per-user channels
                 pubsub.psubscribe("notif:user:*")
 
                 logger.info("Redis Pub/Sub listener started for notifications")
 
                 while True:
-                    message = pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    # Run the blocking call in a thread so the event loop keeps running
+                    message = await loop.run_in_executor(None, _poll, pubsub)
                     if message is None:
-                        await asyncio.sleep(0.1)
                         continue
 
                     channel = message.get("channel", "")

@@ -21,23 +21,48 @@ logger = logging.getLogger("app_logger")
 router = APIRouter()
 
 
-def _validate_ws_token(token: str) -> dict:
-    """Validate JWT token for WebSocket connection (sync, no Depends)."""
-    import requests
+async def _validate_ws_token(token: str) -> dict:
+    """Validate JWT token for WebSocket connection (async + Redis-cached).
+    Reuses the same cache as REST auth_utils.validate_token.
+    """
+    import hashlib, json as _json
+    import httpx
     from app.core import settings
+    from app.notification_layer import redis_manager
 
+    cache_key = "auth:token:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+
+    # Cache lookup
     try:
-        response = requests.post(
-            f"{settings.AUTH_SERVICE_URL}",
-            params={"token": token},
-            headers={"accept": "application/json"},
-            timeout=5,
-        )
+        cached = redis_manager.get_notification_redis().get(cache_key)
+        if cached:
+            info = _json.loads(cached)
+            return info
+    except Exception:
+        pass
+
+    # Auth service call (async, non-blocking)
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.post(
+                f"{settings.AUTH_SERVICE_URL}",
+                params={"token": token},
+                headers={"accept": "application/json"},
+            )
         if response.status_code != 200:
             return None
         info = response.json()
         if not info.get("user_id"):
             return None
+        # Cache for future requests
+        try:
+            redis_manager.get_notification_redis().setex(cache_key, 60, _json.dumps({
+                "user_id": info["user_id"],
+                "role_id": info.get("role_id"),
+                "role_name": info.get("role_name"),
+            }))
+        except Exception:
+            pass
         return info
     except Exception as e:
         logger.error("WS token validation error: %s", e)
@@ -58,7 +83,7 @@ async def ws_notifications(websocket: WebSocket, token: str = Query(...)):
     Notifications are delivered via Redis Pub/Sub → ws_manager fan-out.
     """
     # Validate token
-    user_info = _validate_ws_token(token)
+    user_info = await _validate_ws_token(token)
     if not user_info:
         await websocket.close(code=4001, reason="Invalid or expired token")
         return

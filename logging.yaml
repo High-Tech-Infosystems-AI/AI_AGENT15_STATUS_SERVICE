@@ -21,9 +21,19 @@ handlers:
 loggers:
     app_logger:
         handlers: [console, file]
-        level: DEBUG
+        level: INFO
+        propagate: False
+    # Silence noisy HTTP client debug logs on hot paths
+    urllib3:
+        level: WARNING
+        propagate: False
+    httpx:
+        level: WARNING
+        propagate: False
+    httpcore:
+        level: WARNING
         propagate: False
 
 root:
     handlers: [console]
-    level: DEBUG
+    level: INFO
