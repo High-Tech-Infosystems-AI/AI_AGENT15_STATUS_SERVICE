@@ -26,6 +26,30 @@ logger = logging.getLogger("app_logger")
 DEFAULT_BANNER_EXPIRES_HOURS = 24
 
 
+def _banner_expiry(event_config_hours: Optional[int] = None) -> datetime:
+    """
+    Compute banner expiry time for auto-generated banners.
+
+    Rule: all auto-generated banners expire at the NEXT midnight UTC
+    (i.e. end of the current day). So every day at 00:00 UTC, yesterday's
+    banners are gone — fresh start daily.
+
+    If `event_config_hours` is provided AND > 24, we honor that (for long-lived
+    banners like deadline_exceeded that may need 48/72h). Otherwise → next midnight.
+    """
+    now = datetime.utcnow()
+    # Next midnight UTC
+    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if event_config_hours and event_config_hours > 24:
+        # Longer TTL requested — compute from now + hours, but still floor to midnight
+        target = now + timedelta(hours=event_config_hours)
+        # Align to that day's midnight
+        return (target + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    return next_midnight
+
+
 def _render_template(template: str, data: dict) -> str:
     """Render a template string with data dict using str.format_map with fallback."""
     try:
@@ -194,8 +218,8 @@ def handle_event(
 
     primary_expires = None
     if event_config.delivery_mode == "banner":
-        hours = event_config.banner_expires_hours or DEFAULT_BANNER_EXPIRES_HOURS
-        primary_expires = datetime.utcnow() + timedelta(hours=hours)
+        # Auto-banners expire at next midnight UTC (fresh start every day)
+        primary_expires = _banner_expiry(event_config.banner_expires_hours)
 
     try:
         primary_notif, primary_user_ids = _create_and_publish(
@@ -261,8 +285,7 @@ def handle_event(
                 b_target_type_cfg, b_target_roles_cfg, data,
             )
 
-            hours = event_config.banner_expires_hours or DEFAULT_BANNER_EXPIRES_HOURS
-            banner_expires = datetime.utcnow() + timedelta(hours=hours)
+            banner_expires = _banner_expiry(event_config.banner_expires_hours)
 
             banner_notif, banner_user_ids = _create_and_publish(
                 db,
