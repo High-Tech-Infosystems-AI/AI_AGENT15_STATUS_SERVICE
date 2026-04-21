@@ -441,6 +441,7 @@ def get_admin_notification_logs(
     delivery_mode: Optional[str] = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
+    include_not_received: bool = False,  # expensive N+1 resolution, opt-in
 ) -> Tuple[list, int]:
     """
     Admin view — returns all notifications with recipient stats.
@@ -556,20 +557,6 @@ def get_admin_notification_logs(
         for uid, uname in db.query(User.id, User.name).filter(User.id.in_(creator_ids)).all():
             creator_names[uid] = uname
 
-    # Resolve "intended" user set for each notification (who SHOULD have received it).
-    # We compare against the actual recipients to find users who didn't get it
-    # (e.g. because they were deleted/disabled after the notification was sent).
-    def _intended_users(notif) -> List[int]:
-        try:
-            return resolve_target_user_ids(
-                db,
-                notif.target_type,
-                notif.target_id,
-                include_admins=(notif.target_type != "all"),
-            )
-        except Exception:
-            return []
-
     results = []
     for notif in notifications:
         recipients = recipients_by_notif.get(notif.id, [])
@@ -578,15 +565,22 @@ def get_admin_notification_logs(
         read_users = [r for r in recipients if r["is_read"]]
         unread_users = [r for r in recipients if not r["is_read"]]
 
-        # Not-received: intended recipients who are NOT in notification_recipients
-        # (user was deleted/disabled between resolution and now, or resolution failed).
-        recipient_ids_set = {r["user_id"] for r in recipients}
-        intended_ids = set(_intended_users(notif))
-        not_received_ids = list(intended_ids - recipient_ids_set)
+        # "Not received" resolution is expensive (runs role/job resolution per notification).
+        # Only compute it when explicitly requested via ?include_not_received=true.
         not_received_users = []
-        if not_received_ids:
-            nr_rows = db.query(User.id, User.name).filter(User.id.in_(not_received_ids)).all()
-            not_received_users = [{"user_id": uid, "user_name": uname} for uid, uname in nr_rows]
+        if include_not_received:
+            try:
+                intended_ids = set(resolve_target_user_ids(
+                    db, notif.target_type, notif.target_id,
+                    include_admins=(notif.target_type != "all"),
+                ))
+                recipient_ids_set = {r["user_id"] for r in recipients}
+                not_received_ids = list(intended_ids - recipient_ids_set)
+                if not_received_ids:
+                    nr_rows = db.query(User.id, User.name).filter(User.id.in_(not_received_ids)).all()
+                    not_received_users = [{"user_id": uid, "user_name": uname} for uid, uname in nr_rows]
+            except Exception:
+                pass
 
         meta = None
         if notif.extra_metadata:

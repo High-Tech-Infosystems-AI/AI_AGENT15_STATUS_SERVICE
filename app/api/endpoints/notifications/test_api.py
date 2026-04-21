@@ -471,9 +471,14 @@ async def ws_notifications_test(websocket: WebSocket, user_id: int = 1):
         pubsub = r.pubsub()
         pubsub.subscribe(f"notif:user:{user_id}", "notif:broadcast", "notif:banner")
 
+        loop = asyncio.get_event_loop()
+
         async def redis_to_client():
+            def _poll():
+                return pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
             while True:
-                msg = pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                # Non-blocking — runs the sync call in a thread so event loop stays free
+                msg = await loop.run_in_executor(None, _poll)
                 if msg and isinstance(msg.get("data"), str):
                     try:
                         payload = json.loads(msg["data"])
