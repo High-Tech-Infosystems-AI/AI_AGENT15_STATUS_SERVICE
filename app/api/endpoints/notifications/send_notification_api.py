@@ -74,10 +74,37 @@ async def send_notification(
     # Per-user per-mode unread counts — WS receives the full {push, banner, log, total} breakdown
     unread_counts_by_mode = store.get_unread_counts_by_mode_bulk(db, recipient_ids)
 
-    if notif.visibility == "public" or request.target_type == "all":
-        redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts_by_mode)
+    if notif.delivery_mode == "banner":
+        # Banners have a dedicated channel + per-user snapshot update so the
+        # client's banner ticker re-renders.
+        banner_payload = {
+            "id": notif.id,
+            "title": notif.title,
+            "message": notif.message,
+            "priority": notif.priority,
+            "domain_type": notif.domain_type,
+            "visibility": notif.visibility,
+            "target_type": notif.target_type,
+            "expires_at": str(notif.expires_at) if notif.expires_at else None,
+            "created_at": str(notif.created_at),
+            "recipient_ids": list(recipient_ids),
+        }
+        redis_manager.publish_banner("create", banner_payload)
+        redis_manager.invalidate_banner_cache()
+
+        # Per-user banner snapshot — so clients' "banners list" refreshes
+        snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+        redis_manager.publish_banner_snapshots(snapshots)
+
+        # Unread count event still fires (banner contributes to per-mode counts)
+        for uid, counts in unread_counts_by_mode.items():
+            redis_manager.publish_unread_count(uid, counts.get("push", 0), by_mode=counts)
     else:
-        redis_manager.publish_to_users(recipient_ids, pub_payload, unread_counts=unread_counts_by_mode)
+        # push/log go through the regular per-user / broadcast channel
+        if notif.visibility == "public" or request.target_type == "all":
+            redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts_by_mode)
+        else:
+            redis_manager.publish_to_users(recipient_ids, pub_payload, unread_counts=unread_counts_by_mode)
 
     return SendNotificationResponse(
         success=True,
