@@ -243,10 +243,30 @@ def send_notification(request: SendNotificationRequest, user_id: int = Query(1),
            "created_at": str(notif.created_at)}
     redis_manager.invalidate_unread_count(recipient_ids)
     unread_counts_by_mode = store.get_unread_counts_by_mode_bulk(db, recipient_ids)
-    if notif.visibility == "public" or request.target_type == "all":
-        redis_manager.publish_broadcast(pub, user_unread_counts=unread_counts_by_mode)
+
+    if notif.delivery_mode == "banner":
+        # Banner sends must also go through the banner channel + banner snapshot
+        # so the client's banner ticker updates (same as POST /notifications/banner).
+        banner_payload = {
+            "id": notif.id, "title": notif.title, "message": notif.message,
+            "priority": notif.priority, "domain_type": notif.domain_type,
+            "visibility": notif.visibility, "target_type": notif.target_type,
+            "expires_at": str(notif.expires_at) if notif.expires_at else None,
+            "created_at": str(notif.created_at),
+            "recipient_ids": list(recipient_ids),
+        }
+        redis_manager.publish_banner("create", banner_payload)
+        redis_manager.invalidate_banner_cache()
+        snapshots = store.get_active_banners_for_users_bulk(db, recipient_ids)
+        redis_manager.publish_banner_snapshots(snapshots)
+        for uid, counts in unread_counts_by_mode.items():
+            redis_manager.publish_unread_count(uid, counts.get("push", 0), by_mode=counts)
     else:
-        redis_manager.publish_to_users(recipient_ids, pub, unread_counts=unread_counts_by_mode)
+        if notif.visibility == "public" or request.target_type == "all":
+            redis_manager.publish_broadcast(pub, user_unread_counts=unread_counts_by_mode)
+        else:
+            redis_manager.publish_to_users(recipient_ids, pub, unread_counts=unread_counts_by_mode)
+
     return SendNotificationResponse(success=True, notification_id=notif.id,
                                     recipients_count=len(recipient_ids),
                                     message=f"Sent to {len(recipient_ids)} recipients")
