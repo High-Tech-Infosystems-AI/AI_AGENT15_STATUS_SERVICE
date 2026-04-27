@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     # Base URL
     BASE_URL: str = Field(default_factory=lambda: os.getenv("BASE_URL", "http://localhost:8515"), env="BASE_URL")
 
+    # AWS / S3 — chat attachments
+    AWS_ACCESS_KEY_ID: str = Field(default_factory=lambda: os.getenv("AWS_ACCESS_KEY_ID", ""), env="AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY: str = Field(default_factory=lambda: os.getenv("AWS_SECRET_ACCESS_KEY", ""), env="AWS_SECRET_ACCESS_KEY")
+    AWS_REGION: str = Field(default_factory=lambda: os.getenv("AWS_REGION", "us-east-1"), env="AWS_REGION")
+    AWS_S3_ENDPOINT_URL: str = Field(default_factory=lambda: os.getenv("AWS_S3_ENDPOINT_URL", ""), env="AWS_S3_ENDPOINT_URL")
+    AWS_S3_BUCKET_CHAT: str = Field(default_factory=lambda: os.getenv("AWS_S3_BUCKET_CHAT", ""), env="AWS_S3_BUCKET_CHAT")
+    AWS_S3_PRESIGNED_TTL_SECONDS: int = Field(default_factory=lambda: int(os.getenv("AWS_S3_PRESIGNED_TTL_SECONDS", "3600")), env="AWS_S3_PRESIGNED_TTL_SECONDS")
+
     # Consul service discovery (optional)
     CONSUL_HOST: str = Field(default_factory=lambda: os.getenv("CONSUL_HOST", "localhost"), env="CONSUL_HOST")
     CONSUL_PORT: int = Field(default_factory=lambda: int(os.getenv("CONSUL_PORT", "8500")), env="CONSUL_PORT")

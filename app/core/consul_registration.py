@@ -215,8 +215,12 @@ class ConsulServiceRegistry:
 
         try:
             service_name = service_name or settings.CONSUL_SERVICE_NAME
-            # Service port is driven by status-service specific env config.
-            service_port = int(os.getenv("STATUS_SERVICE_PORT", str(settings.CONSUL_SERVICE_PORT)))
+            # Respect explicit caller-supplied port; otherwise honour the
+            # status-service-specific env var (legacy behaviour).
+            if service_port is None:
+                service_port = int(os.getenv("STATUS_SERVICE_PORT", str(settings.CONSUL_SERVICE_PORT)))
+            else:
+                service_port = int(service_port)
             service_path = service_path or settings.CONSUL_SERVICE_PATH
             service_path = service_path.rstrip("/") or "/"
             auth_required = (auth_required or settings.CONSUL_SERVICE_AUTH or "mixed").lower()
