@@ -5,9 +5,10 @@ GET  /notifications/banners/active — list active banners
 """
 
 import logging
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
 from app.database_Layer.db_config import get_db
@@ -17,6 +18,37 @@ from app.notification_layer.schemas import CreateBannerRequest, BannerResponse, 
 
 logger = logging.getLogger("app_logger")
 router = APIRouter()
+
+
+def _resolve_banner_expiry(requested: Optional[datetime]) -> datetime:
+    """
+    Validate & default the banner's expires_at.
+
+    Rules:
+    - If NULL/missing → next day 00:00 UTC (end-of-today convention).
+    - If in the past → HTTP 400 (the banner would be dead on arrival).
+    - Otherwise → honor the admin's choice.
+    """
+    now = datetime.utcnow()
+
+    if requested is None:
+        # Default = tomorrow 00:00 UTC (fresh start daily, matches auto-events)
+        return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Strip timezone if present (the server stores naive UTC)
+    if requested.tzinfo is not None:
+        requested = requested.replace(tzinfo=None)
+
+    if requested <= now:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "EXPIRES_IN_PAST",
+                "message": f"expires_at ({requested.isoformat()}) must be in the future. "
+                           f"Server time is {now.isoformat()}.",
+            },
+        )
+    return requested
 
 
 @router.post("/banner", response_model=SendNotificationResponse)
@@ -32,6 +64,9 @@ async def create_banner(
 
     user_id = user_info.get("user_id")
 
+    # Validate + default expires_at (rejects past times, defaults to tomorrow 00:00)
+    expires_at = _resolve_banner_expiry(request.expires_at)
+
     try:
         notif, recipient_ids = store.create_notification(
             db=db,
@@ -46,7 +81,7 @@ async def create_banner(
             source_service="system",
             metadata=request.metadata,
             created_by=user_id,
-            expires_at=request.expires_at,
+            expires_at=expires_at,
         )
     except TargetValidationError as e:
         db.rollback()

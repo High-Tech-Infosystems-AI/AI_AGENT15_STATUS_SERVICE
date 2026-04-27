@@ -23,6 +23,8 @@ spec:
           ports:
             - name: http
               containerPort: 8515
+            - name: chat
+              containerPort: 8517
             - name: ui
               containerPort: 5009
           envFrom:
@@ -38,6 +40,16 @@ spec:
               value: "http://127.0.0.1:8515"
             - name: UI_PORT
               value: "5009"
+            - name: STATUS_SERVICE_PORT
+              value: "8515"
+            - name: CHAT_SERVICE_PORT
+              value: "8517"
+            - name: CHAT_SERVICE_NAME
+              value: "HRMIS_CHAT_SERVICE"
+            - name: CHAT_SERVICE_PATH
+              value: "/chat"
+            - name: CHAT_SERVICE_AUTH
+              value: "mixed"
           livenessProbe:
             httpGet:
               path: /health
@@ -76,6 +88,23 @@ spec:
     - name: http
       port: 8515
       targetPort: 8515
+  type: ClusterIP
+---
+# ClusterIP for the Chat API (internal traffic; gateway hits this via Consul)
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-service
+  labels:
+    app: status-service
+    component: chat
+spec:
+  selector:
+    app: status-service
+  ports:
+    - name: chat
+      port: 8517
+      targetPort: 8517
   type: ClusterIP
 ---
 # NodePort for the Notification UI (exposed to internet on port 30509)

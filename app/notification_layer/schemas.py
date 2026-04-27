@@ -42,6 +42,10 @@ class SendNotificationRequest(BaseModel):
     target_type: str = Field("all", description="all, user, job, role")
     target_id: Optional[str] = Field(None, description="csv user_ids, job id, or role name")
     metadata: Optional[dict] = None
+    expires_at: Optional[datetime] = Field(
+        None,
+        description="Only used when delivery_mode='banner'. Must be in the future. Defaults to tomorrow 00:00 UTC.",
+    )
 
 
 class SendNotificationResponse(BaseModel):

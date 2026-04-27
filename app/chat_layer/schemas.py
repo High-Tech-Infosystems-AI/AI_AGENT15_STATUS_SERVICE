@@ -1,0 +1,126 @@
+"""Pydantic schemas for chat REST API."""
+from datetime import datetime
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field, model_validator
+
+MessageType = Literal["text", "image", "voice", "file", "system"]
+
+
+class CreateDMRequest(BaseModel):
+    peer_user_id: int = Field(..., gt=0)
+
+
+class SendMessageRequest(BaseModel):
+    message_type: MessageType = "text"
+    body: Optional[str] = Field(default=None, max_length=4000)
+    attachment_id: Optional[int] = Field(default=None, gt=0)
+    reply_to_message_id: Optional[int] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _content_required(self):
+        if self.message_type == "text":
+            if not self.body or not self.body.strip():
+                raise ValueError("body required for text messages")
+        else:
+            if self.attachment_id is None:
+                raise ValueError("attachment_id required for non-text messages")
+        return self
+
+
+class EditMessageRequest(BaseModel):
+    body: str = Field(..., min_length=1, max_length=4000)
+
+
+class ForwardMessageRequest(BaseModel):
+    conversation_ids: List[int] = Field(..., min_length=1, max_length=20)
+
+
+class MarkReadRequest(BaseModel):
+    message_id: int = Field(..., gt=0)
+
+
+class LatestMessagePreview(BaseModel):
+    id: int
+    sender_id: int
+    message_type: str
+    body_preview: str
+    created_at: datetime
+    deleted_at: Optional[datetime] = None
+
+
+class PeerInfo(BaseModel):
+    id: int
+    name: str
+    username: str
+    profile_image_key: Optional[str] = None
+
+
+class TeamInfo(BaseModel):
+    id: int
+    name: str
+
+
+class ConversationOut(BaseModel):
+    id: int
+    type: str
+    team_id: Optional[int] = None
+    title: Optional[str] = None
+    last_message_at: Optional[datetime] = None
+    unread_count: int = 0
+    members: List[int] = []
+    latest_message: Optional[LatestMessagePreview] = None
+    peer: Optional[PeerInfo] = None
+    team: Optional[TeamInfo] = None
+
+    model_config = {"from_attributes": True}
+
+
+class AttachmentOut(BaseModel):
+    id: int
+    mime_type: str
+    file_name: str
+    size_bytes: int
+    duration_seconds: Optional[int] = None
+    waveform_json: Optional[str] = None
+    url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class MessageOut(BaseModel):
+    id: int
+    conversation_id: int
+    sender_id: int
+    message_type: str
+    body: Optional[str] = None
+    attachment: Optional[AttachmentOut] = None
+    reply_to_message_id: Optional[int] = None
+    forwarded_from_message_id: Optional[int] = None
+    edited_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+    created_at: datetime
+    mentions: List[int] = []
+    read_count: Optional[int] = None
+    delivered_count: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+
+class PresenceOut(BaseModel):
+    user_id: int
+    status: str
+    last_seen_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedMessages(BaseModel):
+    items: List[MessageOut]
+    next_cursor: Optional[str] = None
+    has_more: bool
+
+
+class ErrorResponse(BaseModel):
+    error_code: str
+    message: str

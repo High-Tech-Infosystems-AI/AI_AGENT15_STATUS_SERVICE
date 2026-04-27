@@ -5,6 +5,8 @@ POST /notifications/send
 
 import json
 import logging
+from datetime import datetime, timedelta
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,25 @@ from app.notification_layer.schemas import SendNotificationRequest, SendNotifica
 
 logger = logging.getLogger("app_logger")
 router = APIRouter()
+
+
+def _resolve_banner_expiry(requested: Optional[datetime]) -> datetime:
+    """Default to tomorrow 00:00 UTC; reject past times."""
+    now = datetime.utcnow()
+    if requested is None:
+        return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if requested.tzinfo is not None:
+        requested = requested.replace(tzinfo=None)
+    if requested <= now:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "EXPIRES_IN_PAST",
+                "message": f"expires_at ({requested.isoformat()}) must be in the future. "
+                           f"Server time is {now.isoformat()}.",
+            },
+        )
+    return requested
 
 
 @router.post("/send", response_model=SendNotificationResponse)
@@ -30,6 +51,11 @@ async def send_notification(
         raise HTTPException(status_code=403, detail="Only admin/super_admin can send notifications")
 
     user_id = user_info.get("user_id")
+
+    # For banners, validate + default expires_at
+    banner_expires = None
+    if request.delivery_mode == "banner":
+        banner_expires = _resolve_banner_expiry(request.expires_at)
 
     try:
         notif, recipient_ids = store.create_notification(
@@ -46,6 +72,7 @@ async def send_notification(
             event_type=None,
             metadata=request.metadata,
             created_by=user_id,
+            expires_at=banner_expires,
         )
     except TargetValidationError as e:
         db.rollback()

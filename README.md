@@ -157,3 +157,73 @@ The application uses environment-based configuration:
 - Connection automatically closes when task status is `DONE` or `FAILED`
 - Redis DB 0 is used for Celery message broker
 - Redis DB 1 is used for Celery backend (task results)
+
+## Chat Module
+
+The chat module lives in `app/chat_layer/` and **runs as its own FastAPI process**
+(`app.chat_main:app`) on **port 8517** — separate from the Status/Notification API on 8515.
+It registers with Consul as `HRMIS_CHAT_SERVICE` with tag `path=/chat`, so the API Gateway
+discovers and routes `/chat/*` automatically without any gateway-side configuration.
+
+### Topology
+```
+┌──────────────────────────────── Container ────────────────────────────────┐
+│                                                                           │
+│   app.main:app           app.chat_main:app          notification_ui       │
+│   port 8515              port 8517                  port 5009             │
+│   /status/*              /chat/* + /chat/ws         (web UI)              │
+│   /health                /chat/health                                     │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+        │                          │
+        ▼                          ▼
+  Consul: HRMIS_STATUS_SERVICE   Consul: HRMIS_CHAT_SERVICE
+  tags: path=/status             tags: path=/chat
+        │                          │
+        └─────────── API Gateway ───┘
+                  (routes by Consul `path=` tag)
+```
+
+### Setup
+- Apply migrations v8–v13 in `migrations/` (in order).
+- Set env vars:
+  - `CHAT_SERVICE_PORT` (default `8517`)
+  - `CHAT_SERVICE_NAME` (default `HRMIS_CHAT_SERVICE`)
+  - `CHAT_SERVICE_PATH` (default `/chat`)
+  - `CHAT_SERVICE_AUTH` (default `mixed`)
+  - `AWS_S3_BUCKET_CHAT` (required for attachments)
+  - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
+  - `AWS_S3_PRESIGNED_TTL_SECONDS` (default 3600)
+
+### Run
+- **Locally (chat only):** `uv run uvicorn app.chat_main:app --port 8517 --reload`
+- **Locally (everything):** `bash start.sh`
+- **Docker:** `docker build -t status-chat .` + `docker run -p 8515:8515 -p 8517:8517 -p 5009:5009 ...`
+- **k8s:** apply [k8s/deployment.yaml](k8s/deployment.yaml) — exposes both ports from the same pod.
+
+### RBAC
+- DM: any active user ↔ any active user.
+- Team chat: SuperAdmin/Admin → any team; others → only member teams.
+- `#general`: all active users.
+- Delete: SuperAdmin/Admin only (soft-delete).
+
+### Endpoints
+- `GET /chat/conversations` — list mine
+- `POST /chat/conversations/dm` — create or get a DM
+- `GET /chat/conversations/team/{team_id}` — lazy-create team conversation
+- `GET /chat/conversations/general` — singleton `#general`
+- `GET /chat/conversations/{id}` — get by id
+- `GET /chat/conversations/{id}/messages?cursor=&limit=` — paginated history
+- `POST /chat/conversations/{id}/messages` — send message
+- `PATCH /chat/messages/{id}` — edit own message within 15 min
+- `DELETE /chat/messages/{id}` — admin delete (soft)
+- `POST /chat/messages/{id}/forward` — forward to other conversations
+- `POST /chat/messages/{id}/read` — mark message read
+- `POST /chat/attachments` — upload (multipart) to S3
+- `GET /chat/attachments/{id}/url` — pre-signed GET
+- `GET /chat/users/{id}/presence` — presence + last-seen
+- `GET /chat/search?q=&conversation_id=` — search
+- `WS /chat/ws?token=` — real-time stream
+
+### Tests
+`uv run pytest tests/chat -v`
