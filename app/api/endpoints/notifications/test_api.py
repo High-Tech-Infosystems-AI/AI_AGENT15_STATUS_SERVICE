@@ -9,7 +9,7 @@ Prefix: /test
 import math
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, Query, HTTPException, WebSocket, WebSocketDisconnect
@@ -32,6 +32,25 @@ from app.notification_layer.schemas import (
 
 logger = logging.getLogger("app_logger")
 router = APIRouter()
+
+
+def _resolve_banner_expiry(requested: Optional[datetime]) -> datetime:
+    """Default to tomorrow 00:00 UTC; reject past times (HTTP 400)."""
+    now = datetime.utcnow()
+    if requested is None:
+        return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if requested.tzinfo is not None:
+        requested = requested.replace(tzinfo=None)
+    if requested <= now:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "EXPIRES_IN_PAST",
+                "message": f"expires_at ({requested.isoformat()}) must be in the future. "
+                           f"Server time is {now.isoformat()}.",
+            },
+        )
+    return requested
 
 
 # --- Users (no auth) ---
@@ -193,6 +212,7 @@ def get_active_banners(user_id: Optional[int] = Query(None), db: Session = Depen
 
 @router.post("/notifications/banner")
 def create_banner(request: CreateBannerRequest, user_id: int = Query(1), db: Session = Depends(get_db)):
+    expires_at = _resolve_banner_expiry(request.expires_at)
     try:
         notif, recipient_ids = store.create_notification(
             db=db, title=request.title, message=request.message,
@@ -200,7 +220,7 @@ def create_banner(request: CreateBannerRequest, user_id: int = Query(1), db: Ses
             visibility=request.visibility, priority=request.priority,
             target_type=request.target_type, target_id=request.target_id,
             source_service="system", metadata=request.metadata,
-            created_by=user_id, expires_at=request.expires_at,
+            created_by=user_id, expires_at=expires_at,
         )
     except TargetValidationError as e:
         db.rollback()
@@ -225,6 +245,9 @@ def create_banner(request: CreateBannerRequest, user_id: int = Query(1), db: Ses
 
 @router.post("/notifications/send")
 def send_notification(request: SendNotificationRequest, user_id: int = Query(1), db: Session = Depends(get_db)):
+    banner_expires = None
+    if request.delivery_mode == "banner":
+        banner_expires = _resolve_banner_expiry(request.expires_at)
     try:
         notif, recipient_ids = store.create_notification(
             db=db, title=request.title, message=request.message,
@@ -232,6 +255,7 @@ def send_notification(request: SendNotificationRequest, user_id: int = Query(1),
             visibility=request.visibility, priority=request.priority,
             target_type=request.target_type, target_id=request.target_id,
             source_service="system", metadata=request.metadata, created_by=user_id,
+            expires_at=banner_expires,
         )
     except TargetValidationError as e:
         db.rollback()
