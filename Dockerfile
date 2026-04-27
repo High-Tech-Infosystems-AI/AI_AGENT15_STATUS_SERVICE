@@ -20,14 +20,14 @@ RUN uv pip install -r pyproject.toml
 # Copy source
 COPY . /app
 
-# Expose ports: 8515 (API) + 5009 (Notification UI)
-EXPOSE 8515 5009
+# Expose ports: 8515 (Status API) + 8517 (Chat API) + 5009 (Notification UI)
+EXPOSE 8515 8517 5009
 
-# Healthcheck — only check main API (UI is non-critical)
+# Healthcheck — verify both APIs respond. UI is non-critical.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl -f http://127.0.0.1:8515/health || exit 1
+  CMD curl -f http://127.0.0.1:8515/health && curl -f http://127.0.0.1:8517/health || exit 1
 
-# Start both processes: main API + notification UI
+# Start three processes: status API + chat API + notification UI
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 CMD ["/app/start.sh"]

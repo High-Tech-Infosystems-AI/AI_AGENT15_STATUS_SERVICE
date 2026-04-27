@@ -15,6 +15,10 @@ from app.core.consul_registration import consul_registry
 from app.notification_layer.ws_manager import ws_manager
 from app.notification_layer.scheduler import run_scheduler
 
+# NOTE: the chat module runs as a *separate* FastAPI process via
+# `app.chat_main:app` on its own port (CHAT_SERVICE_PORT, default 8517).
+# It is NOT mounted here.
+
 logger = logging.getLogger("app_logger")
 
 
