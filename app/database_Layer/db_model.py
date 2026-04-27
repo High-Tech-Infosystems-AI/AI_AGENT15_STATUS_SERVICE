@@ -9,7 +9,7 @@ Last Modified: [2024-05-20]
 """
 
 import logging
-from sqlalchemy import Column, Integer, String, DateTime, TIMESTAMP, Text, Boolean, Date, DECIMAL, ForeignKey, func
+from sqlalchemy import Column, Integer, String, DateTime, TIMESTAMP, Text, Boolean, Date, DECIMAL, ForeignKey, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.mysql import TINYINT
 from app.database_Layer.db_config import Base
@@ -59,6 +59,54 @@ class User(Base):
     # Explicit foreign key relationships
     role = relationship("Role", foreign_keys=[role_id])
     logger.info("User model configured successfully")
+
+
+# ---------------------------------------------------------------------------
+# Team / TeamMember mirrors — owned by AI_AGENT11_RBAC_Service. We declare
+# them here so SQLAlchemy can resolve FKs (e.g. chat_conversations.team_id).
+# DO NOT create or migrate these tables from this service; RBAC owns them.
+# ---------------------------------------------------------------------------
+
+class Team(Base):
+    """Team model for grouping users that can collectively be assigned to jobs."""
+    __tablename__ = 'teams'
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    name = Column(String(150), unique=True, nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    department = Column(String(150), nullable=True)
+    status = Column(String(20), nullable=False, server_default="active")  # active | inactive
+
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    members = relationship("TeamMember", back_populates="team", cascade="all, delete-orphan")
+    creator = relationship("User", foreign_keys=[created_by])
+    updater = relationship("User", foreign_keys=[updated_by])
+
+
+class TeamMember(Base):
+    """Association of users to teams. role_in_team is 'member' or 'manager'."""
+    __tablename__ = 'team_members'
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    team_id = Column(Integer, ForeignKey('teams.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    role_in_team = Column(String(20), nullable=False, server_default="member")  # member | manager
+    assigned_at = Column(DateTime, nullable=False, server_default=func.now())
+    assigned_by = Column(Integer, ForeignKey('users.id'), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('team_id', 'user_id', name='uq_team_member'),
+    )
+
+    team = relationship("Team", back_populates="members")
+    user = relationship("User", foreign_keys=[user_id])
+    assigner = relationship("User", foreign_keys=[assigned_by])
 
 
 class Company(Base):
