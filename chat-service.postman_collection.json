@@ -1,0 +1,634 @@
+{
+	"info": {
+		"name": "Chat Service",
+		"description": "Complete API collection for the Chat Service (HRMIS_CHAT_SERVICE).\n\n**Topology:**\n- Chat service runs as `app.chat_main:app` on port **8517**\n- Routed by API Gateway via Consul tag `path=/chat`\n- All REST endpoints require JWT (`Authorization: Bearer <token>`)\n- WebSocket uses query-string token: `?token=<jwt>`\n\n**Setup:**\n1. Set `gateway_url` to your gateway (e.g. `http://localhost:8050`) — this is the recommended path.\n2. Set `auth_url` to your auth service (e.g. `http://localhost:8085`).\n3. Run `0. Auth → Login` first — token is auto-saved to `{{token}}`.\n4. (Optional) Set `chat_direct_url` if you want to bypass the gateway during dev.\n5. Update `peer_user_id`, `team_id`, `conversation_id`, `message_id`, `attachment_id` after running corresponding requests.\n\n**Endpoints covered:**\n- Conversations: list, create DM, team, #general, get by id\n- Messages: list, send (text/image/voice/file), reply, mark-read, edit, admin-delete, forward\n- Attachments: upload, get pre-signed URL\n- Presence: get user presence\n- Search: full-text scoped to caller\n- WebSocket: `/chat/ws` with sample client→server actions and expected server→client events",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{"key": "gateway_url", "value": "http://localhost:8050", "type": "string", "description": "API Gateway base URL (preferred for prod-like flows)"},
+		{"key": "chat_direct_url", "value": "http://localhost:8517", "type": "string", "description": "Direct chat service (bypass gateway, for local debugging)"},
+		{"key": "auth_url", "value": "http://localhost:8085", "type": "string", "description": "Auth/login service for JWT issuance"},
+		{"key": "ws_url", "value": "ws://localhost:8517", "type": "string", "description": "WebSocket base. Use the gateway WS URL if your gateway proxies WS upgrades."},
+		{"key": "token", "value": "", "type": "string", "description": "Auto-set by 0. Auth → Login"},
+		{"key": "user_id", "value": "10", "type": "string", "description": "Caller's user id (auto-set by Login)"},
+		{"key": "peer_user_id", "value": "11", "type": "string", "description": "Other party in a DM"},
+		{"key": "team_id", "value": "4", "type": "string", "description": "Team id (from RBAC)"},
+		{"key": "conversation_id", "value": "42", "type": "string", "description": "Set after a conversation is created"},
+		{"key": "message_id", "value": "992", "type": "string", "description": "Set after a message is sent"},
+		{"key": "attachment_id", "value": "88", "type": "string", "description": "Set after an attachment is uploaded"}
+	],
+	"item": [
+		{
+			"name": "0. Auth",
+			"description": "Login through the Auth service to obtain a JWT. The collection scripts auto-save it to `{{token}}` and `{{user_id}}`.",
+			"item": [
+				{
+					"name": "Login (get JWT)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"var json = pm.response.json();",
+									"if (json.access_token) {",
+									"    pm.collectionVariables.set('token', json.access_token);",
+									"    pm.collectionVariables.set('user_id', json.user_id);",
+									"    console.log('Login OK. user_id=' + json.user_id);",
+									"}",
+									"pm.test('Login succeeded', function() {",
+									"    pm.response.to.have.status(200);",
+									"    pm.expect(json.access_token).to.exist;",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"username\": \"<your-username>\",\n    \"password\": \"<your-password>\"\n}"
+						},
+						"url": {
+							"raw": "{{auth_url}}/ats/login",
+							"host": ["{{auth_url}}"],
+							"path": ["ats", "login"]
+						},
+						"description": "Adjust path/body to match your auth service. The script auto-saves `access_token` → `{{token}}` and `user_id` → `{{user_id}}`."
+					}
+				}
+			]
+		},
+		{
+			"name": "1. Conversations",
+			"description": "Conversation creation + retrieval. The list endpoint returns the WhatsApp-style inbox with peer/team info, latest message preview, and unread count.",
+			"item": [
+				{
+					"name": "List my conversations (inbox)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('200 OK', () => pm.response.to.have.status(200));",
+									"const arr = pm.response.json();",
+									"pm.test('Returns an array', () => pm.expect(arr).to.be.an('array'));",
+									"if (arr.length) {",
+									"    pm.collectionVariables.set('conversation_id', arr[0].id);",
+									"    console.log('Set conversation_id=' + arr[0].id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"}
+						],
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations"]
+						},
+						"description": "Returns every conversation the caller belongs to, enriched with:\n- `peer` (DM only): id, name, username, profile_image_key\n- `team` (team only): id, name\n- `latest_message`: id, sender_id, message_type, body_preview, created_at\n- `unread_count`: integer\n\nSorted by `last_message_at DESC NULLS LAST`."
+					},
+					"response": [
+						{
+							"name": "200 OK example",
+							"originalRequest": {
+								"method": "GET",
+								"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+								"url": {"raw": "{{gateway_url}}/chat/conversations"}
+							},
+							"status": "OK",
+							"code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [{"key": "Content-Type", "value": "application/json"}],
+							"body": "[\n  {\n    \"id\": 42, \"type\": \"dm\", \"team_id\": null, \"title\": null,\n    \"last_message_at\": \"2026-04-27T12:01:14\", \"unread_count\": 2,\n    \"members\": [10, 11],\n    \"peer\": {\"id\": 11, \"name\": \"Bob Patel\", \"username\": \"bob\", \"profile_image_key\": \"profiles/user_11/abc.jpg\"},\n    \"team\": null,\n    \"latest_message\": {\"id\": 992, \"sender_id\": 11, \"message_type\": \"text\", \"body_preview\": \"see you tomorrow!\", \"created_at\": \"2026-04-27T12:01:14\", \"deleted_at\": null}\n  },\n  {\n    \"id\": 17, \"type\": \"team\", \"team_id\": 4, \"title\": null,\n    \"last_message_at\": \"2026-04-27T11:50:01\", \"unread_count\": 5,\n    \"members\": [10, 11, 12],\n    \"peer\": null,\n    \"team\": {\"id\": 4, \"name\": \"Backend Team\"},\n    \"latest_message\": {\"id\": 871, \"sender_id\": 12, \"message_type\": \"voice\", \"body_preview\": \"[voice note]\", \"created_at\": \"2026-04-27T11:50:01\", \"deleted_at\": null}\n  }\n]"
+						}
+					]
+				},
+				{
+					"name": "Create or get DM",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('200 OK', () => pm.response.to.have.status(200));",
+									"const c = pm.response.json();",
+									"pm.collectionVariables.set('conversation_id', c.id);",
+									"console.log('Set conversation_id=' + c.id);"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"},
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"peer_user_id\": {{peer_user_id}}\n}"
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/dm",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "dm"]
+						},
+						"description": "Idempotent: returns the existing DM if one already exists between caller and `peer_user_id`. Peer must be active (`enable=1`, not soft-deleted).\n\n**Errors:**\n- 403 `CHAT_USER_INACTIVE` — peer disabled\n- 422 — peer_user_id missing/invalid"
+					},
+					"response": [
+						{
+							"name": "200 OK",
+							"status": "OK", "code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [{"key": "Content-Type", "value": "application/json"}],
+							"body": "{\n  \"id\": 42, \"type\": \"dm\", \"team_id\": null, \"title\": null,\n  \"last_message_at\": null, \"unread_count\": 0,\n  \"members\": [10, 11], \"peer\": null, \"team\": null, \"latest_message\": null\n}"
+						},
+						{
+							"name": "403 CHAT_USER_INACTIVE",
+							"status": "Forbidden", "code": 403,
+							"_postman_previewlanguage": "json",
+							"header": [{"key": "Content-Type", "value": "application/json"}],
+							"body": "{\"error_code\": \"CHAT_USER_INACTIVE\", \"message\": \"Peer user is not active\"}"
+						}
+					]
+				},
+				{
+					"name": "Get team conversation (lazy create)",
+					"request": {
+						"method": "GET",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/team/{{team_id}}",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "team", "{{team_id}}"]
+						},
+						"description": "Returns the team's chat. Lazy-creates on first access; reconciles members on subsequent calls.\n\n**RBAC:** SuperAdmin/Admin → any team. Others → only teams they're in.\n\n**Errors:** 403 `CHAT_TEAM_MEMBERSHIP_REQUIRED`."
+					},
+					"response": [
+						{
+							"name": "200 OK",
+							"status": "OK", "code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [{"key": "Content-Type", "value": "application/json"}],
+							"body": "{\n  \"id\": 17, \"type\": \"team\", \"team_id\": 4, \"title\": null,\n  \"last_message_at\": null, \"unread_count\": 0,\n  \"members\": [10, 11, 12], \"peer\": null,\n  \"team\": {\"id\": 4, \"name\": \"Backend Team\"}, \"latest_message\": null\n}"
+						},
+						{
+							"name": "403 CHAT_TEAM_MEMBERSHIP_REQUIRED",
+							"status": "Forbidden", "code": 403,
+							"_postman_previewlanguage": "json",
+							"header": [{"key": "Content-Type", "value": "application/json"}],
+							"body": "{\"error_code\": \"CHAT_TEAM_MEMBERSHIP_REQUIRED\", \"message\": \"You are not a member of this team\"}"
+						}
+					]
+				},
+				{
+					"name": "Get #general",
+					"request": {
+						"method": "GET",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/general",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "general"]
+						},
+						"description": "Singleton org-wide #general room. Auto-joins the caller as a member if not already."
+					}
+				},
+				{
+					"name": "Get conversation by id",
+					"request": {
+						"method": "GET",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/{{conversation_id}}",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "{{conversation_id}}"]
+						},
+						"description": "Caller must be a member.\n\n**Errors:** 403 `CHAT_NOT_MEMBER`, 404 `CHAT_NOT_FOUND`."
+					}
+				}
+			]
+		},
+		{
+			"name": "2. Messages",
+			"description": "Send / list / edit / delete / forward / mark-read.",
+			"item": [
+				{
+					"name": "List messages (paginated)",
+					"request": {
+						"method": "GET",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/{{conversation_id}}/messages?limit=50",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "{{conversation_id}}", "messages"],
+							"query": [
+								{"key": "limit", "value": "50", "description": "1-100"},
+								{"key": "cursor", "value": "", "disabled": true, "description": "opaque cursor from a previous response"}
+							]
+						},
+						"description": "Reverse-chronological. Use `next_cursor` from the response for the next (older) page."
+					},
+					"response": [
+						{
+							"name": "200 OK",
+							"status": "OK", "code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [{"key": "Content-Type", "value": "application/json"}],
+							"body": "{\n  \"items\": [\n    {\n      \"id\": 991, \"conversation_id\": 42, \"sender_id\": 10,\n      \"message_type\": \"text\", \"body\": \"see you tomorrow!\",\n      \"attachment\": null, \"reply_to_message_id\": null,\n      \"forwarded_from_message_id\": null, \"edited_at\": null,\n      \"deleted_at\": null, \"created_at\": \"2026-04-27T12:01:14\",\n      \"mentions\": []\n    }\n  ],\n  \"next_cursor\": \"eyJ0IjogIjIwMjYtMDQtMjdUMTI6MDA6MzAiLCAiaSI6IDk5MH0=\",\n  \"has_more\": true\n}"
+						}
+					]
+				},
+				{
+					"name": "Send text message",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('200 OK', () => pm.response.to.have.status(200));",
+									"const m = pm.response.json();",
+									"pm.collectionVariables.set('message_id', m.id);",
+									"console.log('message_id=' + m.id);"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"},
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"message_type\": \"text\",\n    \"body\": \"*hello* @bob 🎉\"\n}"
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/{{conversation_id}}/messages",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "{{conversation_id}}", "messages"]
+						},
+						"description": "WhatsApp-style markers (`*bold*`, `_italic_`, `~strike~`, `` `code` ``) are preserved verbatim. `@username` mentions are auto-resolved and trigger high-priority notifications.\n\n**Body limits:** 1–4000 chars."
+					}
+				},
+				{
+					"name": "Send image message",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"},
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"message_type\": \"image\",\n    \"body\": \"screenshot of the bug\",\n    \"attachment_id\": {{attachment_id}}\n}"
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/{{conversation_id}}/messages",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "{{conversation_id}}", "messages"]
+						},
+						"description": "Run `3. Attachments → Upload attachment` first to obtain the `attachment_id`. `body` is an optional caption."
+					}
+				},
+				{
+					"name": "Send voice message",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"},
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"message_type\": \"voice\",\n    \"attachment_id\": {{attachment_id}}\n}"
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/{{conversation_id}}/messages",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "{{conversation_id}}", "messages"]
+						},
+						"description": "Voice notes don't take a body. The attachment row carries `duration_seconds` and (optionally) a client-computed waveform. Max 5 minutes / 10 MB."
+					}
+				},
+				{
+					"name": "Send file message",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"},
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"message_type\": \"file\",\n    \"body\": \"latest spec\",\n    \"attachment_id\": {{attachment_id}}\n}"
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/{{conversation_id}}/messages",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "{{conversation_id}}", "messages"]
+						},
+						"description": "Generic file (PDF, doc, zip, etc.). Max 50 MB."
+					}
+				},
+				{
+					"name": "Reply to a message",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"},
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"message_type\": \"text\",\n    \"body\": \"agreed\",\n    \"reply_to_message_id\": {{message_id}}\n}"
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/conversations/{{conversation_id}}/messages",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "conversations", "{{conversation_id}}", "messages"]
+						},
+						"description": "A reply is just a normal send with `reply_to_message_id`. The original message is referenced by id; clients render the quoted message above the reply."
+					}
+				},
+				{
+					"name": "Mark message read",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/messages/{{message_id}}/read",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "messages", "{{message_id}}", "read"]
+						},
+						"description": "Idempotent. Records that the caller has read this message.\n\n- DM → publishes `message.read` to the sender (blue tick).\n- Team / general → publishes `message.read_count` to all members.\n- Always publishes `unread.update` to the caller's other tabs (cross-tab badge clear).\n\n**Response:** 204 No Content."
+					}
+				},
+				{
+					"name": "Edit message (sender, ≤15 min)",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"},
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"body\": \"actually, see you Friday\"\n}"
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/messages/{{message_id}}",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "messages", "{{message_id}}"]
+						},
+						"description": "Only the original sender, only `text` messages, only within 15 minutes of `created_at`. Original body is kept in `chat_message_edits`.\n\n**Errors:**\n- 403 `CHAT_EDIT_NOT_OWNER`\n- 409 `CHAT_EDIT_WINDOW_EXPIRED`\n- 410 `CHAT_MESSAGE_DELETED`"
+					}
+				},
+				{
+					"name": "Delete message (Admin/SuperAdmin only)",
+					"request": {
+						"method": "DELETE",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/messages/{{message_id}}",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "messages", "{{message_id}}"]
+						},
+						"description": "Soft-delete. Sets `deleted_at` and `deleted_by`. Body is preserved in DB for audit; subsequent fetches return `\"[message deleted]\"`.\n\n**RBAC:** Caller's `role_name` must be `SuperAdmin` or `Admin`.\n\n**Errors:** 403 `CHAT_ADMIN_ONLY`.\n\n**Response:** 204 No Content."
+					}
+				},
+				{
+					"name": "Forward message",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Authorization", "value": "Bearer {{token}}"},
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"conversation_ids\": [17, 1]\n}"
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/messages/{{message_id}}/forward",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "messages", "{{message_id}}", "forward"]
+						},
+						"description": "Caller must be a member of every destination. The Admin override does NOT relax membership for forwarding.\n\n**Errors:** 403 `CHAT_FORWARD_NOT_MEMBER`, 410 `CHAT_MESSAGE_DELETED`."
+					}
+				}
+			]
+		},
+		{
+			"name": "3. Attachments",
+			"description": "Two-step send: upload first → use the returned `attachment_id` when sending the message.",
+			"item": [
+				{
+					"name": "Upload attachment",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('200 OK', () => pm.response.to.have.status(200));",
+									"const a = pm.response.json();",
+									"pm.collectionVariables.set('attachment_id', a.id);",
+									"console.log('attachment_id=' + a.id);"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{"key": "conversation_id", "value": "{{conversation_id}}", "type": "text"},
+								{"key": "duration_seconds", "value": "12", "type": "text", "description": "Only set for voice"},
+								{"key": "file", "type": "file", "src": [], "description": "Pick a file: image, audio/webm, pdf, etc."}
+							]
+						},
+						"url": {
+							"raw": "{{gateway_url}}/chat/attachments",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "attachments"]
+						},
+						"description": "Multipart upload. Server validates MIME (allow-list) and size (10 MB image/voice, 50 MB file) before pushing to S3.\n\n**Errors:**\n- 413 `CHAT_ATTACHMENT_TOO_LARGE`\n- 415 `CHAT_ATTACHMENT_TYPE_NOT_ALLOWED`"
+					},
+					"response": [
+						{
+							"name": "200 OK",
+							"status": "OK", "code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [{"key": "Content-Type", "value": "application/json"}],
+							"body": "{\n  \"id\": 88,\n  \"mime_type\": \"audio/webm\",\n  \"file_name\": \"voice.webm\",\n  \"size_bytes\": 240000,\n  \"duration_seconds\": 12,\n  \"waveform_json\": null,\n  \"url\": \"https://s3.../chat/42/2026-04/abc.webm?X-Amz-Signature=...\",\n  \"thumbnail_url\": null\n}"
+						}
+					]
+				},
+				{
+					"name": "Get fresh pre-signed URL",
+					"request": {
+						"method": "GET",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/attachments/{{attachment_id}}/url",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "attachments", "{{attachment_id}}", "url"]
+						},
+						"description": "Use after the URL embedded in the original message response has expired (default TTL 3600 s, memoised in-process for half that)."
+					}
+				}
+			]
+		},
+		{
+			"name": "4. Presence",
+			"item": [
+				{
+					"name": "Get user presence",
+					"request": {
+						"method": "GET",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/users/{{peer_user_id}}/presence",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "users", "{{peer_user_id}}", "presence"]
+						},
+						"description": "Returns `status` (`online` | `away` | `offline`) + `last_seen_at`. Always visible to anyone authenticated."
+					},
+					"response": [
+						{
+							"name": "200 OK (online)",
+							"status": "OK", "code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [{"key": "Content-Type", "value": "application/json"}],
+							"body": "{\"user_id\": 11, \"status\": \"online\", \"last_seen_at\": \"2026-04-27T12:08:42\"}"
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "5. Search",
+			"item": [
+				{
+					"name": "Search messages",
+					"request": {
+						"method": "GET",
+						"header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+						"url": {
+							"raw": "{{gateway_url}}/chat/search?q=hello&limit=50",
+							"host": ["{{gateway_url}}"],
+							"path": ["chat", "search"],
+							"query": [
+								{"key": "q", "value": "hello", "description": "Required. FULLTEXT BOOLEAN MODE; falls back to LIKE %q%."},
+								{"key": "conversation_id", "value": "", "disabled": true, "description": "Optional — narrows to one conversation."},
+								{"key": "limit", "value": "50", "description": "1–100"}
+							]
+						},
+						"description": "Scoped to conversations the caller is a member of. Excludes soft-deleted messages."
+					}
+				}
+			]
+		},
+		{
+			"name": "6. WebSocket",
+			"description": "Single chat WebSocket for all real-time events. Postman v10+ recognises `ws://` URLs and opens them as WebSocket requests on import — if not, **right-click the request → 'Open in New Tab' → switch to WebSocket Request**, or **File → New → WebSocket Request** and paste the URL below.\n\n**URL pattern:** `ws://<chat-host-or-gateway>/chat/ws?token=<jwt>`\n\n**Heartbeat:** send `{\"action\": \"ping\"}` every 30 s. Server responds `{\"type\": \"pong\"}`. The Redis presence key TTL is 90 s — three missed pings = offline.\n\n**Closure code 4001** = invalid token.\n\nSee the sample messages folder below for everything you can send / receive.",
+			"item": [
+				{
+					"name": "Connect to /chat/ws",
+					"protocolProfileBehavior": {
+						"disableBodyPruning": true
+					},
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{ws_url}}/chat/ws?token={{token}}",
+							"protocol": "ws",
+							"host": ["{{ws_url}}"],
+							"path": ["chat", "ws"],
+							"query": [
+								{"key": "token", "value": "{{token}}", "description": "JWT issued by the auth service"}
+							]
+						},
+						"description": "WebSocket endpoint. JWT goes in the query string because browsers can't set headers on `WebSocket()`. Cached in Redis for 60 s.\n\nOnce connected, the server:\n1. Sets `chat:presence:{user_id}=online` (TTL 90 s)\n2. Updates `chat_user_presence` row\n3. Fans out `presence.update` to every co-conversation user"
+					}
+				},
+				{
+					"name": "Sample: ping (heartbeat)",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"action\": \"ping\"\n}"
+						},
+						"url": {"raw": "(send this as a WebSocket text frame)"},
+						"description": "**This is a TEMPLATE for the WebSocket frame to send — not an HTTP request.** Copy the JSON body and paste it into the 'Message' tab of the connected WebSocket request, then click Send.\n\nServer replies: `{\"type\": \"pong\"}`."
+					}
+				},
+				{
+					"name": "Sample: typing.start",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"action\": \"typing\",\n    \"conversation_id\": {{conversation_id}},\n    \"state\": \"start\"\n}"
+						},
+						"url": {"raw": "(send this as a WebSocket text frame)"},
+						"description": "Server fans out `typing.start` to other conversation members. Redis typing key TTL is 5 s, so silence = automatic stop."
+					}
+				},
+				{
+					"name": "Sample: typing.stop",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"action\": \"typing\",\n    \"conversation_id\": {{conversation_id}},\n    \"state\": \"stop\"\n}"
+						},
+						"url": {"raw": "(send this as a WebSocket text frame)"}
+					}
+				},
+				{
+					"name": "Sample: mark_read",
+					"request": {
+						"method": "POST",
+						"header": [{"key": "Content-Type", "value": "application/json"}],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"action\": \"mark_read\",\n    \"message_id\": {{message_id}}\n}"
+						},
+						"url": {"raw": "(send this as a WebSocket text frame)"},
+						"description": "Records read for caller. Triggers:\n- `message.read` (DM, to sender)\n- `message.read_count` (team / general, to all members)\n- `unread.update` (caller's other tabs — cross-tab badge clear)"
+					}
+				},
+				{
+					"name": "Reference: server → client events",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {"raw": "(documentation only)"},
+						"description": "**The server pushes the following event types over the WebSocket. Format is always:**\n```\n{\"type\": \"<name>\", \"data\": { ... }}\n```\n\n## message.new\nA new message in any conversation the user belongs to.\n```\n{\"type\":\"message.new\",\"data\":{\"conversation_id\":42,\"message\":{\"id\":992,\"sender_id\":10,\"message_type\":\"text\",\"body\":\"hi\",\"attachment\":null,\"reply_to_message_id\":null,\"forwarded_from_message_id\":null,\"edited_at\":null,\"deleted_at\":null,\"created_at\":\"2026-04-27T12:02:01\",\"mentions\":[]}}}\n```\n\n## message.edited\n```\n{\"type\":\"message.edited\",\"data\":{\"message_id\":992,\"conversation_id\":42,\"body\":\"updated\",\"edited_at\":\"2026-04-27T12:05:30\"}}\n```\n\n## message.deleted\n```\n{\"type\":\"message.deleted\",\"data\":{\"message_id\":992,\"conversation_id\":42,\"deleted_by\":1}}\n```\n\n## message.read (DM only — sent to original sender)\n```\n{\"type\":\"message.read\",\"data\":{\"message_id\":992,\"user_id\":11,\"read_at\":\"2026-04-27T12:03:15\"}}\n```\n\n## message.read_count (team/general — sent to all members)\n```\n{\"type\":\"message.read_count\",\"data\":{\"message_id\":871,\"conversation_id\":17,\"read_count\":4}}\n```\n\n## message.delivered (reserved)\n```\n{\"type\":\"message.delivered\",\"data\":{\"message_id\":992,\"user_id\":11,\"delivered_at\":\"2026-04-27T12:02:02\"}}\n```\n\n## typing.start / typing.stop\n```\n{\"type\":\"typing.start\",\"data\":{\"conversation_id\":42,\"user_id\":11}}\n```\n\n## presence.update\n```\n{\"type\":\"presence.update\",\"data\":{\"user_id\":11,\"status\":\"online\",\"last_seen_at\":\"2026-04-27T12:08:42\"}}\n```\n\n## inbox.bump (drives the WhatsApp-style inbox cell)\nSent to every conversation member (sender included) when a new message lands.\n```\n{\"type\":\"inbox.bump\",\"data\":{\"conversation_id\":42,\"unread_count\":2,\"latest_message\":{\"id\":992,\"sender_id\":11,\"message_type\":\"text\",\"body_preview\":\"see you tomorrow!\",\"created_at\":\"2026-04-27T12:01:14\",\"deleted_at\":null}}}\n```\n\n## unread.update (cross-tab badge clear, sent to all of the user's WS connections)\n```\n{\"type\":\"unread.update\",\"data\":{\"conversation_id\":42,\"unread_count\":0}}\n```\n\n## pong (reply to ping)\n```\n{\"type\":\"pong\"}\n```"
+					}
+				}
+			]
+		}
+	]
+}

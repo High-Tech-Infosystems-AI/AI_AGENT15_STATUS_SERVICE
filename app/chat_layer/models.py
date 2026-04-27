@@ -8,6 +8,11 @@ from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import relationship
 from app.database_Layer.db_config import Base
 
+# Ensure cross-table FKs (users, teams) can resolve at flush time.
+# These models are owned by other services but live in the same DB and the
+# same SQLAlchemy Base.metadata; importing them here loads them into metadata.
+import app.database_Layer.db_model  # noqa: F401
+
 logger = logging.getLogger("app_logger")
 
 
