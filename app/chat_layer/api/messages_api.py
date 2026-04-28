@@ -137,6 +137,38 @@ def _resolve_usernames(db, names: List[str]) -> List[int]:
     return [r[0] for r in rows]
 
 
+# Special tokens that expand to "every member of this conversation"
+# (excluding the sender — you don't mention yourself).
+_EVERYONE_TOKENS = {"everyone", "all", "channel", "here"}
+
+
+def _resolve_mentions_for_send(
+    db, *, body: str, conversation_id: int, sender_user_id: int,
+) -> List[int]:
+    """Parse `@usernames` out of `body` and resolve them to user ids.
+    Treats `@everyone` (and aliases `@all`, `@channel`, `@here`) as
+    "every member of the conversation, except the sender".
+    """
+    usernames = [u.lower() for u in extract_usernames(body or "")]
+    if not usernames:
+        return []
+
+    # Split into the special "everyone" group + literal username matches.
+    everyone_requested = any(u in _EVERYONE_TOKENS for u in usernames)
+    literals = [u for u in usernames if u not in _EVERYONE_TOKENS]
+
+    resolved: set = set()
+    if everyone_requested:
+        for uid in store.member_user_ids(db, conversation_id):
+            if uid != sender_user_id:
+                resolved.add(uid)
+    if literals:
+        for uid in _resolve_usernames(db, literals):
+            if uid != sender_user_id:
+                resolved.add(uid)
+    return sorted(resolved)
+
+
 @router.post("/conversations/{conversation_id}/messages",
              response_model=MessageOut,
              responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}})
@@ -160,11 +192,13 @@ def send_message(conversation_id: int, req: SendMessageRequest,
             reply_to_message_id=req.reply_to_message_id,
         )
 
-        # Resolve mentions
+        # Resolve mentions — supports literal `@username` and `@everyone`.
         mention_user_ids: List[int] = []
         if msg.message_type == "text" and msg.body:
-            usernames = extract_usernames(msg.body)
-            mention_user_ids = _resolve_usernames(db, usernames)
+            mention_user_ids = _resolve_mentions_for_send(
+                db, body=msg.body, conversation_id=conv.id,
+                sender_user_id=user["user_id"],
+            )
             if mention_user_ids:
                 store.add_mentions(db, msg.id, mention_user_ids)
                 bridge.handle_mention_for_users(
