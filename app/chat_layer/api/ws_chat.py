@@ -29,10 +29,22 @@ async def ws_chat(websocket: WebSocket, token: str = Query(...)):
     try:
         now = datetime.utcnow()
         store.upsert_presence(db, user_id, "online", last_seen_at=now)
+        # Tell co-members "I just came online"
         presence.fan_out_presence(db=db, user_id=user_id, status="online",
                                   last_seen_at=now)
+        # Tell THIS connection who is currently online — covers the case
+        # where co-members connected before us (we'd otherwise see them as
+        # offline forever, since Pub/Sub events from earlier are lost).
+        snapshot = presence.get_presence_snapshot(db, user_id)
     finally:
         db.close()
+
+    for entry in snapshot:
+        try:
+            await websocket.send_json({"type": "presence.update", "data": entry})
+        except Exception as exc:
+            logger.warning("presence snapshot send failed: %s", exc)
+            break
 
     try:
         while True:

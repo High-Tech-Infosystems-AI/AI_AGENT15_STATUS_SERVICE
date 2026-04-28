@@ -68,12 +68,37 @@ Both services share the same MySQL (`ats_main`) and Redis. Chat publishes real-t
 
 | Environment | Base URL (through gateway) | Direct (bypass gateway) |
 |---|---|---|
-| Local | `http://localhost:8000/chat` | `http://localhost:8517/chat` |
-| Production | `https://<gateway-host>/chat` | internal `http://chat-service:8517/chat` |
+| Local | `http://localhost:8050/chat` | `http://localhost:8517/chat` |
+| Dev | `https://devai.api.htinfosystems.com/chat` | internal `http://chat-service:8517/chat` |
+| Production | `https://<prod-host>/chat` | internal `http://chat-service:8517/chat` |
 
-For WebSocket: `ws://<host>/chat/ws?token=<jwt>` (gateway must allow WS upgrade).
+For WebSocket: `ws://<host>/chat/ws?token=<jwt>` (gateway must allow WS upgrade). On dev the WS URL is `wss://devai.api.htinfosystems.com/chat/ws?token=<jwt>` — note `wss://` because the gateway terminates TLS.
 
-### 1.4 Conventions
+Throughout the rest of this doc, examples use the dev URL `https://devai.api.htinfosystems.com/chat`. Substitute your own host as needed.
+
+### 1.4 How to read the curl examples
+
+Every REST endpoint section below has a runnable **curl** block. They all share the same anatomy:
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/2/messages?limit=50' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --header 'Content-Type: application/json' \
+  --data '{...request body...}'
+```
+
+| Part | Meaning |
+|---|---|
+| `curl --location` | The `--location` flag follows HTTP redirects automatically. Required because the API Gateway sometimes 307-redirects internally. |
+| `'https://devai.api.htinfosystems.com'` | Dev environment gateway host. Matches the `gateway_url` Postman variable. |
+| `/chat/...` | The Consul tag `path=/chat` registered by the chat service tells the gateway to forward this prefix. |
+| `--header 'Authorization: Bearer <JWT>'` | The JWT issued by the auth service (`POST /ats/login`). The chat service validates it (cached in Redis 60 s) and rejects with 401 if missing, malformed, expired, or invalid. |
+| `--header 'Content-Type: application/json'` | Required for `POST` / `PATCH` / `PUT` bodies. Skipped for `GET` and for multipart uploads (which use `multipart/form-data`). |
+| `--data '...'` | The request body. JSON for most endpoints; multipart form fields for `POST /chat/attachments`. Skipped for `GET` and `DELETE`. |
+
+**Replace `<JWT>` everywhere** with the `access_token` you got from `POST /ats/login` (or the `{{token}}` Postman variable). All examples use a placeholder `eyJhbGciOiJIUzI1NiI...` — never paste real tokens into a doc, ticket, or chat.
+
+### 1.5 Conventions
 
 - All requests/responses use `Content-Type: application/json` unless documented otherwise (file upload uses `multipart/form-data`).
 - Timestamps are ISO-8601 in UTC (e.g. `"2026-04-27T12:00:00"`). The server returns naïve ISO strings — clients should treat them as UTC.
@@ -203,6 +228,15 @@ GET /chat/conversations
 Authorization: Bearer <jwt>
 ```
 
+#### curl
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** fetches every conversation the caller belongs to — DMs, team rooms, and `#general` — sorted with the most recent activity at the top. The caller is auto-joined to `#general` if they aren't already a member. Each row contains the data your inbox cell needs in one shot: the other party's name + avatar key (DM) or team name (team), the latest message preview, and an unread badge count.
+
 Returns the **inbox** for the caller — every conversation they belong to, enriched with peer/team display info, the latest message preview, and an unread badge count. Auto-joins the caller into `#general` if they're not yet a member.
 
 **Sorted by** `last_message_at DESC NULLS LAST`, then `id DESC` — so the newest activity is on top, just like WhatsApp.
@@ -310,6 +344,19 @@ Content-Type: application/json
 }
 ```
 
+#### curl
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/dm' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "peer_user_id": 11
+  }'
+```
+
+**What this does:** opens (or re-opens) a 1:1 DM with user `11`. The endpoint is **idempotent** — call it ten times and you get the same `conversation_id` back. Members are stored in canonical (sorted) order so `(10, 11)` and `(11, 10)` both resolve to the same row. Use the returned `id` for every subsequent send/list call.
+
 Idempotent: returns the existing DM if one already exists between these two users; otherwise creates one. The two members are stored in canonical (sorted) order; calling with `(10, 11)` and `(11, 10)` yields the same conversation.
 
 **Validation:**
@@ -347,6 +394,15 @@ GET /chat/conversations/team/{team_id}
 Authorization: Bearer <jwt>
 ```
 
+#### curl
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/team/4' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** opens the chat for team `4`. If no row exists in `chat_conversations` for that team yet, the server creates one and adds every current `team_members` row as a member. On subsequent calls it reconciles membership (adds anyone newly added to the team since last access). Admins/SuperAdmins can do this for any team; regular users only for teams they're in.
+
 Returns the team's chat. Lazy-creates on first access, populating members from `team_members`. Subsequent calls reconcile membership (adds users joined since the last access).
 
 **RBAC:** SuperAdmin/Admin can access any team. Others must be in `team_members` for that team.
@@ -380,6 +436,15 @@ GET /chat/conversations/general
 Authorization: Bearer <jwt>
 ```
 
+#### curl
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/general' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** returns the singleton org-wide `#general` conversation (always `id=1`). If the caller isn't yet a member, the server inserts a row in `chat_conversation_members` for them — no admin action needed. Treat this as a "join the lobby" call; you can run it on every login as a no-op.
+
 Returns the singleton `#general` conversation, auto-joining the caller as a member if they aren't already.
 
 **Response:** `200 OK`
@@ -405,6 +470,15 @@ GET /chat/conversations/{conversation_id}
 Authorization: Bearer <jwt>
 ```
 
+#### curl
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/42' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** fetches one specific conversation (id `42` here). Useful for a deep-link / refresh of a single chat header without touching the whole inbox. Returns 403 `CHAT_NOT_MEMBER` if the caller is not in the conversation, 404 `CHAT_NOT_FOUND` if the row was soft-deleted or never existed.
+
 **RBAC:** caller must be a member of the conversation.
 
 **Response:** same shape as 4.1 entries.
@@ -426,6 +500,24 @@ Authorization: Bearer <jwt>
 GET /chat/conversations/{conversation_id}/messages?cursor={cursor}&limit={n}
 Authorization: Bearer <jwt>
 ```
+
+#### curl — first page
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/2/messages?limit=50' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** fetches the **most recent 50 messages** in conversation `2`, newest first. No cursor needed for the first page — just send the limit. The response includes `next_cursor` and `has_more`; if `has_more: true`, save the cursor for the next call.
+
+#### curl — next page (older messages)
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/2/messages?limit=50&cursor=eyJ0IjogIjIwMjYtMDQtMjdUMTI6MDA6MzAiLCAiaSI6IDk5MH0%3D' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** fetches the next page of 50 *older* messages. The `cursor` is the **literal `next_cursor` string** from the previous response, URL-encoded (`==` becomes `%3D%3D`). The frontend never builds this — just shuttles it back. See §5.1.1 below for what the cursor encodes and why it's required for pagination beyond the first page.
 
 Returns messages in **reverse chronological order** (newest first). Use the returned `next_cursor` to fetch the next page (older messages).
 
@@ -493,6 +585,18 @@ Returns messages in **reverse chronological order** (newest first). Use the retu
 
 ---
 
+### 5.1.1 About the `cursor`
+
+The cursor is **server-issued** — the frontend never constructs it. It's a base64-encoded `{created_at, message_id}` of the oldest message on the page you just received. The next call sends it back so the server knows where to continue. Three rules:
+
+1. **Omit on the first call.** Just `?limit=50`. Server returns the latest 50 + `next_cursor` for the next page.
+2. **Pass back verbatim** on subsequent calls. Don't decode, don't mutate.
+3. **Stop when `has_more: false`** — `next_cursor` will be `null`. Hide your "load older" button.
+
+When `has_more: false` and you only have one message in the conversation, `next_cursor` will be `null`. **That's correct, not a bug** — there's no older page to point to.
+
+---
+
 ### 5.2 Send a message
 
 ```http
@@ -500,6 +604,64 @@ POST /chat/conversations/{conversation_id}/messages
 Authorization: Bearer <jwt>
 Content-Type: application/json
 ```
+
+#### curl — text message
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/2/messages' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "message_type": "text",
+    "body": "*hello* @bob 🎉"
+  }'
+```
+
+**What this does:** sends a text message into conversation `2`. The body supports WhatsApp formatting (`*bold*`, `_italic_`, `~strike~`, `` `code` ``) which the server preserves verbatim. `@bob` is parsed server-side, looked up in `users.username`, and a high-priority `chat.mention` notification is created. Online recipients get `message.new` over the chat WS; offline ones get a row in `notifications`.
+
+#### curl — image message (after upload)
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/2/messages' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "message_type": "image",
+    "body": "screenshot of the bug",
+    "attachment_id": 88
+  }'
+```
+
+**What this does:** sends an image message that points at attachment `88` (already uploaded via `POST /chat/attachments`). `body` is an optional caption. The response includes a fresh pre-signed `attachment.url` so the client can render the image immediately without a second round-trip.
+
+#### curl — voice note
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/2/messages' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "message_type": "voice",
+    "attachment_id": 91
+  }'
+```
+
+**What this does:** sends a voice note. No `body` field. The attachment row carries `duration_seconds` (set during upload) and the client-side waveform JSON.
+
+#### curl — reply
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/conversations/2/messages' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "message_type": "text",
+    "body": "agreed",
+    "reply_to_message_id": 991
+  }'
+```
+
+**What this does:** quotes message `991` and sends a reply. The new message stores `reply_to_message_id`; the client renders the original above the reply (like WhatsApp's "swipe to reply").
 
 #### Body
 
@@ -594,6 +756,15 @@ POST /chat/messages/{message_id}/read
 Authorization: Bearer <jwt>
 ```
 
+#### curl
+
+```bash
+curl --location --request POST 'https://devai.api.htinfosystems.com/chat/messages/992/read' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** records that the caller has read message `992`. Idempotent — calling it twice is a no-op. Triggers three side-effects: writes `chat_message_reads`, advances `chat_conversation_members.last_read_message_id`, and publishes a WS event (`message.read` to the sender for DMs, `message.read_count` to all members for team/general). Also fires `unread.update` to all of *your* tabs so the badge clears across devices. Response is `204 No Content` — no body.
+
 Idempotent. Records that the caller has read this message.
 
 - **DM:** publishes `message.read` to the **sender** (drives WhatsApp blue-ticks).
@@ -621,6 +792,19 @@ Content-Type: application/json
 
 { "body": "updated text" }
 ```
+
+#### curl
+
+```bash
+curl --location --request PATCH 'https://devai.api.htinfosystems.com/chat/messages/992' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "body": "actually, see you Friday"
+  }'
+```
+
+**What this does:** edits message `992`. Three rules enforced server-side: (1) caller must be the **original sender**, (2) the message must still be `text`, (3) `now() − created_at ≤ 15 minutes`. The previous body is copied to `chat_message_edits` for audit, then the live body is overwritten and `edited_at` is set. Every conversation member gets a `message.edited` WS event so their UI re-renders the bubble in place.
 
 **Rules:**
 - Only the original **sender** can edit.
@@ -673,6 +857,15 @@ DELETE /chat/messages/{message_id}
 Authorization: Bearer <jwt>
 ```
 
+#### curl
+
+```bash
+curl --location --request DELETE 'https://devai.api.htinfosystems.com/chat/messages/992' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** soft-deletes message `992`. Only the JWT's `role_name` ∈ `{SuperAdmin, Admin}` is allowed — non-admin senders get 403 `CHAT_ADMIN_ONLY` even on their own message. The body is retained in DB for audit; subsequent `GET .../messages` calls return `body: "[message deleted]"` and hide the attachment URL. All members get a `message.deleted` WS event so the bubble flips to the deleted state. Response is `204 No Content`.
+
 **Only SuperAdmin or Admin can delete.** Soft-delete: sets `deleted_at` and `deleted_by`. The body remains in DB for audit; subsequent fetches return `body = "[message deleted]"` and hide the attachment.
 
 #### Server actions
@@ -699,6 +892,19 @@ Content-Type: application/json
 
 { "conversation_ids": [17, 1, 65] }
 ```
+
+#### curl
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/messages/992/forward' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "conversation_ids": [17, 1, 65]
+  }'
+```
+
+**What this does:** copies message `992` into conversations `17`, `1`, and `65` — three new messages are created, with the **caller** as `sender_id` and `forwarded_from_message_id=992` on each. Body and `attachment_id` are reused (the same S3 object is referenced — no duplication). The caller must be a member of every destination; the Admin team-override does **not** relax membership for forwarding. Each destination's members get a `message.new` WS event.
 
 Forwards an existing message into one or more conversations. Each new message:
 - has the **caller** as `sender_id` (i.e. you're forwarding it),
@@ -747,6 +953,29 @@ duration_seconds=12        (optional, only for voice)
 file=@voice.webm           (the file)
 ```
 
+#### curl — image upload
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/attachments' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --form 'conversation_id="2"' \
+  --form 'file=@"/path/to/screenshot.png"'
+```
+
+**What this does:** uploads `screenshot.png` for use in conversation `2`. Server detects the MIME (`image/png`), checks it against the allow-list and the 10 MB cap, pushes it to the `AWS_S3_BUCKET_CHAT` bucket at `chat/2/2026-04/<uuid>.png`, persists a `chat_message_attachments` row, and returns the row + a fresh pre-signed GET URL. **The file isn't visible to anyone yet** — you still need to send a message referencing the returned `id`.
+
+#### curl — voice note upload
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/attachments' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...' \
+  --form 'conversation_id="2"' \
+  --form 'duration_seconds="12"' \
+  --form 'file=@"/path/to/voice.webm";type=audio/webm'
+```
+
+**What this does:** same flow but for a voice note. The `duration_seconds` form field is stored in the row — the server doesn't decode the audio to verify it. The `;type=audio/webm` hint forces curl to set the right `Content-Type` part header, which the server uses for MIME-allow-list checks (browsers send this automatically; curl needs the hint).
+
 Two-step send: **upload first, then post the message** referencing the returned `attachment_id`.
 
 **Server actions:**
@@ -792,6 +1021,15 @@ GET /chat/attachments/{attachment_id}/url
 Authorization: Bearer <jwt>
 ```
 
+#### curl
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/attachments/88/url' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** issues a fresh pre-signed GET URL for attachment `88`. Use this when the URL embedded in the original message response has expired (default TTL 3600 s). The server memoises the URL in-process for half its lifetime, so calling this back-to-back returns the same string until the memo expires.
+
 Use this after a long browsing session — the URL embedded in the original message response can expire. This endpoint returns a new pre-signed URL (memoised; same URL is reused across calls within `AWS_S3_PRESIGNED_TTL_SECONDS / 2`).
 
 #### Response — `200 OK`
@@ -808,6 +1046,15 @@ Same shape as the upload response (with a fresh `url`).
 GET /chat/users/{user_id}/presence
 Authorization: Bearer <jwt>
 ```
+
+#### curl
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/users/11/presence' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** fetches user `11`'s online status and last-seen timestamp. Useful for rendering "online" dots on chat headers when you don't have a live WS subscription to that user. For real-time updates, prefer the `presence.update` WS event — this REST call is for cold reads.
 
 Returns the user's online/offline status and last seen time. Always visible to anyone who has a JWT (no per-user privacy controls in v1).
 
@@ -840,6 +1087,24 @@ GET /chat/search?q={query}&conversation_id={id}&limit={n}
 Authorization: Bearer <jwt>
 ```
 
+#### curl — search across all my conversations
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/search?q=hello&limit=50' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** searches `hello` across **every conversation the caller is a member of**, soft-deleted messages excluded. Uses MySQL FULLTEXT (`MATCH … AGAINST IN BOOLEAN MODE`) when the `ft_body` index is present, falling back to `LIKE %hello%`. The result has the same shape as message-list (paginated with cursor), so the same UI component can render results.
+
+#### curl — narrow search to one conversation
+
+```bash
+curl --location 'https://devai.api.htinfosystems.com/chat/search?q=migration&conversation_id=17&limit=20' \
+  --header 'Authorization: Bearer eyJhbGciOiJIUzI1NiI...'
+```
+
+**What this does:** restricts the search to conversation `17` only. The membership filter is still applied — if you pass a `conversation_id` you're not a member of, you get an empty result, **not** a 403 (the query simply joins on membership and returns zero rows). This prevents enumeration attacks.
+
 Searches message bodies in conversations the **caller is a member of**. Soft-deleted messages are excluded.
 
 **Query params:**
@@ -870,39 +1135,108 @@ Searches message bodies in conversations the **caller is a member of**. Soft-del
 
 ## 9. WebSocket Protocol
 
+A single WebSocket carries every real-time event for chat — messages, typing, presence, read receipts, and inbox updates. There is no second socket; everything multiplexes on this one channel.
+
 ### 9.1 Connect
 
+The URL pattern (using Postman / docs variables):
+
 ```
-ws://host:8517/chat/ws?token=<jwt>
+ws://{{ws_url}}/chat/ws?token={{token}}
 ```
 
-Closure codes:
+Concrete URLs by environment:
 
+| Environment | URL |
+|---|---|
+| Local (direct) | `ws://localhost:8517/chat/ws?token=eyJhbGc...` |
+| Local (gateway) | `ws://localhost:8050/chat/ws?token=eyJhbGc...` |
+| Dev | `wss://devai.api.htinfosystems.com/chat/ws?token=eyJhbGc...` |
+| Production | `wss://<prod-host>/chat/ws?token=eyJhbGc...` |
+
+**`wss://` (TLS) on dev/prod, `ws://` (plain) only on local.** The `?token=` query parameter is the same JWT used for REST `Authorization: Bearer …`. Browsers can't set headers on a `WebSocket()` constructor, hence the query string.
+
+#### Test from the command line
+
+If you have `websocat` installed:
+
+```bash
+websocat 'wss://devai.api.htinfosystems.com/chat/ws?token=eyJhbGciOiJIUzI1NiI...'
+```
+
+You'll see a stream of JSON frames; type a JSON message + Enter to send (e.g. `{"action":"ping"}`).
+
+### 9.2 Connection lifecycle
+
+#### On successful upgrade
+1. Server calls `_validate_token(token)` against the auth service (Redis-cached 60 s).
+2. WS is `accept()`-ed.
+3. `ws_manager.connect(ws, user_id)` adds the socket to the per-user set (multiple tabs/devices supported).
+4. `chat:presence:{user_id} = online` is set in Redis (TTL **90 s**).
+5. `chat_user_presence` row is upserted with `status='online'`, `last_seen_at=NOW()`.
+6. A **`presence.update`** event is fanned out to every user who shares a conversation with this user. They see the green dot turn on.
+
+#### On client disconnect (clean or unexpected)
+1. `ws_manager.disconnect(ws, user_id)` removes the socket from the user's set. If it was the user's last socket, the set is dropped entirely.
+2. `chat:presence:{user_id}` is deleted from Redis.
+3. `chat_user_presence.status='offline'`, `last_seen_at=NOW()` is written.
+4. A **`presence.update`** with `status: "offline"` is fanned out to co-conversation users.
+
+#### On heartbeat TTL expiry (no ping for >90 s)
+The Redis presence key naturally expires. The next presence read returns nothing, and the user is treated as offline. Co-conversation users **do not** receive an automatic event for this — they'll discover the offline status the next time they query `/chat/users/{id}/presence` or the next disconnect/connect cycle. (A keyspace-notification listener for proactive offline events is a follow-up.)
+
+#### Closure codes
 | Code | Reason |
 |---|---|
-| `4001` | Invalid or expired token (issued before `accept`) |
-| `1000` | Normal close (caller disconnected cleanly) |
-| Other | Unexpected disconnect — client should reconnect with backoff |
+| `4001` | Invalid or expired token (closed before `accept`) |
+| `1000` | Normal close (client called `ws.close()`) |
+| `1001` | Going away (page navigated away / app backgrounded) |
+| `1006` | Abnormal close (network drop, server crash) |
+| Other | Unexpected — client should reconnect with exponential backoff |
 
-On a successful accept the server:
-1. Sets `chat:presence:{user_id}=online` in Redis (TTL 90 s).
-2. Upserts `chat_user_presence.status=online`, `last_seen_at=NOW()`.
-3. Fans out a `presence.update` event to every user that shares a conversation with the caller.
-
-Multiple concurrent connections per user are allowed — the manager keeps a `Set[WebSocket]` per user_id, so opening the chat in a second tab still works.
+#### Multi-tab behaviour
+A single user can have any number of concurrent WS connections (web tab + mobile webview + desktop client). Every connection receives every event for that user — that's the whole point of `unread.update` (cross-tab badge sync). Closing one tab doesn't affect the others.
 
 ---
 
-### 9.2 Server → Client events
+### 9.3 The full event catalog — what fires when
 
-All server-to-client messages are JSON of the form:
+This is the table to consult when you want to know **"what triggered this event?"** or conversely **"if I do X, what events fire?"**
 
-```json
-{ "type": "<event-type>", "data": { ... } }
-```
+#### Server → Client events
 
-#### `message.new`
-A new message was sent into a conversation the user belongs to.
+| Event `type` | Triggered by | Recipients | Fires once per |
+|---|---|---|---|
+| `message.new` | `POST /chat/conversations/{id}/messages` (send), `POST /chat/messages/{id}/forward` (forward) | Every conversation member **except** the sender | Recipient (one event per online member) |
+| `message.edited` | `PATCH /chat/messages/{id}` (sender, ≤15 min) | Every conversation member | Member |
+| `message.deleted` | `DELETE /chat/messages/{id}` (Admin/SuperAdmin) | Every conversation member | Member |
+| `message.read` | `POST /chat/messages/{id}/read` or WS `mark_read`, **DM only** | The original **sender** of the read message | Once |
+| `message.read_count` | `POST /chat/messages/{id}/read` or WS `mark_read`, **team/general only** | Every conversation member | Member |
+| `message.delivered` | *(reserved — not emitted in v1)* | — | — |
+| `typing.start` | WS `{action:"typing", state:"start"}` from another user | Every conversation member **except** the typer | Member |
+| `typing.stop` | WS `{action:"typing", state:"stop"}` from another user | Every conversation member **except** the typer | Member |
+| `presence.update` | Connection accept · disconnect · explicit close | Every user who shares ≥1 conversation with the affected user | Each co-member |
+| `inbox.bump` | `POST /chat/conversations/{id}/messages` (send), `POST /chat/messages/{id}/forward` | Every conversation member **including** the sender | Member |
+| `unread.update` | `POST /chat/messages/{id}/read` or WS `mark_read` (loopback) | **Every connection of the reader** (cross-tab/device sync) | Reader's connection |
+| `pong` | WS `{action:"ping"}` | The pinging connection only | Per ping |
+
+#### Client → Server actions
+
+| Action | Effect | Server emits in response |
+|---|---|---|
+| `{"action":"ping"}` | Refreshes Redis presence TTL to 90 s | `{"type":"pong"}` to the same connection |
+| `{"action":"typing", "conversation_id":N, "state":"start"\|"stop"}` | Sets `chat:typing:{conv}:{user}` (TTL 5 s) | `typing.start` / `typing.stop` to other conversation members |
+| `{"action":"mark_read", "message_id":M}` | Writes `chat_message_reads`, advances `last_read_message_id` | DM: `message.read` to sender. Team/general: `message.read_count` to all. Always: `unread.update` to caller's other tabs |
+
+---
+
+### 9.4 Every server-to-client message format
+
+Every server frame has the shape `{"type": "<name>", "data": {...}}`.
+
+#### 9.4.1 `message.new` — a new message lands
+
+**Trigger instance:** another conversation member just called `POST /chat/conversations/{id}/messages` or `POST /chat/messages/{id}/forward`. Sender's own connection does NOT receive this — only other members.
 
 ```json
 {
@@ -927,7 +1261,11 @@ A new message was sent into a conversation the user belongs to.
 }
 ```
 
-#### `message.edited`
+For attachment messages, `attachment` is populated identically to the REST `MessageOut` (mime, file_name, size, duration, pre-signed `url`, etc.).
+
+#### 9.4.2 `message.edited` — body was edited within 15 min
+
+**Trigger instance:** the original sender called `PATCH /chat/messages/{id}` within the edit window.
 
 ```json
 {
@@ -935,13 +1273,17 @@ A new message was sent into a conversation the user belongs to.
   "data": {
     "message_id": 992,
     "conversation_id": 42,
-    "body": "updated text",
+    "body": "actually, see you Friday",
     "edited_at": "2026-04-27T12:05:30"
   }
 }
 ```
 
-#### `message.deleted`
+The client should locate the message bubble by `message_id` and replace its body in place. Render an "edited" marker.
+
+#### 9.4.3 `message.deleted` — admin removed a message
+
+**Trigger instance:** an Admin or SuperAdmin called `DELETE /chat/messages/{id}`.
 
 ```json
 {
@@ -954,22 +1296,11 @@ A new message was sent into a conversation the user belongs to.
 }
 ```
 
-#### `message.delivered` *(DM only)*
+Client replaces the body with a deleted-state placeholder (e.g. *"This message was deleted"*) and hides any attachment.
 
-Reserved for future use (the server doesn't currently emit this in v1; client should be tolerant of receiving it).
+#### 9.4.4 `message.read` — DM blue-tick
 
-```json
-{
-  "type": "message.delivered",
-  "data": {
-    "message_id": 992,
-    "user_id": 11,
-    "delivered_at": "2026-04-27T12:02:02"
-  }
-}
-```
-
-#### `message.read` *(DM only — sent to the original sender)*
+**Trigger instance:** in a **DM**, the recipient marked your message as read (REST or WS). Sent **only to the original sender** of the read message.
 
 ```json
 {
@@ -982,7 +1313,11 @@ Reserved for future use (the server doesn't currently emit this in v1; client sh
 }
 ```
 
-#### `message.read_count` *(team / general — sent to all members)*
+This is the WhatsApp two-blue-ticks signal. `user_id` is the reader; `message_id` identifies which of your sent messages was read.
+
+#### 9.4.5 `message.read_count` — group read counter
+
+**Trigger instance:** in a **team/general** room, any member marked the message read. Sent to **every member**.
 
 ```json
 {
@@ -995,31 +1330,49 @@ Reserved for future use (the server doesn't currently emit this in v1; client sh
 }
 ```
 
-#### `typing.start` / `typing.stop`
+We send a denormalised count, not per-user reads, to keep fan-out cheap in large rooms. UIs typically render this as *"4 read"* below the message.
+
+#### 9.4.6 `message.delivered` — *(reserved, not yet emitted)*
+
+Schema is documented for forward-compat. Clients should ignore unknown event types gracefully, but `message.delivered` will use this shape:
+
+```json
+{
+  "type": "message.delivered",
+  "data": {
+    "message_id": 992,
+    "user_id": 11,
+    "delivered_at": "2026-04-27T12:02:02"
+  }
+}
+```
+
+#### 9.4.7 `typing.start` / `typing.stop`
+
+**Trigger instance:** another conversation member sent `{"action":"typing","state":"start"|"stop"}`. The typer themselves does NOT receive these.
 
 ```json
 {
   "type": "typing.start",
-  "data": {
-    "conversation_id": 42,
-    "user_id": 11
-  }
+  "data": { "conversation_id": 42, "user_id": 11 }
 }
 ```
 
 ```json
 {
   "type": "typing.stop",
-  "data": {
-    "conversation_id": 42,
-    "user_id": 11
-  }
+  "data": { "conversation_id": 42, "user_id": 11 }
 }
 ```
 
-> **Recommendation:** clients should auto-clear typing indicators after 6 s of silence even without a `typing.stop` (matches the 5-s Redis TTL plus 1 s slack), in case the sender goes offline mid-keystroke.
+**Client safeguard:** Redis typing key TTL is 5 s. The server doesn't push a synthetic `typing.stop` when the key expires. So the client should auto-clear its indicator after **6 seconds** of silence (5 s TTL + 1 s safety margin) even if `typing.stop` never arrives — handles the case where the typer's tab crashed mid-keystroke.
 
-#### `presence.update`
+#### 9.4.8 `presence.update`
+
+**Trigger instances** (3 cases):
+- Some user X just **connected** their WS → recipients = co-members of X. Payload `status: "online"`.
+- Some user X **disconnected** → recipients = co-members of X. Payload `status: "offline"`, `last_seen_at` set.
+- *(Reserved)* TTL expiry, when keyspace listener is wired up. Same shape.
 
 ```json
 {
@@ -1032,11 +1385,11 @@ Reserved for future use (the server doesn't currently emit this in v1; client sh
 }
 ```
 
-Sent on connect, on disconnect, and on heartbeat-TTL expiry.
+Note `last_seen_at` is `null` when `status="online"` — the user is *currently* present.
 
-#### `inbox.bump`
+#### 9.4.9 `inbox.bump` — WhatsApp-style inbox cell update
 
-Sent to every conversation member (sender included) right after a new message lands. Mirrors the same `latest_message` shape returned by `GET /chat/conversations` so the client can swap the inbox cell in place without refetching.
+**Trigger instance:** any new message lands in any conversation the recipient belongs to (send or forward). Sent to **every member including the sender** (the sender's row gets `unread_count: 0` so the cell still moves to top).
 
 ```json
 {
@@ -1056,11 +1409,11 @@ Sent to every conversation member (sender included) right after a new message la
 }
 ```
 
-For the **sender's** own copy, `unread_count` is always `0` (they just sent it). For everyone else, the count is recomputed from `chat_conversation_members.last_read_message_id` so it's authoritative even after concurrent reads.
+The `latest_message` shape **exactly mirrors** the same field in `GET /chat/conversations`, so a client can blindly overwrite the inbox cell's data without re-fetching the inbox. `unread_count` is recomputed from `chat_conversation_members.last_read_message_id` per-recipient, so it's authoritative even under concurrent reads.
 
-#### `unread.update`
+#### 9.4.10 `unread.update` — cross-tab badge sync (loopback)
 
-Self-loopback. When the user reads on one tab, this event fires on **every** WS connection of the same user (including the one that triggered the read) so the inbox badge clears everywhere.
+**Trigger instance:** the recipient *themself* called `POST /chat/messages/{id}/read` or sent WS `{action:"mark_read"}`. Fired on **every WS connection of that user** — desktop tab + mobile tab + browser tab in another window all clear the badge in lockstep.
 
 ```json
 {
@@ -1072,41 +1425,43 @@ Self-loopback. When the user reads on one tab, this event fires on **every** WS 
 }
 ```
 
-Triggered by:
-- `POST /chat/messages/{id}/read` (REST)
-- `{"action": "mark_read", "message_id": 992}` (WS)
+The connection that triggered the read also receives this — it's not de-duplicated. If your client maintains optimistic state (e.g. set `unread_count = 0` immediately on `mark_read`), the loopback is a no-op confirmation.
 
-#### `mention`
+#### 9.4.11 `mention` — *(reserved on chat WS)*
 
-Reserved. Currently mention notifications go through the existing notification WebSocket (see §10.5). v1 does **not** emit a separate `mention` event on the chat WS — clients should listen on `/ws/notifications` for `chat.mention` events instead.
+In v1, mention pushes go through the **existing notification WebSocket** (`/ws/notifications` on the Status service, port 8515) as a `chat.mention` event. The chat WS does not emit a separate `mention` event today. Listening only on `/chat/ws`? You still get `message.new` with `mentions: [your_user_id]` in the payload — that's enough to highlight.
 
-#### `pong`
+#### 9.4.12 `pong` — heartbeat ack
 
-Reply to a client `ping`.
+**Trigger instance:** client sent `{"action":"ping"}`. Sent only to the pinging connection.
 
 ```json
 { "type": "pong" }
 ```
 
+No `data` field — the type alone is the signal. Used purely for liveness; no business meaning.
+
 ---
 
-### 9.3 Client → Server actions
+### 9.5 Every client-to-server message format
 
-All client-to-server messages are JSON, sent as text frames:
+All sent as **text frames** (JSON-encoded strings). Binary frames are not accepted.
 
-```json
-{ "action": "<action-name>", "...": "..." }
-```
+#### 9.5.1 `ping` — keep presence alive
 
-#### `ping`
+**When to send:** every **30 seconds** while the WS is open. Redis TTL is 90 s, so missing 3 pings drops you offline.
 
 ```json
 { "action": "ping" }
 ```
 
-Refreshes the user's presence TTL in Redis. Server replies with `{"type": "pong"}`. **Send every 30 s** to stay marked online.
+Server replies `{"type":"pong"}` to the same connection. Refreshes `chat:presence:{user_id}` TTL to 90 s.
 
-#### `typing`
+#### 9.5.2 `typing` — start/stop indicator
+
+**When to send:**
+- `start` on the first keystroke after a 3-second pause
+- `stop` on send-message OR after 4 seconds of typing inactivity (whichever comes first)
 
 ```json
 {
@@ -1116,9 +1471,19 @@ Refreshes the user's presence TTL in Redis. Server replies with `{"type": "pong"
 }
 ```
 
-`state` is `"start"` or `"stop"`. Server fans out a `typing.start` / `typing.stop` to other conversation members. The Redis typing key has a TTL of 5 s, so silence = automatic stop.
+```json
+{
+  "action": "typing",
+  "conversation_id": 42,
+  "state": "stop"
+}
+```
 
-#### `mark_read`
+Server writes `chat:typing:{conv}:{user}` to Redis with TTL 5 s and fans out `typing.start` / `typing.stop` to other conversation members.
+
+#### 9.5.3 `mark_read` — read a message
+
+**When to send:** when a message becomes visible in the viewport (intersection observer) OR the user manually marks all read.
 
 ```json
 {
@@ -1127,48 +1492,84 @@ Refreshes the user's presence TTL in Redis. Server replies with `{"type": "pong"
 }
 ```
 
-Records that the user has read this message. Equivalent to the REST endpoint in §5.3 but cheaper for chatty UIs. Server fans out `message.read` (DM) or `message.read_count` (team / general).
+Equivalent to `POST /chat/messages/991/read` but cheaper (no HTTP round-trip, no JWT re-validation per call). Server writes `chat_message_reads`, advances `last_read_message_id`, and emits the appropriate read events plus a `unread.update` loopback.
+
+#### Frames the server will silently ignore
+
+To keep the protocol stable, the server **drops** (no error, no close) any frame that:
+- Is not valid JSON
+- Has no `action` field
+- Has an unknown `action` value
+- Is a binary frame
+
+Don't rely on this — but you can `JSON.stringify` confidently knowing a typo won't kill the connection.
 
 ---
 
-### 9.4 Heartbeat & reconnection
-
-A robust client should:
+### 9.6 Reference client implementation
 
 ```javascript
-const ws = new WebSocket(`ws://host:8517/chat/ws?token=${jwt}`);
-let pingTimer;
+const WS_URL = `wss://devai.api.htinfosystems.com/chat/ws?token=${jwt}`;
 
-ws.onopen = () => {
-  pingTimer = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ action: "ping" }));
+let ws, pingTimer, retryCount = 0;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    retryCount = 0;
+    // 30-second heartbeat (server TTL is 90 s)
+    pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: "ping" }));
+      }
+    }, 30_000);
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    switch (msg.type) {
+      case "message.new":         onMessageNew(msg.data); break;
+      case "message.edited":      onMessageEdited(msg.data); break;
+      case "message.deleted":     onMessageDeleted(msg.data); break;
+      case "message.read":        onDmRead(msg.data); break;       // DM blue tick
+      case "message.read_count":  onGroupReadCount(msg.data); break;
+      case "typing.start":        onTypingStart(msg.data); break;
+      case "typing.stop":         onTypingStop(msg.data); break;
+      case "presence.update":     onPresenceUpdate(msg.data); break;
+      case "inbox.bump":          onInboxBump(msg.data); break;    // re-render inbox cell
+      case "unread.update":       onUnreadUpdate(msg.data); break; // cross-tab badge clear
+      case "pong":                /* heartbeat ack — ignore */ break;
+      default:                    console.warn("unknown event", msg.type);
     }
-  }, 30_000);  // every 30 s — server TTL is 90 s
-};
+  };
 
-ws.onmessage = (event) => {
-  const msg = JSON.parse(event.data);
-  switch (msg.type) {
-    case "message.new":     /* render message */; break;
-    case "message.edited":  /* update message body */; break;
-    case "message.deleted": /* mark as [deleted] */; break;
-    case "message.read":    /* update tick to read */; break;
-    case "message.read_count": /* update group read counter */; break;
-    case "typing.start":    /* show "X is typing" */; break;
-    case "typing.stop":     /* hide indicator */; break;
-    case "presence.update": /* update online dot / last seen */; break;
-    case "pong":            /* heartbeat ack — ignore */; break;
-  }
-};
+  ws.onclose = (e) => {
+    clearInterval(pingTimer);
+    if (e.code === 4001) {
+      // Invalid token — re-login required, do NOT auto-reconnect
+      window.location = "/login";
+      return;
+    }
+    if (e.code !== 1000) {
+      // Exponential backoff, capped at 30 s
+      const delay = Math.min(30_000, 1000 * 2 ** retryCount++);
+      setTimeout(connect, delay);
+    }
+  };
 
-ws.onclose = (e) => {
-  clearInterval(pingTimer);
-  if (e.code !== 1000) {
-    // reconnect with exponential backoff
-    setTimeout(connect, Math.min(30_000, 1000 * 2 ** retryCount++));
-  }
-};
+  ws.onerror = (err) => console.error("WS error", err);
+}
+
+function sendTyping(conversationId, state) {
+  ws.send(JSON.stringify({ action: "typing", conversation_id: conversationId, state }));
+}
+
+function markRead(messageId) {
+  ws.send(JSON.stringify({ action: "mark_read", message_id: messageId }));
+}
+
+connect();
 ```
 
 ---
@@ -1238,30 +1639,37 @@ The two new events (`inbox.bump`, `unread.update`) are layered on top of the exi
 
 ---
 
-### 10.1 Two users chatting
+### 10.1 Two users chatting (full event sequence)
 
 ```
 Alice                                Server                                Bob
   │                                    │                                    │
-  │ WS /chat/ws?token=<jwt>            │           WS /chat/ws?token=<jwt>  │
+  │ WSS /chat/ws?token=<jwt>           │       WSS /chat/ws?token=<jwt>     │
   ├───────────────────────────────────►│◄───────────────────────────────────┤
-  │                                    │ presence.update (alice online) ──►│
-  │◄── presence.update (bob online)    │                                    │
+  │                                    │ presence.update {alice online} ──►│
+  │◄── presence.update {bob online}    │                                    │
   │                                    │                                    │
   │ POST /chat/conversations/dm        │                                    │
-  │ { peer_user_id: <bob.id> }         │                                    │
+  │ { peer_user_id: 11 }               │                                    │
   ├───────────────────────────────────►│                                    │
   │◄── 200 { id: 42, type: "dm", ... } │                                    │
   │                                    │                                    │
   │ POST /chat/conversations/42/messages                                    │
   │ { message_type: "text", body: "hi" }│                                    │
   ├───────────────────────────────────►│                                    │
-  │◄── 200 MessageOut(id=992)          │ message.new (msg 992) ───────────►│
+  │◄── 200 MessageOut(id=992)          │ ── message.new {msg 992} ────────►│
+  │                                    │ ── inbox.bump {conv 42, unr=1} ──►│
+  │ ◄── inbox.bump {conv 42, unr=0}    │  (sender's own bump, unread=0)     │
   │                                    │                                    │
-  │                                    │ ◄── { action: "mark_read",        │
-  │                                    │       message_id: 992 }            │
-  │ ◄── message.read (msg 992 by bob)  │                                    │
+  │ {action:"ping"} every 30s ───────► │ ◄── {action:"ping"} every 30s     │
+  │ ◄── pong                           │ pong ─────────────────────────────►│
+  │                                    │                                    │
+  │                                    │ ◄── {action:"mark_read", id:992}   │
+  │                                    │ ── unread.update {conv 42, unr=0}►│ (cross-tab)
+  │ ◄── message.read {msg 992 by bob}  │                                    │
 ```
+
+Every event you see above is documented in §9.4. `inbox.bump` updates the inbox cell preview + badge for both parties. `unread.update` clears the badge across all of Bob's connected tabs/devices.
 
 ### 10.2 Sending a voice note
 
