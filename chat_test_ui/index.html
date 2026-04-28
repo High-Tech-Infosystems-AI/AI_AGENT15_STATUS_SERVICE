@@ -533,6 +533,26 @@
         loadInbox();
       }, [loadInbox]);
 
+      // Pull persisted delivery/read state from a REST response and merge
+      // into deliveryStatus so the ticks render correctly after a reload.
+      const hydrateDeliveryFromItems = useCallback((items) => {
+        if (!items || !items.length) return;
+        const merged = {};
+        for (const m of items) {
+          if ((m.delivered_to && m.delivered_to.length) ||
+              (m.read_by && m.read_by.length)) {
+            merged[m.id] = {
+              delivered: m.delivered_to || [],
+              read: m.read_by || [],
+              read_count: m.read_count,
+            };
+          }
+        }
+        if (Object.keys(merged).length) {
+          setDeliveryStatus((prev) => ({ ...prev, ...merged }));
+        }
+      }, []);
+
       async function selectConversation(conv) {
         setSelectedId(conv.id);
         setMessages([]);
@@ -542,6 +562,7 @@
         try {
           const data = await api("GET", `/chat/conversations/${conv.id}/messages?limit=50`);
           setMessages([...(data.items || [])].reverse());
+          hydrateDeliveryFromItems(data.items);
           setCursor(data.next_cursor);
           setHasMore(data.has_more);
         } catch (e) { /* logged */ }
@@ -552,6 +573,7 @@
         try {
           const data = await api("GET", `/chat/conversations/${selectedId}/messages?limit=50&cursor=${encodeURIComponent(cursor)}`);
           setMessages((prev) => [...[...(data.items || [])].reverse(), ...prev]);
+          hydrateDeliveryFromItems(data.items);
           setCursor(data.next_cursor);
           setHasMore(data.has_more);
         } catch (e) { /* logged */ }
@@ -853,17 +875,20 @@
         }
       }, [messages.length]);
 
-      // Auto mark-read for the latest message (sender !== self).
-      // Idempotent: never sends `mark_read` twice for the same message id
-      // in the same conversation.
+      // Auto mark-read for every UNREAD message in this conversation
+      // (sender !== self, id > last acked). Sends them as one bulk WS frame.
+      // Idempotent: never re-acks an id we've already sent.
       useEffect(() => {
         if (!autoMarkRead || messages.length === 0) return;
-        const latest = messages[messages.length - 1];
-        if (!latest || latest.sender_id === session.user_id) return;
         const lastAcked = lastAckedRef.current[conv.id] || 0;
-        if (latest.id <= lastAcked) return;        // already acked → don't loop
-        lastAckedRef.current[conv.id] = latest.id;
-        ws.send({ action: "mark_read", message_id: latest.id });
+        const unread = messages
+          .filter((m) => m.sender_id !== session.user_id && m.id > lastAcked &&
+                          !m.read_by?.includes(session.user_id))
+          .map((m) => m.id);
+        if (unread.length === 0) return;
+        // Advance the high-water mark to the largest id we just acked
+        lastAckedRef.current[conv.id] = Math.max(...unread);
+        ws.send({ action: "mark_read", message_ids: unread });
       }, [messages, autoMarkRead, session.user_id, ws, conv.id]);
 
       return (
@@ -873,16 +898,34 @@
               <button onClick={loadOlder} className="text-xs px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">Load older</button>
             </div>
           )}
-          <label className="text-[11px] text-gray-500 flex items-center gap-1 mb-2"
-                 title="When ON, the latest received message is marked read automatically — sender sees ✓✓ blue almost instantly.&#10;When OFF, you control the read receipt with the 👁 button per message — sender sees the gray ✓✓ delivered state until you act.">
-            <input type="checkbox" checked={autoMarkRead}
-                   onChange={(e) => setAutoMarkRead(e.target.checked)}
-                   className="w-3 h-3" />
-            Auto mark-read on view
-            <span className="text-[10px] text-gray-400 ml-1">
-              {autoMarkRead ? "(WhatsApp-like)" : "(manual — shows ✓ → ✓✓ → blue distinctly)"}
-            </span>
-          </label>
+          <div className="flex items-center justify-between mb-2 gap-2">
+            <label className="text-[11px] text-gray-500 flex items-center gap-1 flex-1"
+                   title="When ON, every unread message in view is bulk-marked read automatically — sender sees ✓✓ blue almost instantly.&#10;When OFF, control read receipts manually with 👁 or 'Mark all read'.">
+              <input type="checkbox" checked={autoMarkRead}
+                     onChange={(e) => setAutoMarkRead(e.target.checked)}
+                     className="w-3 h-3" />
+              Auto mark-read on view
+              <span className="text-[10px] text-gray-400 ml-1">
+                {autoMarkRead ? "(WhatsApp-like, bulk)" : "(manual — shows ✓ → ✓✓ → blue distinctly)"}
+              </span>
+            </label>
+            <button
+              onClick={() => {
+                const unread = messages
+                  .filter((m) => m.sender_id !== session.user_id &&
+                                  m.id > (lastAckedRef.current[conv.id] || 0) &&
+                                  !m.read_by?.includes(session.user_id))
+                  .map((m) => m.id);
+                if (!unread.length) return;
+                lastAckedRef.current[conv.id] = Math.max(...unread);
+                ws.send({ action: "mark_read", message_ids: unread });
+              }}
+              className="text-[10px] px-2 py-0.5 border rounded hover:bg-gray-50"
+              title="Bulk mark every unread message in this conversation as read"
+            >
+              ✓✓ Mark all read
+            </button>
+          </div>
           {messages.length === 0 && (
             <div className="text-sm text-gray-400 text-center py-8">No messages yet.</div>
           )}
