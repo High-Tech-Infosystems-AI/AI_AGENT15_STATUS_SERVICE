@@ -59,6 +59,12 @@
       } catch { return iso; }
     }
 
+    function userLabel(user_id, name, username) {
+      if (name) return name;
+      if (username) return `@${username}`;
+      return `uid ${user_id}`;
+    }
+
     function previewBody(msg) {
       if (msg.deleted_at) return "[message deleted]";
       if (msg.message_type === "image") return msg.body || "[image]";
@@ -329,15 +335,39 @@
       const [messages, setMessages] = useState([]);
       const [cursor, setCursor] = useState(null);
       const [hasMore, setHasMore] = useState(false);
-      const [presence, setPresence] = useState({});       // { user_id: { status, last_seen_at } }
+      const [presence, setPresence] = useState({});       // { user_id: { status, last_seen_at, name, username } }
       const [typingNow, setTypingNow] = useState({});      // { conv_id: Set<user_id> }
       const [replyTo, setReplyTo] = useState(null);
+      // Per-message delivery + read tracking — drives the WhatsApp ticks
+      // for messages I sent. Shape:
+      //   { [message_id]: { delivered: number[], read: number[], read_count?: number } }
+      const [deliveryStatus, setDeliveryStatus] = useState({});
+      // Display-name cache, populated from every event/payload that
+      // carries `username`/`name` for a user_id. Lets us label any user
+      // by name even if the most recent event only had user_id.
+      const [userDir, setUserDir] = useState({});           // { user_id: { username, name } }
+      const rememberUser = useCallback((uid, username, name) => {
+        if (!uid || (!username && !name)) return;
+        setUserDir((prev) => {
+          const cur = prev[uid] || {};
+          if (cur.username === username && cur.name === name) return prev;
+          return { ...prev, [uid]: { ...cur, username, name } };
+        });
+      }, []);
 
       const api = useApi(session, logRest);
 
       // ---- Handle WS events ----
       const handleWs = useCallback((msg) => {
         logWs(msg);
+        // Opportunistically learn user names from any event that carries them
+        const d = msg.data || {};
+        if (d.user_id && (d.username || d.name)) rememberUser(d.user_id, d.username, d.name);
+        if (d.deleted_by) rememberUser(d.deleted_by, d.deleted_by_username, d.deleted_by_name);
+        if (d.mentioned_by) rememberUser(d.mentioned_by, d.mentioned_by_username, d.mentioned_by_name);
+        if (d.message?.sender_id) rememberUser(d.message.sender_id, d.message.sender_username, d.message.sender_name);
+        if (d.latest_message?.sender_id) rememberUser(d.latest_message.sender_id, d.latest_message.sender_username, d.latest_message.sender_name);
+
         if (msg.type === "message.new") {
           if (msg.data.conversation_id === selectedIdRef.current) {
             setMessages((prev) => [...prev, msg.data.message]);
@@ -362,6 +392,42 @@
               ? { ...m, deleted_at: new Date().toISOString(), body: "[message deleted]" }
               : m
           ));
+        } else if (msg.type === "message.delivered") {
+          // Sender side: my message reached recipient `user_id`. Mark ✓✓ gray.
+          setDeliveryStatus((prev) => {
+            const cur = prev[msg.data.message_id] || { delivered: [], read: [] };
+            if (cur.delivered.includes(msg.data.user_id)) return prev;
+            return {
+              ...prev,
+              [msg.data.message_id]: { ...cur, delivered: [...cur.delivered, msg.data.user_id] },
+            };
+          });
+        } else if (msg.type === "message.read") {
+          // DM only — sender side. Recipient marked it read → ✓✓ blue.
+          // Reading implies delivery, so add to both sets.
+          setDeliveryStatus((prev) => {
+            const cur = prev[msg.data.message_id] || { delivered: [], read: [] };
+            const delivered = cur.delivered.includes(msg.data.user_id)
+              ? cur.delivered
+              : [...cur.delivered, msg.data.user_id];
+            const read = cur.read.includes(msg.data.user_id)
+              ? cur.read
+              : [...cur.read, msg.data.user_id];
+            return {
+              ...prev,
+              [msg.data.message_id]: { ...cur, delivered, read },
+            };
+          });
+        } else if (msg.type === "message.read_count") {
+          // Team / general — sent to every member. Sender uses it to drive
+          // the "N read" badge on their own bubbles.
+          setDeliveryStatus((prev) => ({
+            ...prev,
+            [msg.data.message_id]: {
+              ...(prev[msg.data.message_id] || { delivered: [], read: [] }),
+              read_count: msg.data.read_count,
+            },
+          }));
         } else if (msg.type === "inbox.bump") {
           // If this conversation isn't in our local inbox yet (e.g. someone
           // just opened a DM with us and sent the first message), the inbox
@@ -402,7 +468,15 @@
               : c
           ));
         } else if (msg.type === "presence.update") {
-          setPresence((p) => ({ ...p, [msg.data.user_id]: { status: msg.data.status, last_seen_at: msg.data.last_seen_at } }));
+          setPresence((p) => ({
+            ...p,
+            [msg.data.user_id]: {
+              status: msg.data.status,
+              last_seen_at: msg.data.last_seen_at,
+              username: msg.data.username,
+              name: msg.data.name,
+            },
+          }));
         } else if (msg.type === "typing.start") {
           setTypingNow((p) => {
             const set = new Set(p[msg.data.conversation_id] || []);
@@ -513,6 +587,8 @@
               setReplyTo={setReplyTo}
               conversations={conversations}
               addLocalMessage={addLocalMessage}
+              deliveryStatus={deliveryStatus}
+              userDir={userDir}
             />
             <RightPanel restLog={restLog} wsLog={wsLog} api={api} ws={ws} />
           </div>
@@ -688,7 +764,7 @@
     /* ===========================================================
        Main pane
        =========================================================== */
-    function Main({ activeConv, messages, hasMore, loadOlder, api, session, ws, presence, typingNow, replyTo, setReplyTo, conversations, addLocalMessage }) {
+    function Main({ activeConv, messages, hasMore, loadOlder, api, session, ws, presence, typingNow, replyTo, setReplyTo, conversations, addLocalMessage, deliveryStatus, userDir }) {
       if (!activeConv) {
         return (
           <main className="flex-1 flex items-center justify-center text-gray-400">
@@ -712,8 +788,10 @@
             ws={ws}
             setReplyTo={setReplyTo}
             conversations={conversations}
+            deliveryStatus={deliveryStatus}
+            userDir={userDir}
           />
-          <TypingBar typingNow={typingNow} selfUserId={session.user_id} />
+          <TypingBar typingNow={typingNow} selfUserId={session.user_id} userDir={userDir} />
           <Composer
             convId={activeConv.id}
             api={api}
@@ -757,9 +835,11 @@
     /* ===========================================================
        Message list
        =========================================================== */
-    function MessageList({ conv, messages, hasMore, loadOlder, api, session, ws, setReplyTo, conversations }) {
+    function MessageList({ conv, messages, hasMore, loadOlder, api, session, ws, setReplyTo, conversations, deliveryStatus, userDir }) {
       const scrollRef = useRef(null);
-      const [autoMarkRead, setAutoMarkRead] = useState(true);
+      // Default OFF so the three tick states (sent → delivered → read) are
+      // each visible distinctly. Toggle on for normal chat behaviour.
+      const [autoMarkRead, setAutoMarkRead] = useState(false);
 
       // Per-conversation high-water mark of the largest message id we've
       // already acked. Prevents the auto-mark-read effect from re-firing
@@ -793,9 +873,15 @@
               <button onClick={loadOlder} className="text-xs px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">Load older</button>
             </div>
           )}
-          <label className="text-[11px] text-gray-400 flex items-center gap-1 mb-2">
-            <input type="checkbox" checked={autoMarkRead} onChange={(e) => setAutoMarkRead(e.target.checked)} className="w-3 h-3" />
+          <label className="text-[11px] text-gray-500 flex items-center gap-1 mb-2"
+                 title="When ON, the latest received message is marked read automatically — sender sees ✓✓ blue almost instantly.&#10;When OFF, you control the read receipt with the 👁 button per message — sender sees the gray ✓✓ delivered state until you act.">
+            <input type="checkbox" checked={autoMarkRead}
+                   onChange={(e) => setAutoMarkRead(e.target.checked)}
+                   className="w-3 h-3" />
             Auto mark-read on view
+            <span className="text-[10px] text-gray-400 ml-1">
+              {autoMarkRead ? "(WhatsApp-like)" : "(manual — shows ✓ → ✓✓ → blue distinctly)"}
+            </span>
           </label>
           {messages.length === 0 && (
             <div className="text-sm text-gray-400 text-center py-8">No messages yet.</div>
@@ -810,13 +896,16 @@
               setReplyTo={setReplyTo}
               conversations={conversations}
               messages={messages}
+              conv={conv}
+              deliveryStatus={deliveryStatus}
+              userDir={userDir}
             />
           ))}
         </div>
       );
     }
 
-    function MessageRow({ msg, session, api, ws, setReplyTo, conversations, messages }) {
+    function MessageRow({ msg, session, api, ws, setReplyTo, conversations, messages, conv, deliveryStatus, userDir }) {
       const isMine = msg.sender_id === session.user_id;
       const [editing, setEditing] = useState(false);
       const [editBody, setEditBody] = useState(msg.body || "");
@@ -852,18 +941,30 @@
           } ${msg.deleted_at ? "italic text-gray-500" : ""}`}>
             {repliedMsg && (
               <div className="text-[11px] border-l-2 border-blue-400 pl-2 mb-1 text-gray-600 truncate">
-                ↪ <strong>uid {repliedMsg.sender_id}:</strong> {previewBody(repliedMsg)}
+                ↪ <strong>{userLabel(repliedMsg.sender_id, repliedMsg.sender_name || userDir?.[repliedMsg.sender_id]?.name, repliedMsg.sender_username || userDir?.[repliedMsg.sender_id]?.username)}:</strong> {previewBody(repliedMsg)}
               </div>
             )}
             {msg.forwarded_from_message_id && (
               <div className="text-[11px] text-gray-500 italic">↪ forwarded</div>
             )}
 
-            <div className="text-[10px] text-gray-500">
-              uid {msg.sender_id} · {fmtTime(msg.created_at)}
-              {msg.message_type !== "text" && ` · ${msg.message_type}`}
-              {msg.edited_at && " · edited"}
-              {msg.deleted_at && " · deleted"}
+            <div className="text-[10px] text-gray-500 flex items-center gap-1">
+              <span>
+                {userLabel(msg.sender_id, msg.sender_name || userDir?.[msg.sender_id]?.name, msg.sender_username || userDir?.[msg.sender_id]?.username)}
+                {" · "}{fmtTime(msg.created_at)}
+              </span>
+              {msg.message_type !== "text" && <span>· {msg.message_type}</span>}
+              {msg.edited_at && <span>· edited</span>}
+              {msg.deleted_at && <span>· deleted</span>}
+              {isMine && !msg.deleted_at && (
+                <StatusTicks
+                  msg={msg}
+                  conv={conv}
+                  selfUserId={session.user_id}
+                  status={deliveryStatus?.[msg.id]}
+                  userDir={userDir}
+                />
+              )}
             </div>
 
             {editing ? (
@@ -906,6 +1007,78 @@
             )}
           </div>
         </div>
+      );
+    }
+
+    /* WhatsApp-style three-state ticks for messages I sent.
+
+         ✓   sent      — server accepted the message (REST 200)
+         ✓✓  delivered — recipient's chat WS was connected at fan-out time
+                         (server sent `message.delivered` to me)
+         ✓✓  read      — recipient marked the message read
+                         (server sent `message.read` / `message.read_count`)
+
+       Only renders on the sender's bubble. Each state has a distinct color
+       AND a small text label so the transitions are obvious during testing. */
+    function StatusTicks({ msg, conv, selfUserId, status }) {
+      if (!conv) return null;
+      const peers = (conv.members || []).filter((m) => m !== selfUserId);
+      const delivered = status?.delivered || [];
+      const readArr = status?.read || [];
+      const readCount = status?.read_count;
+
+      // ---- DM ----
+      if (conv.type === "dm" && peers.length === 1) {
+        const peer = peers[0];
+        if (readArr.includes(peer)) {
+          return (
+            <span className="ml-1 inline-flex items-center gap-0.5 font-bold text-blue-500"
+                  title="Read by recipient">
+              ✓✓ <span className="text-[9px] font-normal">read</span>
+            </span>
+          );
+        }
+        if (delivered.includes(peer)) {
+          return (
+            <span className="ml-1 inline-flex items-center gap-0.5 font-bold text-gray-700"
+                  title="Delivered to recipient's device">
+              ✓✓ <span className="text-[9px] font-normal text-gray-500">delivered</span>
+            </span>
+          );
+        }
+        return (
+          <span className="ml-1 inline-flex items-center gap-0.5 text-gray-400"
+                title="Sent to server">
+            ✓ <span className="text-[9px]">sent</span>
+          </span>
+        );
+      }
+
+      // ---- Group / #general ----
+      const totalPeers = peers.length || 0;
+      if (readCount && readCount > 0) {
+        return (
+          <span className="ml-1 inline-flex items-center gap-0.5 font-bold text-blue-500"
+                title={`${readCount} of ${totalPeers} have read`}>
+            ✓✓ <span className="text-[9px] font-normal">{readCount} read</span>
+          </span>
+        );
+      }
+      if (delivered.length > 0) {
+        return (
+          <span className="ml-1 inline-flex items-center gap-0.5 font-bold text-gray-700"
+                title={`Delivered to ${delivered.length} of ${totalPeers}`}>
+            ✓✓ <span className="text-[9px] font-normal text-gray-500">
+              {delivered.length}/{totalPeers} delivered
+            </span>
+          </span>
+        );
+      }
+      return (
+        <span className="ml-1 inline-flex items-center gap-0.5 text-gray-400"
+              title="Sent to server">
+          ✓ <span className="text-[9px]">sent</span>
+        </span>
       );
     }
 
@@ -963,12 +1136,15 @@
     /* ===========================================================
        Typing indicator bar
        =========================================================== */
-    function TypingBar({ typingNow, selfUserId }) {
+    function TypingBar({ typingNow, selfUserId, userDir }) {
       const others = Array.from(typingNow).filter((id) => id !== selfUserId);
       if (others.length === 0) return null;
+      const names = others.map((id) =>
+        userLabel(id, userDir?.[id]?.name, userDir?.[id]?.username)
+      );
       return (
         <div className="px-4 py-1 text-xs text-gray-500 italic border-t">
-          {others.map((id) => `uid ${id}`).join(", ")} typing…
+          {names.join(", ")} typing…
         </div>
       );
     }
