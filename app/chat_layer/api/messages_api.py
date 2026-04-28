@@ -226,7 +226,7 @@ def send_message(conversation_id: int, req: SendMessageRequest,
                                       conversation_id=conv.id,
                                       latest_message=preview,
                                       unread_count=0)
-        bridge.handle_message_for_offline_recipients(
+        bridge.handle_message_for_recipients(
             db=db, conversation_id=conv.id, message=msg,
             sender=user, recipients=recipients,
         )
@@ -383,11 +383,14 @@ def edit_message(message_id: int, req: EditMessageRequest,
         clean = sanitise_body(req.body)
         store.edit_message_body(db, message_id=msg.id, new_body=clean)
         db.refresh(msg)
-        for uid in store.member_user_ids(db, conv.id):
+        members = store.member_user_ids(db, conv.id)
+        for uid in members:
             redis_chat.publish_message_edited(
                 user_id=uid, message_id=msg.id, conversation_id=conv.id,
                 body=msg.body, edited_at=msg.edited_at.isoformat() if msg.edited_at else "",
             )
+        bridge.handle_message_edited(db=db, message=msg, sender=user,
+                                     recipients=members)
         att = _fetch_attachment(db, msg.attachment_id)
         return _to_message_out(msg, attachment=att, db=db)
     finally:
@@ -405,11 +408,14 @@ def delete_message(message_id: int, user: dict = Depends(current_user)):
         if not can_delete_message(role_name=user.get("role_name")):
             return _err("CHAT_ADMIN_ONLY", "Only Admin/SuperAdmin can delete", 403)
         store.soft_delete_message(db, message_id=msg.id, deleted_by=user["user_id"])
-        for uid in store.member_user_ids(db, conv.id):
+        members = store.member_user_ids(db, conv.id)
+        for uid in members:
             redis_chat.publish_message_deleted(
                 user_id=uid, message_id=msg.id, conversation_id=conv.id,
                 deleted_by=user["user_id"],
             )
+        bridge.handle_message_deleted(db=db, message=msg, sender=user,
+                                      recipients=members)
         return Response(status_code=204)
     finally:
         db.close()
@@ -470,6 +476,12 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
                 merged_d = sorted({*existing_d, *delivered_to_now})
                 payload["delivered_to"] = merged_d
                 payload["delivered_count"] = len(merged_d)
+            recipients_for_notif = [u for u in store.member_user_ids(db, cid)
+                                    if u != user["user_id"]]
+            bridge.handle_message_forwarded(
+                db=db, conversation_id=cid, message=new_msg,
+                sender=user, recipients=recipients_for_notif,
+            )
         return out_payloads
     finally:
         db.close()

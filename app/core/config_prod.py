@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     AWS_S3_BUCKET_PROFILES: str = Field(default_factory=lambda: os.getenv("AWS_S3_BUCKET_PROFILES", ""), env="AWS_S3_BUCKET_PROFILES")
     AWS_S3_PRESIGNED_TTL_SECONDS: int = Field(default_factory=lambda: int(os.getenv("AWS_S3_PRESIGNED_TTL_SECONDS", "3600")), env="AWS_S3_PRESIGNED_TTL_SECONDS")
 
+    # Web Push (VAPID) — see config_dev.py for behavior notes.
+    VAPID_PUBLIC_KEY: str = Field(default_factory=lambda: os.getenv("VAPID_PUBLIC_KEY", ""), env="VAPID_PUBLIC_KEY")
+    VAPID_PRIVATE_KEY: str = Field(default_factory=lambda: os.getenv("VAPID_PRIVATE_KEY", ""), env="VAPID_PRIVATE_KEY")
+    VAPID_SUBJECT: str = Field(default_factory=lambda: os.getenv("VAPID_SUBJECT", "mailto:admin@hrmis.local"), env="VAPID_SUBJECT")
+    VAPID_KEYS_FILE: str = Field(default_factory=lambda: os.getenv("VAPID_KEYS_FILE", "./vapid_keys.json"), env="VAPID_KEYS_FILE")
+    WEB_PUSH_FRONTEND_BASE_URL: str = Field(default_factory=lambda: os.getenv("WEB_PUSH_FRONTEND_BASE_URL", ""), env="WEB_PUSH_FRONTEND_BASE_URL")
+
     # Consul service discovery (optional)
     CONSUL_HOST: str = Field(default_factory=lambda: os.getenv("CONSUL_HOST", "localhost"), env="CONSUL_HOST")
     CONSUL_PORT: int = Field(default_factory=lambda: int(os.getenv("CONSUL_PORT", "8500")), env="CONSUL_PORT")
