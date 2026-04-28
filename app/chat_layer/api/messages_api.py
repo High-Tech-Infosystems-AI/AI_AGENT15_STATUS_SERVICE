@@ -8,8 +8,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import bindparam, text
 
 import app.chat_layer.notification_bridge as bridge
-from app.chat_layer import redis_chat, s3_chat_service as s3, store
+from app.chat_layer import redis_chat, s3_chat_service as s3, store, user_info_cache
 from app.chat_layer.auth import current_user
+from app.chat_layer.ws_manager import ws_manager as chat_ws_manager
 from app.chat_layer.chat_acl import (
     can_delete_message, can_edit_message, can_post_dm, can_post_general, can_post_team,
 )
@@ -50,14 +51,17 @@ def _attachment_out(att) -> Optional[AttachmentOut]:
     )
 
 
-def _to_message_out(msg, attachment=None, mention_ids=None) -> dict:
+def _to_message_out(msg, attachment=None, mention_ids=None, db=None) -> dict:
     body_out = msg.body
     if msg.deleted_at is not None:
         body_out = "[message deleted]"
         attachment = None
     att_out = attachment if isinstance(attachment, AttachmentOut) else _attachment_out(attachment)
+    sender_info = user_info_cache.get_user_info(msg.sender_id, db=db)
     return MessageOut(
         id=msg.id, conversation_id=msg.conversation_id, sender_id=msg.sender_id,
+        sender_username=sender_info.get("username"),
+        sender_name=sender_info.get("name"),
         message_type=msg.message_type, body=body_out, attachment=att_out,
         reply_to_message_id=msg.reply_to_message_id,
         forwarded_from_message_id=msg.forwarded_from_message_id,
@@ -151,17 +155,21 @@ def send_message(conversation_id: int, req: SendMessageRequest,
 
         att = _fetch_attachment(db, msg.attachment_id)
         message_payload = _to_message_out(msg, attachment=att,
-                                          mention_ids=mention_user_ids)
+                                          mention_ids=mention_user_ids, db=db)
         recipients = [m for m in store.member_user_ids(db, conv.id) if m != user["user_id"]]
         # Inbox preview row that mirrors what GET /chat/conversations would return
+        sender_info = user_info_cache.get_user_info(msg.sender_id, db=db)
         preview = {
             "id": msg.id,
             "sender_id": msg.sender_id,
+            "sender_username": sender_info.get("username"),
+            "sender_name": sender_info.get("name"),
             "message_type": msg.message_type,
             "body_preview": store._preview_for(msg.message_type, msg.body, msg.deleted_at),
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
             "deleted_at": None,
         }
+        delivered_now_at = datetime.utcnow().isoformat()
         for uid in recipients:
             redis_chat.publish_message_new(user_id=uid, message=message_payload,
                                            conversation_id=conv.id)
@@ -170,6 +178,16 @@ def send_message(conversation_id: int, req: SendMessageRequest,
             redis_chat.publish_inbox_bump(user_id=uid, conversation_id=conv.id,
                                           latest_message=preview,
                                           unread_count=unread)
+            # Two-tick logic: if the recipient currently has a chat WS open,
+            # the message reached them. Mark delivered + tell the sender.
+            if chat_ws_manager.is_online(uid):
+                store.mark_delivered(db, message_id=msg.id, user_id=uid)
+                redis_chat.publish_message_delivered(
+                    user_id=user["user_id"],
+                    message_id=msg.id,
+                    recipient_user_id=uid,
+                    delivered_at=delivered_now_at,
+                )
         # Sender's own inbox cell update too (last_message_at / preview moves to top)
         redis_chat.publish_inbox_bump(user_id=user["user_id"],
                                       conversation_id=conv.id,
@@ -200,7 +218,7 @@ def list_messages(conversation_id: int, cursor: Optional[str] = None,
         items = []
         for m in rows:
             att = _fetch_attachment(db, m.attachment_id) if m.attachment_id else None
-            items.append(_to_message_out(m, attachment=att))
+            items.append(_to_message_out(m, attachment=att, db=db))
         return PaginatedMessages(items=items, next_cursor=next_cursor,
                                  has_more=has_more).model_dump(mode="json")
     finally:
@@ -272,7 +290,7 @@ def edit_message(message_id: int, req: EditMessageRequest,
                 body=msg.body, edited_at=msg.edited_at.isoformat() if msg.edited_at else "",
             )
         att = _fetch_attachment(db, msg.attachment_id)
-        return _to_message_out(msg, attachment=att)
+        return _to_message_out(msg, attachment=att, db=db)
     finally:
         db.close()
 
@@ -322,12 +340,22 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
                 forwarded_from_message_id=orig.id,
             )
             att = _fetch_attachment(db, new_msg.attachment_id)
-            payload = _to_message_out(new_msg, attachment=att)
+            payload = _to_message_out(new_msg, attachment=att, db=db)
             out_payloads.append(payload)
+            delivered_at = datetime.utcnow().isoformat()
             for uid in store.member_user_ids(db, cid):
-                if uid != user["user_id"]:
-                    redis_chat.publish_message_new(user_id=uid, message=payload,
-                                                   conversation_id=cid)
+                if uid == user["user_id"]:
+                    continue
+                redis_chat.publish_message_new(user_id=uid, message=payload,
+                                               conversation_id=cid)
+                if chat_ws_manager.is_online(uid):
+                    store.mark_delivered(db, message_id=new_msg.id, user_id=uid)
+                    redis_chat.publish_message_delivered(
+                        user_id=user["user_id"],
+                        message_id=new_msg.id,
+                        recipient_user_id=uid,
+                        delivered_at=delivered_at,
+                    )
         return out_payloads
     finally:
         db.close()

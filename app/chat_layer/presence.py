@@ -75,12 +75,31 @@ def get_presence_snapshot(db: Session, user_id: int) -> List[dict]:
     except Exception as exc:
         logger.warning("presence snapshot db read failed: %s", exc)
 
+    # Enrich with username + name in one batched users-table query
+    user_info_by_id: dict = {}
+    if co_members:
+        try:
+            rows = db.execute(
+                text(
+                    "SELECT id, username, name FROM users WHERE id IN :ids"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"ids": co_members},
+            ).all()
+            for r in rows:
+                m = r._mapping
+                user_info_by_id[m["id"]] = {"username": m["username"], "name": m["name"]}
+        except Exception as exc:
+            logger.warning("presence snapshot users batch read failed: %s", exc)
+
     snapshot = []
     for uid in co_members:
         is_online = uid in online_ids
         last_seen = last_seen_by_id.get(uid)
+        info = user_info_by_id.get(uid, {})
         snapshot.append({
             "user_id": uid,
+            "username": info.get("username"),
+            "name": info.get("name"),
             "status": "online" if is_online else "offline",
             "last_seen_at": last_seen.isoformat() if last_seen else None,
         })
