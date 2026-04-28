@@ -37,6 +37,64 @@ def fan_out_presence(*, db: Session, user_id: int, status: str,
         )
 
 
+def announce_presence_to(*, db: Session,
+                         target_user_ids: List[int],
+                         about_user_ids: List[int]) -> None:
+    """Send `presence.update` events about `about_user_ids` to every user in
+    `target_user_ids`. Use this when membership changes (new DM, team chat
+    creation, member added) so the affected users learn each other's status
+    immediately rather than waiting for the next reconnect.
+
+    Self-pairs (target == about) are skipped automatically. Reads online
+    status from Redis (one MGET) and `last_seen_at` from the DB (one bulk
+    SELECT) — efficient even when one set is large.
+    """
+    targets = list({uid for uid in target_user_ids if uid})
+    abouts = list({uid for uid in about_user_ids if uid})
+    if not targets or not abouts:
+        return
+
+    # Redis: who's currently online?
+    online = set()
+    try:
+        client = redis_chat._get_redis()
+        keys = [f"chat:presence:{uid}" for uid in abouts]
+        values = client.mget(*keys)
+        for uid, val in zip(abouts, values):
+            if val:
+                online.add(uid)
+    except Exception as exc:
+        logger.warning("announce_presence_to redis read failed: %s", exc)
+
+    # DB: last_seen_at for everyone in `abouts`
+    last_seen: dict = {}
+    try:
+        rows = db.execute(
+            text(
+                "SELECT user_id, last_seen_at FROM chat_user_presence "
+                "WHERE user_id IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": abouts},
+        ).all()
+        for r in rows:
+            m = r._mapping
+            last_seen[m["user_id"]] = m["last_seen_at"]
+    except Exception as exc:
+        logger.warning("announce_presence_to db read failed: %s", exc)
+
+    for target in targets:
+        for about in abouts:
+            if target == about:
+                continue
+            ls = last_seen.get(about)
+            redis_chat.publish_presence(
+                user_id=target,
+                target_user_id=about,
+                status="online" if about in online else "offline",
+                last_seen_at=ls.isoformat() if ls else None,
+            )
+
+
 def get_presence_snapshot(db: Session, user_id: int) -> List[dict]:
     """Return the current presence of every user who shares a conversation
     with user_id. Online status from Redis (authoritative); last_seen_at

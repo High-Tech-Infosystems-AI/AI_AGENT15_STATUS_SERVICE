@@ -21,7 +21,8 @@ from app.chat_layer.models import (
 )
 from app.chat_layer.schemas import (
     AttachmentOut, EditMessageRequest, ErrorResponse,
-    ForwardMessageRequest, MessageOut, PaginatedMessages, SendMessageRequest,
+    ForwardMessageRequest, MarkReadBulkRequest,
+    MessageOut, PaginatedMessages, SendMessageRequest,
 )
 from app.database_Layer.db_config import SessionLocal
 from app.database_Layer.db_model import User
@@ -51,13 +52,16 @@ def _attachment_out(att) -> Optional[AttachmentOut]:
     )
 
 
-def _to_message_out(msg, attachment=None, mention_ids=None, db=None) -> dict:
+def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
+                    read_by=None, delivered_to=None) -> dict:
     body_out = msg.body
     if msg.deleted_at is not None:
         body_out = "[message deleted]"
         attachment = None
     att_out = attachment if isinstance(attachment, AttachmentOut) else _attachment_out(attachment)
     sender_info = user_info_cache.get_user_info(msg.sender_id, db=db)
+    rb = list(read_by or [])
+    dt = list(delivered_to or [])
     return MessageOut(
         id=msg.id, conversation_id=msg.conversation_id, sender_id=msg.sender_id,
         sender_username=sender_info.get("username"),
@@ -67,6 +71,9 @@ def _to_message_out(msg, attachment=None, mention_ids=None, db=None) -> dict:
         forwarded_from_message_id=msg.forwarded_from_message_id,
         edited_at=msg.edited_at, deleted_at=msg.deleted_at,
         created_at=msg.created_at, mentions=list(mention_ids or []),
+        read_by=rb, delivered_to=dt,
+        read_count=len(rb) if rb else None,
+        delivered_count=len(dt) if dt else None,
     ).model_dump(mode="json")
 
 
@@ -207,6 +214,8 @@ def send_message(conversation_id: int, req: SendMessageRequest,
             responses={403: {"model": ErrorResponse}})
 def list_messages(conversation_id: int, cursor: Optional[str] = None,
                   limit: int = 50, user: dict = Depends(current_user)):
+    from app.chat_layer.models import ChatMessageDelivery, ChatMessageRead
+    from sqlalchemy import select as _select
     db = SessionLocal()
     try:
         if not store.is_member(db, conversation_id, user["user_id"]):
@@ -215,14 +224,60 @@ def list_messages(conversation_id: int, cursor: Optional[str] = None,
             db, conversation_id=conversation_id, cursor=cursor,
             limit=min(max(limit, 1), 100),
         )
+
+        # Batch-fetch delivery + read receipts so reload renders the right
+        # ticks. One query per kind, not N. Both are indexed by message_id.
+        msg_ids = [m.id for m in rows]
+        delivered_by_msg: dict = {}
+        read_by_msg: dict = {}
+        if msg_ids:
+            d_rows = db.execute(
+                _select(ChatMessageDelivery.message_id, ChatMessageDelivery.user_id)
+                .where(ChatMessageDelivery.message_id.in_(msg_ids))
+            ).all()
+            for mid, uid in d_rows:
+                delivered_by_msg.setdefault(mid, []).append(uid)
+            r_rows = db.execute(
+                _select(ChatMessageRead.message_id, ChatMessageRead.user_id)
+                .where(ChatMessageRead.message_id.in_(msg_ids))
+            ).all()
+            for mid, uid in r_rows:
+                read_by_msg.setdefault(mid, []).append(uid)
+
         items = []
         for m in rows:
             att = _fetch_attachment(db, m.attachment_id) if m.attachment_id else None
-            items.append(_to_message_out(m, attachment=att, db=db))
+            items.append(_to_message_out(
+                m, attachment=att, db=db,
+                delivered_to=delivered_by_msg.get(m.id, []),
+                read_by=read_by_msg.get(m.id, []),
+            ))
         return PaginatedMessages(items=items, next_cursor=next_cursor,
                                  has_more=has_more).model_dump(mode="json")
     finally:
         db.close()
+
+
+def _mark_one_read(db, msg, conv, user_id: int) -> None:
+    """Mark a single message read for `user_id`. Caller must have already
+    verified membership. Publishes per-message read events but NOT
+    `unread.update` — the bulk caller fires that once per affected conv."""
+    store.mark_read(db, message_id=msg.id, user_id=user_id)
+    store.update_last_read(db, conversation_id=conv.id,
+                           user_id=user_id, message_id=msg.id)
+    now = datetime.utcnow().isoformat()
+    if conv.type == "dm":
+        redis_chat.publish_message_read(
+            user_id=msg.sender_id, message_id=msg.id,
+            reader_user_id=user_id, read_at=now,
+        )
+    else:
+        rc = store.read_count(db, msg.id)
+        for uid in store.member_user_ids(db, conv.id):
+            redis_chat.publish_message_read_count(
+                user_id=uid, message_id=msg.id, conversation_id=conv.id,
+                read_count=rc,
+            )
 
 
 @router.post("/messages/{message_id}/read", status_code=status.HTTP_204_NO_CONTENT,
@@ -235,28 +290,42 @@ def mark_message_read(message_id: int, user: dict = Depends(current_user)):
             return _err("CHAT_NOT_FOUND", "Message not found", 404)
         if not store.is_member(db, conv.id, user["user_id"]):
             return _err("CHAT_NOT_MEMBER", "Not a member", 403)
-        store.mark_read(db, message_id=msg.id, user_id=user["user_id"])
-        # Bump last_read_message_id so inbox unread_count reflects this read
-        store.update_last_read(db, conversation_id=conv.id,
-                               user_id=user["user_id"], message_id=msg.id)
-        now = datetime.utcnow().isoformat()
-        if conv.type == "dm":
-            redis_chat.publish_message_read(
-                user_id=msg.sender_id, message_id=msg.id,
-                reader_user_id=user["user_id"], read_at=now,
-            )
-        else:
-            rc = store.read_count(db, msg.id)
-            for uid in store.member_user_ids(db, conv.id):
-                redis_chat.publish_message_read_count(
-                    user_id=uid, message_id=msg.id, conversation_id=conv.id,
-                    read_count=rc,
-                )
+        _mark_one_read(db, msg, conv, user["user_id"])
         # Cross-tab unread sync: tell the reader's other connections to clear the badge
         unread = store.unread_count_for_user(db, conv.id, user["user_id"])
         redis_chat.publish_unread_update(
             user_id=user["user_id"], conversation_id=conv.id, unread_count=unread,
         )
+        return Response(status_code=204)
+    finally:
+        db.close()
+
+
+@router.post("/messages/read", status_code=status.HTTP_204_NO_CONTENT)
+def mark_messages_read_bulk(req: MarkReadBulkRequest,
+                            user: dict = Depends(current_user)):
+    """Mark up to 200 messages read in one call. Best-effort: messages the
+    caller can't see (not a member, or non-existent ids) are silently
+    skipped. Per-message `message.read` / `message.read_count` events fire
+    over the WS exactly as if you'd hit the single-message endpoint N
+    times; one `unread.update` is published per affected conversation at
+    the end (instead of per message) to avoid badge flicker."""
+    db = SessionLocal()
+    try:
+        affected_convs: set = set()
+        for mid in req.message_ids:
+            msg, conv = _fetch_message_and_conv(db, mid)
+            if not msg or not conv:
+                continue
+            if not store.is_member(db, conv.id, user["user_id"]):
+                continue
+            _mark_one_read(db, msg, conv, user["user_id"])
+            affected_convs.add(conv.id)
+        for cid in affected_convs:
+            unread = store.unread_count_for_user(db, cid, user["user_id"])
+            redis_chat.publish_unread_update(
+                user_id=user["user_id"], conversation_id=cid, unread_count=unread,
+            )
         return Response(status_code=204)
     finally:
         db.close()

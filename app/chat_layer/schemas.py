@@ -39,6 +39,15 @@ class MarkReadRequest(BaseModel):
     message_id: int = Field(..., gt=0)
 
 
+class MarkReadBulkRequest(BaseModel):
+    """Bulk mark-read: pass any number of message_ids in one call.
+    Server processes them best-effort: members-only / non-existent ids are
+    silently skipped. Replies 204 No Content; the per-message read events
+    fire over the WS as if you'd called the single-message endpoint N times.
+    """
+    message_ids: List[int] = Field(..., min_length=1, max_length=200)
+
+
 class LatestMessagePreview(BaseModel):
     id: int
     sender_id: int
@@ -105,6 +114,11 @@ class MessageOut(BaseModel):
     mentions: List[int] = []
     read_count: Optional[int] = None
     delivered_count: Optional[int] = None
+    # Persistent state — populated by GET endpoints from chat_message_reads /
+    # chat_message_deliveries so clients can render correct ticks after reload
+    # without depending on volatile WS state.
+    read_by: List[int] = []
+    delivered_to: List[int] = []
 
     model_config = {"from_attributes": True}
 
