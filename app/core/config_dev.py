@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     AWS_S3_BUCKET_PROFILES: str = os.getenv("AWS_S3_BUCKET_PROFILES", "")
     AWS_S3_PRESIGNED_TTL_SECONDS: int = int(os.getenv("AWS_S3_PRESIGNED_TTL_SECONDS", "3600"))
 
+    # Web Push (VAPID) — used by chat to deliver browser push notifications.
+    # If both keys are empty, the service auto-generates a keypair on first
+    # access and persists it to VAPID_KEYS_FILE so subsequent restarts reuse
+    # the same identity (avoids invalidating user subscriptions).
+    VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "")
+    VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "")
+    VAPID_SUBJECT: str = os.getenv("VAPID_SUBJECT", "mailto:admin@hrmis.local")
+    VAPID_KEYS_FILE: str = os.getenv("VAPID_KEYS_FILE", "./vapid_keys.json")
+    WEB_PUSH_FRONTEND_BASE_URL: str = os.getenv("WEB_PUSH_FRONTEND_BASE_URL", "http://localhost:5173")
+
     @property
     def DB_URI(self) -> str:
         # Use mysql+mysqlconnector as ORM dialect and driver
