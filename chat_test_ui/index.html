@@ -342,6 +342,14 @@
           if (msg.data.conversation_id === selectedIdRef.current) {
             setMessages((prev) => [...prev, msg.data.message]);
           }
+          // Belt-and-braces: if the conv isn't in our inbox yet, pull it in.
+          // Normally `inbox.bump` handles this, but if the events arrive in
+          // a different order this prevents the race.
+          const knownNew = conversationsRef.current.some((c) => c.id === msg.data.conversation_id);
+          if (!knownNew && !inboxLoadingRef.current && loadInboxRef.current) {
+            inboxLoadingRef.current = true;
+            loadInboxRef.current().finally(() => { inboxLoadingRef.current = false; });
+          }
         } else if (msg.type === "message.edited") {
           setMessages((prev) => prev.map((m) =>
             m.id === msg.data.message_id
@@ -355,6 +363,17 @@
               : m
           ));
         } else if (msg.type === "inbox.bump") {
+          // If this conversation isn't in our local inbox yet (e.g. someone
+          // just opened a DM with us and sent the first message), the inbox
+          // doesn't know about it. Re-fetch the inbox once to pull it in.
+          const known = conversationsRef.current.some((c) => c.id === msg.data.conversation_id);
+          if (!known) {
+            if (!inboxLoadingRef.current && loadInboxRef.current) {
+              inboxLoadingRef.current = true;
+              loadInboxRef.current().finally(() => { inboxLoadingRef.current = false; });
+            }
+            return;
+          }
           setConversations((prev) => {
             const i = prev.findIndex((c) => c.id === msg.data.conversation_id);
             if (i < 0) return prev;
@@ -368,6 +387,15 @@
             return [updated, ...without];
           });
         } else if (msg.type === "unread.update") {
+          // Same defensive check — refetch if the conv is unknown.
+          const known = conversationsRef.current.some((c) => c.id === msg.data.conversation_id);
+          if (!known) {
+            if (!inboxLoadingRef.current && loadInboxRef.current) {
+              inboxLoadingRef.current = true;
+              loadInboxRef.current().finally(() => { inboxLoadingRef.current = false; });
+            }
+            return;
+          }
           setConversations((prev) => prev.map((c) =>
             c.id === msg.data.conversation_id
               ? { ...c, unread_count: msg.data.unread_count }
@@ -394,19 +422,42 @@
       const selectedIdRef = useRef(null);
       useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
+      // Refs the WS handler uses to avoid stale closures.
+      const conversationsRef = useRef([]);
+      useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
+      const inboxLoadingRef = useRef(false);
+      const loadInboxRef = useRef(null);
+
+      // Optimistic local append used by the sender (the server excludes
+      // the sender from `message.new` fan-out, so we add from the REST
+      // response). Deduped by id in case the same message ever arrives
+      // via WS too.
+      const addLocalMessage = useCallback((msg) => {
+        if (!msg || !msg.id) return;
+        if (msg.conversation_id !== selectedIdRef.current) return;
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+      }, []);
+
       const ws = useChatWebSocket(session, handleWs);
 
       // ---- Initial fetch ----
-      useEffect(() => {
-        loadInbox();
-      }, []);
-
-      async function loadInbox() {
+      const loadInbox = useCallback(async () => {
         try {
           const list = await api("GET", "/chat/conversations");
           setConversations(list || []);
         } catch (e) { /* logged */ }
-      }
+      }, [api]);
+
+      // Keep loadInboxRef in sync so the WS handler (defined earlier with
+      // [logWs] deps) can always reach the latest loadInbox.
+      useEffect(() => { loadInboxRef.current = loadInbox; }, [loadInbox]);
+
+      useEffect(() => {
+        loadInbox();
+      }, [loadInbox]);
 
       async function selectConversation(conv) {
         setSelectedId(conv.id);
@@ -461,6 +512,7 @@
               replyTo={replyTo}
               setReplyTo={setReplyTo}
               conversations={conversations}
+              addLocalMessage={addLocalMessage}
             />
             <RightPanel restLog={restLog} wsLog={wsLog} api={api} ws={ws} />
           </div>
@@ -636,7 +688,7 @@
     /* ===========================================================
        Main pane
        =========================================================== */
-    function Main({ activeConv, messages, hasMore, loadOlder, api, session, ws, presence, typingNow, replyTo, setReplyTo, conversations }) {
+    function Main({ activeConv, messages, hasMore, loadOlder, api, session, ws, presence, typingNow, replyTo, setReplyTo, conversations, addLocalMessage }) {
       if (!activeConv) {
         return (
           <main className="flex-1 flex items-center justify-center text-gray-400">
@@ -668,6 +720,7 @@
             ws={ws}
             replyTo={replyTo}
             setReplyTo={setReplyTo}
+            addLocalMessage={addLocalMessage}
           />
         </main>
       );
@@ -923,7 +976,7 @@
     /* ===========================================================
        Composer (send + attach + reply)
        =========================================================== */
-    function Composer({ convId, api, ws, replyTo, setReplyTo }) {
+    function Composer({ convId, api, ws, replyTo, setReplyTo, addLocalMessage }) {
       const [body, setBody] = useState("");
       const [sending, setSending] = useState(false);
       const [uploading, setUploading] = useState(false);
@@ -950,7 +1003,10 @@
         try {
           const payload = { message_type: "text", body };
           if (replyTo) payload.reply_to_message_id = replyTo.id;
-          await api("POST", `/chat/conversations/${convId}/messages`, { body: payload });
+          const sent = await api("POST", `/chat/conversations/${convId}/messages`, { body: payload });
+          // Server excludes sender from `message.new` fan-out, so we
+          // append from the REST response directly.
+          addLocalMessage?.(sent);
           setBody("");
           setReplyTo(null);
           if (typingActive.current) {
@@ -979,7 +1035,8 @@
           const payload = { message_type, attachment_id: att.id };
           if (body.trim()) payload.body = body;
           if (replyTo) payload.reply_to_message_id = replyTo.id;
-          await api("POST", `/chat/conversations/${convId}/messages`, { body: payload });
+          const sent = await api("POST", `/chat/conversations/${convId}/messages`, { body: payload });
+          addLocalMessage?.(sent);
           setBody("");
           setReplyTo(null);
         } catch {}
