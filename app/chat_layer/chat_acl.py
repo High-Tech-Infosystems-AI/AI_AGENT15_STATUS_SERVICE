@@ -6,12 +6,16 @@ These are pure functions — no DB calls. Callers fetch the inputs first
 from datetime import datetime, timedelta
 from typing import Optional
 
-ADMIN_ROLES = {"SuperAdmin", "Admin"}
+# Tolerate both naming conventions: the auth service returns lowercase
+# snake_case ("super_admin"), older code used CamelCase ("SuperAdmin").
+ADMIN_ROLES = {"super_admin", "admin", "SuperAdmin", "Admin"}
 EDIT_WINDOW = timedelta(minutes=15)
 
 
 def is_admin(role_name: Optional[str]) -> bool:
-    return role_name in ADMIN_ROLES
+    if not role_name:
+        return False
+    return role_name in ADMIN_ROLES or role_name.lower() in {"super_admin", "admin"}
 
 
 def can_post_dm(peer_active: bool) -> bool:
