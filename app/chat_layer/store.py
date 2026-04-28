@@ -22,7 +22,12 @@ from app.chat_layer.models import (
 
 # ---------- Conversations ----------
 
-def get_or_create_dm(db: Session, user_a_id: int, user_b_id: int) -> ChatConversation:
+def get_or_create_dm(db: Session, user_a_id: int, user_b_id: int):
+    """Returns (conversation, newly_added_user_ids).
+    `newly_added_user_ids` is `[a, b]` only when the DM is freshly created;
+    `[]` when an existing DM is returned. Used by the API layer to decide
+    whether to fire presence-announcement events between the two users.
+    """
     if user_a_id == user_b_id:
         raise ValueError("DM peers must be different users")
     a, b = sorted([user_a_id, user_b_id])
@@ -43,7 +48,7 @@ def get_or_create_dm(db: Session, user_a_id: int, user_b_id: int) -> ChatConvers
     )
     existing = db.execute(stmt).scalar_one_or_none()
     if existing:
-        return db.get(ChatConversation, existing)
+        return db.get(ChatConversation, existing), []
 
     conv = ChatConversation(type="dm", created_by=a)
     db.add(conv)
@@ -54,23 +59,31 @@ def get_or_create_dm(db: Session, user_a_id: int, user_b_id: int) -> ChatConvers
     ])
     db.commit()
     db.refresh(conv)
-    return conv
+    return conv, [a, b]
 
 
 def get_or_create_team_conversation(db: Session, team_id: int,
                                     member_user_ids: Iterable[int],
-                                    created_by: Optional[int]) -> ChatConversation:
+                                    created_by: Optional[int]):
+    """Returns (conversation, newly_added_user_ids).
+    `newly_added_user_ids` is the set of users that this call added to the
+    member list — empty if every requested user was already a member.
+    """
+    member_user_ids = list(member_user_ids)
     conv = db.execute(
         select(ChatConversation).where(ChatConversation.team_id == team_id)
     ).scalar_one_or_none()
     if conv:
-        existing = {m.user_id for m in conv.members}
+        existing_ids = {m.user_id for m in conv.members}
+        newly_added = []
         for uid in member_user_ids:
-            if uid not in existing:
+            if uid not in existing_ids:
                 db.add(ChatConversationMember(conversation_id=conv.id, user_id=uid))
-        db.commit()
-        db.refresh(conv)
-        return conv
+                newly_added.append(uid)
+        if newly_added:
+            db.commit()
+            db.refresh(conv)
+        return conv, newly_added
 
     conv = ChatConversation(type="team", team_id=team_id, created_by=created_by)
     db.add(conv)
@@ -79,7 +92,7 @@ def get_or_create_team_conversation(db: Session, team_id: int,
         db.add(ChatConversationMember(conversation_id=conv.id, user_id=uid))
     db.commit()
     db.refresh(conv)
-    return conv
+    return conv, list(member_user_ids)
 
 
 def get_general_conversation(db: Session) -> ChatConversation:
