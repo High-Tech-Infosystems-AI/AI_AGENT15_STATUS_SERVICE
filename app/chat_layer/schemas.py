@@ -92,6 +92,8 @@ class MessageOut(BaseModel):
     id: int
     conversation_id: int
     sender_id: int
+    sender_username: Optional[str] = None
+    sender_name: Optional[str] = None
     message_type: str
     body: Optional[str] = None
     attachment: Optional[AttachmentOut] = None
