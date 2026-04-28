@@ -189,6 +189,7 @@ def send_message(conversation_id: int, req: SendMessageRequest,
             "deleted_at": None,
         }
         delivered_now_at = datetime.utcnow().isoformat()
+        delivered_to_now: List[int] = []
         for uid in recipients:
             redis_chat.publish_message_new(user_id=uid, message=message_payload,
                                            conversation_id=conv.id)
@@ -207,6 +208,19 @@ def send_message(conversation_id: int, req: SendMessageRequest,
                     recipient_user_id=uid,
                     delivered_at=delivered_now_at,
                 )
+                delivered_to_now.append(uid)
+
+        # Reflect the just-marked deliveries in the REST response. Without
+        # this, the `message.delivered` WS event can race the REST reply
+        # — if it arrives first, the client tries to update a message that
+        # isn't in its cache yet and the update is silently dropped, leaving
+        # the sender's tick stuck on ✓ (single) instead of advancing to
+        # ✓✓ (delivered).
+        if delivered_to_now:
+            existing_d = list(message_payload.get("delivered_to") or [])
+            merged_d = sorted({*existing_d, *delivered_to_now})
+            message_payload["delivered_to"] = merged_d
+            message_payload["delivered_count"] = len(merged_d)
         # Sender's own inbox cell update too (last_message_at / preview moves to top)
         redis_chat.publish_inbox_bump(user_id=user["user_id"],
                                       conversation_id=conv.id,
@@ -433,6 +447,7 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
             payload = _to_message_out(new_msg, attachment=att, db=db)
             out_payloads.append(payload)
             delivered_at = datetime.utcnow().isoformat()
+            delivered_to_now: List[int] = []
             for uid in store.member_user_ids(db, cid):
                 if uid == user["user_id"]:
                     continue
@@ -446,6 +461,15 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
                         recipient_user_id=uid,
                         delivered_at=delivered_at,
                     )
+                    delivered_to_now.append(uid)
+            # Patch the per-destination response so the sender sees the
+            # ✓✓ (delivered) tick immediately, regardless of WS-vs-REST
+            # arrival order.
+            if delivered_to_now:
+                existing_d = list(payload.get("delivered_to") or [])
+                merged_d = sorted({*existing_d, *delivered_to_now})
+                payload["delivered_to"] = merged_d
+                payload["delivered_count"] = len(merged_d)
         return out_payloads
     finally:
         db.close()
