@@ -1,11 +1,14 @@
 """Presence helpers - compute visibility set, fan out updates."""
+import logging
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from app.chat_layer import redis_chat
+
+logger = logging.getLogger("app_logger")
 
 
 def _fetch_co_members(db: Session, user_id: int) -> List[int]:
@@ -32,3 +35,53 @@ def fan_out_presence(*, db: Session, user_id: int, status: str,
             user_id=uid, target_user_id=user_id,
             status=status, last_seen_at=last_seen_iso,
         )
+
+
+def get_presence_snapshot(db: Session, user_id: int) -> List[dict]:
+    """Return the current presence of every user who shares a conversation
+    with user_id. Online status from Redis (authoritative); last_seen_at
+    from the DB. Use this at WS-connect time so a user who joins after
+    others were already online still sees their `online` dots immediately.
+    """
+    co_members = _fetch_co_members(db, user_id)
+    if not co_members:
+        return []
+
+    # Authoritative online flag from Redis (key exists ⇔ heartbeat alive)
+    online_ids = set()
+    try:
+        client = redis_chat._get_redis()
+        keys = [f"chat:presence:{uid}" for uid in co_members]
+        values = client.mget(*keys)
+        for uid, val in zip(co_members, values):
+            if val:
+                online_ids.add(uid)
+    except Exception as exc:
+        logger.warning("presence snapshot redis read failed: %s", exc)
+
+    # last_seen_at for everyone (only used for offline rows)
+    last_seen_by_id: dict = {}
+    try:
+        rows = db.execute(
+            text(
+                "SELECT user_id, last_seen_at FROM chat_user_presence "
+                "WHERE user_id IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": co_members},
+        ).all()
+        for r in rows:
+            m = r._mapping
+            last_seen_by_id[m["user_id"]] = m["last_seen_at"]
+    except Exception as exc:
+        logger.warning("presence snapshot db read failed: %s", exc)
+
+    snapshot = []
+    for uid in co_members:
+        is_online = uid in online_ids
+        last_seen = last_seen_by_id.get(uid)
+        snapshot.append({
+            "user_id": uid,
+            "status": "online" if is_online else "offline",
+            "last_seen_at": last_seen.isoformat() if last_seen else None,
+        })
+    return snapshot

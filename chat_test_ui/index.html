@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chat Service Tester</title>
+
+  <!-- React 18 + Babel via CDN — no build step required. -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .scroll-fade::-webkit-scrollbar { width: 8px; }
+    .scroll-fade::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 4px; }
+    .ws-log { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 11px; }
+    .pulse-dot { animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+    /* ===========================================================
+       Constants & helpers
+       =========================================================== */
+    const DEFAULT_GATEWAY = "https://devai.api.htinfosystems.com";
+    // If this page is served by the proxy on any http(s) origin, that origin
+    // also proxies /auth/* and /chat/* — recommended to avoid CORS entirely.
+    const SAME_ORIGIN_PROXY = (window.location.protocol === "http:" || window.location.protocol === "https:")
+      ? `${window.location.protocol}//${window.location.host}`
+      : null;
+    const STORAGE_KEY = "chat_tester_session";
+
+    function gatewayToWs(gateway) {
+      // https://x → wss://x ; http://x → ws://x
+      return gateway.replace(/^http/, "ws");
+    }
+
+    function isAdminRole(roleName) {
+      if (!roleName) return false;
+      const r = roleName.toLowerCase();
+      return r === "super_admin" || r === "admin" || r === "superadmin";
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return "";
+      try {
+        const d = new Date(iso);
+        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      } catch { return iso; }
+    }
+
+    function previewBody(msg) {
+      if (msg.deleted_at) return "[message deleted]";
+      if (msg.message_type === "image") return msg.body || "[image]";
+      if (msg.message_type === "voice") return "[voice note]";
+      if (msg.message_type === "file") return msg.body || "[file]";
+      return (msg.body || "").slice(0, 80);
+    }
+
+    /* ===========================================================
+       Root: handles auth state
+       =========================================================== */
+    function App() {
+      const [session, setSession] = useState(() => {
+        const raw = sessionStorage.getItem(STORAGE_KEY);
+        return raw ? JSON.parse(raw) : null;
+      });
+      const [gateway, setGateway] = useState(DEFAULT_GATEWAY);
+
+      function handleLogin(authData) {
+        const sess = { ...authData, gateway };
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(sess));
+        setSession(sess);
+      }
+
+      function handleLogout() {
+        sessionStorage.removeItem(STORAGE_KEY);
+        setSession(null);
+      }
+
+      if (!session) {
+        return <Login gateway={gateway} setGateway={setGateway} onLogin={handleLogin} />;
+      }
+      return <ChatApp session={session} onLogout={handleLogout} />;
+    }
+
+    /* ===========================================================
+       Login screen
+       =========================================================== */
+    function Login({ gateway, setGateway, onLogin }) {
+      const [username, setUsername] = useState("suphti");
+      const [password, setPassword] = useState("hti@123");
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+
+      async function submit(e) {
+        e.preventDefault();
+        setLoading(true);
+        setError("");
+        try {
+          const url = `${gateway}/auth/ats/login?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+          const resp = await fetch(url, { method: "POST" });
+          const data = await resp.json();
+          if (!resp.ok) throw new Error(data.detail || `Login failed: ${resp.status}`);
+          if (!data.access_token) throw new Error("No access_token in response");
+          onLogin(data);
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      return (
+        <div className="min-h-screen flex items-center justify-center px-4">
+          <form onSubmit={submit} className="bg-white rounded-xl shadow-md p-8 w-full max-w-md space-y-4">
+            <div>
+              <h1 className="text-2xl font-semibold">Chat Service Tester</h1>
+              <p className="text-sm text-gray-500">Login to start testing the chat REST + WebSocket APIs.</p>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-600">Gateway URL</label>
+              <input
+                type="text" value={gateway}
+                onChange={(e) => setGateway(e.target.value)}
+                className="mt-1 w-full p-2 border rounded text-sm font-mono"
+              />
+              {SAME_ORIGIN_PROXY && gateway !== SAME_ORIGIN_PROXY && (
+                <button
+                  type="button"
+                  onClick={() => setGateway(SAME_ORIGIN_PROXY)}
+                  className="mt-1 text-[11px] text-blue-600 hover:underline"
+                >
+                  ↪ use this origin ({SAME_ORIGIN_PROXY}) — required if serve.py is running
+                </button>
+              )}
+            </div>
+            <div>
+              <label className="text-xs text-gray-600">Username</label>
+              <input
+                type="text" value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="mt-1 w-full p-2 border rounded"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-gray-600">Password</label>
+              <input
+                type="password" value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="mt-1 w-full p-2 border rounded"
+              />
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 text-red-700 p-2 rounded text-sm">{error}</div>
+            )}
+
+            <button
+              type="submit" disabled={loading}
+              className="w-full py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            >
+              {loading ? "Logging in…" : "Login"}
+            </button>
+
+            <div className="text-xs text-gray-400 pt-2 border-t">
+              POST <code className="bg-gray-100 px-1">/auth/ats/login?username=…&password=…</code> →
+              expects <code className="bg-gray-100 px-1">access_token</code> in JSON.
+            </div>
+          </form>
+        </div>
+      );
+    }
+
+    /* ===========================================================
+       useApi — REST helper with token + log
+       =========================================================== */
+    function useApi(session, logRest) {
+      const call = useCallback(async (method, path, opts = {}) => {
+        const url = `${session.gateway}${path}`;
+        const start = Date.now();
+        const headers = {
+          Authorization: `Bearer ${session.access_token}`,
+          ...opts.headers,
+        };
+        const init = { method, headers };
+        if (opts.body) {
+          if (opts.body instanceof FormData) {
+            init.body = opts.body;
+          } else {
+            headers["Content-Type"] = "application/json";
+            init.body = JSON.stringify(opts.body);
+          }
+        }
+        try {
+          const resp = await fetch(url, init);
+          const elapsed = Date.now() - start;
+          let data = null;
+          const ct = resp.headers.get("content-type") || "";
+          if (resp.status !== 204 && ct.includes("application/json")) {
+            data = await resp.json();
+          }
+          logRest({ method, path, status: resp.status, elapsed, response: data });
+          if (!resp.ok) {
+            const code = data?.error_code || resp.status;
+            throw new Error(`${method} ${path} → ${code}: ${data?.message || resp.statusText}`);
+          }
+          return data;
+        } catch (err) {
+          if (!err.message.includes("→")) {
+            logRest({ method, path, status: 0, elapsed: Date.now() - start, error: err.message });
+          }
+          throw err;
+        }
+      }, [session.gateway, session.access_token, logRest]);
+      return call;
+    }
+
+    /* ===========================================================
+       useChatWebSocket — connects, heartbeats, parses events
+       =========================================================== */
+    function useChatWebSocket(session, onEvent) {
+      const [status, setStatus] = useState("disconnected");
+      const wsRef = useRef(null);
+      const pingRef = useRef(null);
+      const retryRef = useRef(0);
+      const closingRef = useRef(false);
+      const onEventRef = useRef(onEvent);
+      onEventRef.current = onEvent;
+
+      const send = useCallback((obj) => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify(obj));
+          return true;
+        }
+        return false;
+      }, []);
+
+      // Stable reference: only changes when status actually changes.
+      // Without this, every parent re-render produces a new {status, send}
+      // object, churning every consumer's dependency array and causing
+      // mark-read loops on the loopback `unread.update`.
+      const wsApi = useMemo(() => ({ status, send }), [status, send]);
+
+      useEffect(() => {
+        closingRef.current = false;
+
+        function connect() {
+          const wsUrl = `${gatewayToWs(session.gateway)}/chat/ws?token=${encodeURIComponent(session.access_token)}`;
+          setStatus("connecting");
+          const ws = new WebSocket(wsUrl);
+          wsRef.current = ws;
+
+          ws.onopen = () => {
+            setStatus("connected");
+            retryRef.current = 0;
+            pingRef.current = setInterval(() => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: "ping" }));
+              }
+            }, 30000);
+          };
+
+          ws.onmessage = (e) => {
+            try {
+              const msg = JSON.parse(e.data);
+              onEventRef.current?.(msg);
+            } catch {
+              onEventRef.current?.({ type: "_raw", data: e.data });
+            }
+          };
+
+          ws.onclose = (e) => {
+            clearInterval(pingRef.current);
+            setStatus("disconnected");
+            if (closingRef.current) return;
+            if (e.code === 4001) {
+              setStatus("auth-failed");
+              return;
+            }
+            const delay = Math.min(30000, 1000 * 2 ** retryRef.current++);
+            setTimeout(() => { if (!closingRef.current) connect(); }, delay);
+          };
+
+          ws.onerror = () => { /* onclose will fire next */ };
+        }
+
+        connect();
+        return () => {
+          closingRef.current = true;
+          clearInterval(pingRef.current);
+          if (wsRef.current) wsRef.current.close(1000);
+        };
+      }, [session.gateway, session.access_token]);
+
+      return wsApi;
+    }
+
+    /* ===========================================================
+       Main app shell
+       =========================================================== */
+    function ChatApp({ session, onLogout }) {
+      // ---- Logs ----
+      const [restLog, setRestLog] = useState([]);
+      const [wsLog, setWsLog] = useState([]);
+
+      const logRest = useCallback((entry) => {
+        setRestLog((p) => [{ ...entry, ts: new Date().toISOString() }, ...p].slice(0, 200));
+      }, []);
+
+      const logWs = useCallback((msg) => {
+        setWsLog((p) => [{ ...msg, ts: new Date().toISOString() }, ...p].slice(0, 200));
+      }, []);
+
+      // ---- Domain state ----
+      const [conversations, setConversations] = useState([]);
+      const [selectedId, setSelectedId] = useState(null);
+      const [messages, setMessages] = useState([]);
+      const [cursor, setCursor] = useState(null);
+      const [hasMore, setHasMore] = useState(false);
+      const [presence, setPresence] = useState({});       // { user_id: { status, last_seen_at } }
+      const [typingNow, setTypingNow] = useState({});      // { conv_id: Set<user_id> }
+      const [replyTo, setReplyTo] = useState(null);
+
+      const api = useApi(session, logRest);
+
+      // ---- Handle WS events ----
+      const handleWs = useCallback((msg) => {
+        logWs(msg);
+        if (msg.type === "message.new") {
+          if (msg.data.conversation_id === selectedIdRef.current) {
+            setMessages((prev) => [...prev, msg.data.message]);
+          }
+        } else if (msg.type === "message.edited") {
+          setMessages((prev) => prev.map((m) =>
+            m.id === msg.data.message_id
+              ? { ...m, body: msg.data.body, edited_at: msg.data.edited_at }
+              : m
+          ));
+        } else if (msg.type === "message.deleted") {
+          setMessages((prev) => prev.map((m) =>
+            m.id === msg.data.message_id
+              ? { ...m, deleted_at: new Date().toISOString(), body: "[message deleted]" }
+              : m
+          ));
+        } else if (msg.type === "inbox.bump") {
+          setConversations((prev) => {
+            const i = prev.findIndex((c) => c.id === msg.data.conversation_id);
+            if (i < 0) return prev;
+            const updated = {
+              ...prev[i],
+              last_message_at: msg.data.latest_message?.created_at,
+              unread_count: msg.data.unread_count,
+              latest_message: msg.data.latest_message,
+            };
+            const without = prev.filter((c) => c.id !== msg.data.conversation_id);
+            return [updated, ...without];
+          });
+        } else if (msg.type === "unread.update") {
+          setConversations((prev) => prev.map((c) =>
+            c.id === msg.data.conversation_id
+              ? { ...c, unread_count: msg.data.unread_count }
+              : c
+          ));
+        } else if (msg.type === "presence.update") {
+          setPresence((p) => ({ ...p, [msg.data.user_id]: { status: msg.data.status, last_seen_at: msg.data.last_seen_at } }));
+        } else if (msg.type === "typing.start") {
+          setTypingNow((p) => {
+            const set = new Set(p[msg.data.conversation_id] || []);
+            set.add(msg.data.user_id);
+            return { ...p, [msg.data.conversation_id]: set };
+          });
+        } else if (msg.type === "typing.stop") {
+          setTypingNow((p) => {
+            const set = new Set(p[msg.data.conversation_id] || []);
+            set.delete(msg.data.user_id);
+            return { ...p, [msg.data.conversation_id]: set };
+          });
+        }
+      }, [logWs]);
+
+      // ---- selectedId ref so the WS callback sees the latest value ----
+      const selectedIdRef = useRef(null);
+      useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+
+      const ws = useChatWebSocket(session, handleWs);
+
+      // ---- Initial fetch ----
+      useEffect(() => {
+        loadInbox();
+      }, []);
+
+      async function loadInbox() {
+        try {
+          const list = await api("GET", "/chat/conversations");
+          setConversations(list || []);
+        } catch (e) { /* logged */ }
+      }
+
+      async function selectConversation(conv) {
+        setSelectedId(conv.id);
+        setMessages([]);
+        setCursor(null);
+        setHasMore(false);
+        setReplyTo(null);
+        try {
+          const data = await api("GET", `/chat/conversations/${conv.id}/messages?limit=50`);
+          setMessages([...(data.items || [])].reverse());
+          setCursor(data.next_cursor);
+          setHasMore(data.has_more);
+        } catch (e) { /* logged */ }
+      }
+
+      async function loadOlder() {
+        if (!selectedId || !hasMore || !cursor) return;
+        try {
+          const data = await api("GET", `/chat/conversations/${selectedId}/messages?limit=50&cursor=${encodeURIComponent(cursor)}`);
+          setMessages((prev) => [...[...(data.items || [])].reverse(), ...prev]);
+          setCursor(data.next_cursor);
+          setHasMore(data.has_more);
+        } catch (e) { /* logged */ }
+      }
+
+      // ---- Active conversation ----
+      const activeConv = conversations.find((c) => c.id === selectedId) || null;
+
+      return (
+        <div className="h-screen flex flex-col">
+          <Header session={session} ws={ws} onLogout={onLogout} />
+          <div className="flex-1 flex overflow-hidden">
+            <Sidebar
+              conversations={conversations}
+              selectedId={selectedId}
+              onSelect={selectConversation}
+              api={api}
+              session={session}
+              presence={presence}
+              onRefresh={loadInbox}
+            />
+            <Main
+              activeConv={activeConv}
+              messages={messages}
+              hasMore={hasMore}
+              loadOlder={loadOlder}
+              api={api}
+              session={session}
+              ws={ws}
+              presence={presence}
+              typingNow={typingNow[selectedId] || new Set()}
+              replyTo={replyTo}
+              setReplyTo={setReplyTo}
+              conversations={conversations}
+            />
+            <RightPanel restLog={restLog} wsLog={wsLog} api={api} ws={ws} />
+          </div>
+        </div>
+      );
+    }
+
+    /* ===========================================================
+       Header
+       =========================================================== */
+    function Header({ session, ws, onLogout }) {
+      const colors = {
+        connected: "bg-green-500",
+        connecting: "bg-yellow-500",
+        disconnected: "bg-gray-400",
+        "auth-failed": "bg-red-500",
+      };
+      return (
+        <div className="bg-white border-b px-4 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h1 className="font-semibold">Chat Tester</h1>
+            <span className="text-xs text-gray-500">{session.gateway}</span>
+          </div>
+          <div className="flex items-center gap-3 text-sm">
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${colors[ws.status] || "bg-gray-400"} pulse-dot`}></span>
+              <span className="text-gray-600">WS: {ws.status}</span>
+            </div>
+            <div className="px-2 py-1 bg-gray-100 rounded text-xs">
+              {session.role_name} · uid={session.user_id}
+            </div>
+            <button
+              onClick={onLogout}
+              className="px-3 py-1 text-xs border rounded hover:bg-gray-100"
+            >Logout</button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ===========================================================
+       Sidebar — inbox + ad-hoc actions
+       =========================================================== */
+    function Sidebar({ conversations, selectedId, onSelect, api, session, presence, onRefresh }) {
+      const [showNewDm, setShowNewDm] = useState(false);
+      const [newDmId, setNewDmId] = useState("");
+      const [showTeam, setShowTeam] = useState(false);
+      const [teamId, setTeamId] = useState("");
+
+      async function createDm() {
+        const id = parseInt(newDmId, 10);
+        if (!id) return;
+        try {
+          const conv = await api("POST", "/chat/conversations/dm", { body: { peer_user_id: id } });
+          setNewDmId(""); setShowNewDm(false);
+          await onRefresh();
+          onSelect(conv);
+        } catch { /* logged */ }
+      }
+
+      async function openTeam() {
+        const id = parseInt(teamId, 10);
+        if (!id) return;
+        try {
+          const conv = await api("GET", `/chat/conversations/team/${id}`);
+          setTeamId(""); setShowTeam(false);
+          await onRefresh();
+          onSelect(conv);
+        } catch { /* logged */ }
+      }
+
+      async function openGeneral() {
+        try {
+          const conv = await api("GET", "/chat/conversations/general");
+          await onRefresh();
+          onSelect(conv);
+        } catch { /* logged */ }
+      }
+
+      function rowLabel(c) {
+        if (c.type === "general") return "#general";
+        if (c.type === "team") return c.team?.name ? `🏢 ${c.team.name}` : `🏢 Team ${c.team_id}`;
+        if (c.type === "dm") return c.peer ? `👤 ${c.peer.name}` : `DM ${c.id}`;
+        return `Conv ${c.id}`;
+      }
+
+      function dmPeerStatus(c) {
+        if (c.type !== "dm" || !c.peer) return null;
+        const p = presence[c.peer.id];
+        return p?.status || "offline";
+      }
+
+      return (
+        <aside className="w-72 bg-white border-r flex flex-col">
+          <div className="p-3 border-b space-y-2">
+            <div className="text-xs text-gray-500 uppercase font-semibold">Actions</div>
+            <div className="flex gap-2">
+              <button onClick={onRefresh} className="flex-1 text-xs px-2 py-1 border rounded hover:bg-gray-50">↻ Refresh</button>
+              <button onClick={openGeneral} className="flex-1 text-xs px-2 py-1 border rounded hover:bg-gray-50"># general</button>
+            </div>
+            <div>
+              {!showNewDm ? (
+                <button onClick={() => setShowNewDm(true)} className="w-full text-xs px-2 py-1 border rounded hover:bg-gray-50">+ New DM</button>
+              ) : (
+                <div className="flex gap-1">
+                  <input
+                    type="number" placeholder="peer_user_id" value={newDmId}
+                    onChange={(e) => setNewDmId(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && createDm()}
+                    className="flex-1 text-xs p-1 border rounded"
+                  />
+                  <button onClick={createDm} className="text-xs px-2 bg-blue-600 text-white rounded">Go</button>
+                  <button onClick={() => setShowNewDm(false)} className="text-xs px-2 border rounded">×</button>
+                </div>
+              )}
+            </div>
+            <div>
+              {!showTeam ? (
+                <button onClick={() => setShowTeam(true)} className="w-full text-xs px-2 py-1 border rounded hover:bg-gray-50">+ Open Team</button>
+              ) : (
+                <div className="flex gap-1">
+                  <input
+                    type="number" placeholder="team_id" value={teamId}
+                    onChange={(e) => setTeamId(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && openTeam()}
+                    className="flex-1 text-xs p-1 border rounded"
+                  />
+                  <button onClick={openTeam} className="text-xs px-2 bg-blue-600 text-white rounded">Go</button>
+                  <button onClick={() => setShowTeam(false)} className="text-xs px-2 border rounded">×</button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="px-3 pt-3 pb-1 text-xs text-gray-500 uppercase font-semibold">Inbox</div>
+          <div className="flex-1 overflow-y-auto scroll-fade">
+            {conversations.length === 0 && (
+              <div className="text-sm text-gray-400 p-3">No conversations yet.</div>
+            )}
+            {conversations.map((c) => {
+              const peerStatus = dmPeerStatus(c);
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => onSelect(c)}
+                  className={`w-full text-left px-3 py-2 border-b hover:bg-gray-50 ${selectedId === c.id ? "bg-blue-50 border-l-4 border-l-blue-500" : ""}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium truncate">{rowLabel(c)}</span>
+                        {peerStatus === "online" && <span className="w-2 h-2 bg-green-500 rounded-full"></span>}
+                      </div>
+                      <div className="text-xs text-gray-500 truncate">
+                        {c.latest_message ? previewBody(c.latest_message) : "—"}
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-end">
+                      <span className="text-[10px] text-gray-400">{fmtTime(c.last_message_at)}</span>
+                      {c.unread_count > 0 && (
+                        <span className="text-[10px] bg-green-500 text-white rounded-full px-1.5 mt-1">{c.unread_count}</span>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </aside>
+      );
+    }
+
+    /* ===========================================================
+       Main pane
+       =========================================================== */
+    function Main({ activeConv, messages, hasMore, loadOlder, api, session, ws, presence, typingNow, replyTo, setReplyTo, conversations }) {
+      if (!activeConv) {
+        return (
+          <main className="flex-1 flex items-center justify-center text-gray-400">
+            Select a conversation, or create one with “+ New DM”.
+          </main>
+        );
+      }
+
+      const peerPresence = activeConv.type === "dm" && activeConv.peer ? presence[activeConv.peer.id] : null;
+
+      return (
+        <main className="flex-1 flex flex-col bg-white">
+          <ConvHeader conv={activeConv} peerPresence={peerPresence} />
+          <MessageList
+            conv={activeConv}
+            messages={messages}
+            hasMore={hasMore}
+            loadOlder={loadOlder}
+            api={api}
+            session={session}
+            ws={ws}
+            setReplyTo={setReplyTo}
+            conversations={conversations}
+          />
+          <TypingBar typingNow={typingNow} selfUserId={session.user_id} />
+          <Composer
+            convId={activeConv.id}
+            api={api}
+            ws={ws}
+            replyTo={replyTo}
+            setReplyTo={setReplyTo}
+          />
+        </main>
+      );
+    }
+
+    function ConvHeader({ conv, peerPresence }) {
+      let title = "";
+      let subtitle = "";
+      if (conv.type === "dm" && conv.peer) {
+        title = conv.peer.name;
+        if (peerPresence) {
+          subtitle = peerPresence.status === "online"
+            ? "online"
+            : `last seen ${fmtTime(peerPresence.last_seen_at)}`;
+        } else {
+          subtitle = "presence unknown";
+        }
+      } else if (conv.type === "team") {
+        title = conv.team?.name || `Team ${conv.team_id}`;
+        subtitle = `${conv.members?.length || 0} members`;
+      } else if (conv.type === "general") {
+        title = "#general";
+        subtitle = "everyone in the org";
+      }
+
+      return (
+        <div className="border-b px-4 py-3">
+          <div className="font-semibold">{title}</div>
+          <div className="text-xs text-gray-500">{subtitle} · conv #{conv.id}</div>
+        </div>
+      );
+    }
+
+    /* ===========================================================
+       Message list
+       =========================================================== */
+    function MessageList({ conv, messages, hasMore, loadOlder, api, session, ws, setReplyTo, conversations }) {
+      const scrollRef = useRef(null);
+      const [autoMarkRead, setAutoMarkRead] = useState(true);
+
+      // Per-conversation high-water mark of the largest message id we've
+      // already acked. Prevents the auto-mark-read effect from re-firing
+      // when `unread.update` (loopback) triggers a re-render.
+      const lastAckedRef = useRef({});
+
+      // Auto-scroll to bottom on new messages
+      useEffect(() => {
+        if (scrollRef.current) {
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+      }, [messages.length]);
+
+      // Auto mark-read for the latest message (sender !== self).
+      // Idempotent: never sends `mark_read` twice for the same message id
+      // in the same conversation.
+      useEffect(() => {
+        if (!autoMarkRead || messages.length === 0) return;
+        const latest = messages[messages.length - 1];
+        if (!latest || latest.sender_id === session.user_id) return;
+        const lastAcked = lastAckedRef.current[conv.id] || 0;
+        if (latest.id <= lastAcked) return;        // already acked → don't loop
+        lastAckedRef.current[conv.id] = latest.id;
+        ws.send({ action: "mark_read", message_id: latest.id });
+      }, [messages, autoMarkRead, session.user_id, ws, conv.id]);
+
+      return (
+        <div className="flex-1 overflow-y-auto scroll-fade px-4 py-3" ref={scrollRef}>
+          {hasMore && (
+            <div className="text-center mb-3">
+              <button onClick={loadOlder} className="text-xs px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">Load older</button>
+            </div>
+          )}
+          <label className="text-[11px] text-gray-400 flex items-center gap-1 mb-2">
+            <input type="checkbox" checked={autoMarkRead} onChange={(e) => setAutoMarkRead(e.target.checked)} className="w-3 h-3" />
+            Auto mark-read on view
+          </label>
+          {messages.length === 0 && (
+            <div className="text-sm text-gray-400 text-center py-8">No messages yet.</div>
+          )}
+          {messages.map((m) => (
+            <MessageRow
+              key={m.id}
+              msg={m}
+              session={session}
+              api={api}
+              ws={ws}
+              setReplyTo={setReplyTo}
+              conversations={conversations}
+              messages={messages}
+            />
+          ))}
+        </div>
+      );
+    }
+
+    function MessageRow({ msg, session, api, ws, setReplyTo, conversations, messages }) {
+      const isMine = msg.sender_id === session.user_id;
+      const [editing, setEditing] = useState(false);
+      const [editBody, setEditBody] = useState(msg.body || "");
+      const [forwarding, setForwarding] = useState(false);
+
+      const isAdmin = isAdminRole(session.role_name);
+
+      // Find replied-to message
+      const repliedMsg = msg.reply_to_message_id
+        ? messages.find((x) => x.id === msg.reply_to_message_id)
+        : null;
+
+      async function saveEdit() {
+        try {
+          await api("PATCH", `/chat/messages/${msg.id}`, { body: { body: editBody } });
+          setEditing(false);
+        } catch {}
+      }
+
+      async function deleteMsg() {
+        if (!confirm("Delete this message?")) return;
+        try { await api("DELETE", `/chat/messages/${msg.id}`); } catch {}
+      }
+
+      async function markReadManually() {
+        ws.send({ action: "mark_read", message_id: msg.id });
+      }
+
+      return (
+        <div className={`mb-2 flex ${isMine ? "justify-end" : "justify-start"}`}>
+          <div className={`max-w-[70%] rounded-lg p-2 ${
+            isMine ? "bg-blue-100" : "bg-gray-100"
+          } ${msg.deleted_at ? "italic text-gray-500" : ""}`}>
+            {repliedMsg && (
+              <div className="text-[11px] border-l-2 border-blue-400 pl-2 mb-1 text-gray-600 truncate">
+                ↪ <strong>uid {repliedMsg.sender_id}:</strong> {previewBody(repliedMsg)}
+              </div>
+            )}
+            {msg.forwarded_from_message_id && (
+              <div className="text-[11px] text-gray-500 italic">↪ forwarded</div>
+            )}
+
+            <div className="text-[10px] text-gray-500">
+              uid {msg.sender_id} · {fmtTime(msg.created_at)}
+              {msg.message_type !== "text" && ` · ${msg.message_type}`}
+              {msg.edited_at && " · edited"}
+              {msg.deleted_at && " · deleted"}
+            </div>
+
+            {editing ? (
+              <div className="flex gap-1 mt-1">
+                <input
+                  type="text" value={editBody}
+                  onChange={(e) => setEditBody(e.target.value)}
+                  className="flex-1 p-1 text-sm border rounded"
+                />
+                <button onClick={saveEdit} className="text-xs px-2 bg-blue-600 text-white rounded">Save</button>
+                <button onClick={() => setEditing(false)} className="text-xs px-2 border rounded">×</button>
+              </div>
+            ) : (
+              <div className="text-sm whitespace-pre-wrap">{msg.body || ""}</div>
+            )}
+
+            {msg.attachment && msg.attachment.url && !msg.deleted_at && (
+              <Attachment att={msg.attachment} />
+            )}
+
+            {!msg.deleted_at && !editing && (
+              <div className="text-[10px] mt-1 flex flex-wrap gap-2 text-gray-500">
+                <button onClick={() => setReplyTo(msg)} className="hover:text-blue-600">↩ reply</button>
+                <button onClick={() => setForwarding(true)} className="hover:text-blue-600">↪ forward</button>
+                <button onClick={markReadManually} className="hover:text-blue-600">👁 mark read</button>
+                {isMine && msg.message_type === "text" && (
+                  <button onClick={() => { setEditing(true); setEditBody(msg.body || ""); }} className="hover:text-blue-600">✎ edit</button>
+                )}
+                {isAdmin && (
+                  <button onClick={deleteMsg} className="hover:text-red-600">🗑 delete</button>
+                )}
+              </div>
+            )}
+
+            {forwarding && (
+              <ForwardPicker
+                msg={msg} api={api} conversations={conversations}
+                onClose={() => setForwarding(false)}
+              />
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function Attachment({ att }) {
+      if (att.mime_type?.startsWith("image/")) {
+        return <img src={att.url} alt={att.file_name} className="mt-1 max-w-xs rounded border" />;
+      }
+      if (att.mime_type?.startsWith("audio/")) {
+        return <audio controls src={att.url} className="mt-1 w-full" />;
+      }
+      return (
+        <a href={att.url} target="_blank" className="block mt-1 text-blue-600 underline text-sm">
+          📎 {att.file_name} ({Math.round((att.size_bytes || 0) / 1024)} KB)
+        </a>
+      );
+    }
+
+    function ForwardPicker({ msg, api, conversations, onClose }) {
+      const [picked, setPicked] = useState([]);
+      const [busy, setBusy] = useState(false);
+
+      function toggle(id) {
+        setPicked((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]);
+      }
+
+      async function go() {
+        if (picked.length === 0) return;
+        setBusy(true);
+        try {
+          await api("POST", `/chat/messages/${msg.id}/forward`, { body: { conversation_ids: picked } });
+          onClose();
+        } catch {}
+        finally { setBusy(false); }
+      }
+
+      return (
+        <div className="mt-2 p-2 border rounded bg-white">
+          <div className="text-[11px] text-gray-600 mb-1">Forward to:</div>
+          <div className="max-h-32 overflow-y-auto">
+            {conversations.filter((c) => c.id !== msg.conversation_id).map((c) => (
+              <label key={c.id} className="flex items-center gap-2 text-xs py-1">
+                <input type="checkbox" checked={picked.includes(c.id)} onChange={() => toggle(c.id)} />
+                <span>{c.type === "dm" ? `DM ${c.peer?.name || c.id}` : c.type === "team" ? `🏢 ${c.team?.name || c.team_id}` : "#general"}</span>
+              </label>
+            ))}
+          </div>
+          <div className="flex gap-1 mt-1">
+            <button onClick={go} disabled={busy || picked.length === 0} className="text-xs px-2 py-1 bg-blue-600 text-white rounded disabled:opacity-50">Forward</button>
+            <button onClick={onClose} className="text-xs px-2 py-1 border rounded">Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ===========================================================
+       Typing indicator bar
+       =========================================================== */
+    function TypingBar({ typingNow, selfUserId }) {
+      const others = Array.from(typingNow).filter((id) => id !== selfUserId);
+      if (others.length === 0) return null;
+      return (
+        <div className="px-4 py-1 text-xs text-gray-500 italic border-t">
+          {others.map((id) => `uid ${id}`).join(", ")} typing…
+        </div>
+      );
+    }
+
+    /* ===========================================================
+       Composer (send + attach + reply)
+       =========================================================== */
+    function Composer({ convId, api, ws, replyTo, setReplyTo }) {
+      const [body, setBody] = useState("");
+      const [sending, setSending] = useState(false);
+      const [uploading, setUploading] = useState(false);
+      const fileRef = useRef(null);
+      const typingTimerRef = useRef(null);
+      const typingActive = useRef(false);
+
+      function onChange(e) {
+        setBody(e.target.value);
+        if (!typingActive.current) {
+          ws.send({ action: "typing", conversation_id: convId, state: "start" });
+          typingActive.current = true;
+        }
+        clearTimeout(typingTimerRef.current);
+        typingTimerRef.current = setTimeout(() => {
+          ws.send({ action: "typing", conversation_id: convId, state: "stop" });
+          typingActive.current = false;
+        }, 4000);
+      }
+
+      async function send() {
+        if (!body.trim()) return;
+        setSending(true);
+        try {
+          const payload = { message_type: "text", body };
+          if (replyTo) payload.reply_to_message_id = replyTo.id;
+          await api("POST", `/chat/conversations/${convId}/messages`, { body: payload });
+          setBody("");
+          setReplyTo(null);
+          if (typingActive.current) {
+            ws.send({ action: "typing", conversation_id: convId, state: "stop" });
+            typingActive.current = false;
+          }
+        } catch {}
+        finally { setSending(false); }
+      }
+
+      async function onFileSelected(e) {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setUploading(true);
+        try {
+          const fd = new FormData();
+          fd.append("conversation_id", String(convId));
+          fd.append("file", file);
+          const att = await api("POST", "/chat/attachments", { body: fd });
+
+          // Determine message_type from MIME
+          let message_type = "file";
+          if (file.type.startsWith("image/")) message_type = "image";
+          else if (file.type.startsWith("audio/")) message_type = "voice";
+
+          const payload = { message_type, attachment_id: att.id };
+          if (body.trim()) payload.body = body;
+          if (replyTo) payload.reply_to_message_id = replyTo.id;
+          await api("POST", `/chat/conversations/${convId}/messages`, { body: payload });
+          setBody("");
+          setReplyTo(null);
+        } catch {}
+        finally {
+          setUploading(false);
+          if (fileRef.current) fileRef.current.value = "";
+        }
+      }
+
+      return (
+        <div className="border-t bg-gray-50 p-3">
+          {replyTo && (
+            <div className="text-xs bg-blue-50 border-l-2 border-blue-400 pl-2 py-1 mb-2 flex items-center justify-between">
+              <span>Replying to: <strong>uid {replyTo.sender_id}:</strong> {previewBody(replyTo)}</span>
+              <button onClick={() => setReplyTo(null)} className="text-gray-500 hover:text-red-600">×</button>
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={body}
+              onChange={onChange}
+              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), send())}
+              placeholder="Type a message…  (markdown: *bold* _italic_ ~strike~ `code`, mentions: @username)"
+              className="flex-1 p-2 border rounded"
+            />
+            <input ref={fileRef} type="file" className="hidden" onChange={onFileSelected} />
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              className="px-3 py-2 border rounded text-sm hover:bg-white disabled:opacity-50"
+            >📎 {uploading ? "…" : ""}</button>
+            <button
+              onClick={send}
+              disabled={sending || !body.trim()}
+              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            >Send</button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ===========================================================
+       Right panel — REST log + WS log + tools
+       =========================================================== */
+    function RightPanel({ restLog, wsLog, api, ws }) {
+      const [tab, setTab] = useState("ws");
+      return (
+        <aside className="w-96 bg-gray-50 border-l flex flex-col">
+          <div className="border-b flex">
+            <button onClick={() => setTab("ws")} className={`flex-1 py-2 text-sm ${tab === "ws" ? "bg-white border-b-2 border-blue-500 font-semibold" : ""}`}>WS Events ({wsLog.length})</button>
+            <button onClick={() => setTab("rest")} className={`flex-1 py-2 text-sm ${tab === "rest" ? "bg-white border-b-2 border-blue-500 font-semibold" : ""}`}>REST ({restLog.length})</button>
+            <button onClick={() => setTab("tools")} className={`flex-1 py-2 text-sm ${tab === "tools" ? "bg-white border-b-2 border-blue-500 font-semibold" : ""}`}>Tools</button>
+          </div>
+          <div className="flex-1 overflow-y-auto scroll-fade">
+            {tab === "ws" && <WsLog wsLog={wsLog} ws={ws} />}
+            {tab === "rest" && <RestLog restLog={restLog} />}
+            {tab === "tools" && <Tools api={api} ws={ws} />}
+          </div>
+        </aside>
+      );
+    }
+
+    function WsLog({ wsLog, ws }) {
+      const [filter, setFilter] = useState("");
+      return (
+        <div className="ws-log">
+          <div className="p-2 border-b bg-white sticky top-0 flex gap-1">
+            <input
+              placeholder="filter (e.g. message.new)" value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="flex-1 p-1 border rounded text-xs"
+            />
+            <button onClick={() => ws.send({ action: "ping" })} className="text-xs px-2 border rounded bg-white">ping</button>
+          </div>
+          {wsLog.filter((m) => !filter || (m.type || "").includes(filter)).map((m, i) => (
+            <div key={i} className="border-b px-2 py-1 hover:bg-white">
+              <div className="text-[10px] text-gray-400">{fmtTime(m.ts)}</div>
+              <div className="font-semibold text-blue-700">{m.type || "(unknown)"}</div>
+              <pre className="text-[10px] text-gray-600 whitespace-pre-wrap break-words">{JSON.stringify(m.data ?? m, null, 1)}</pre>
+            </div>
+          ))}
+          {wsLog.length === 0 && <div className="p-3 text-gray-400 text-sm">No events yet.</div>}
+        </div>
+      );
+    }
+
+    function RestLog({ restLog }) {
+      return (
+        <div className="ws-log">
+          {restLog.map((m, i) => {
+            const ok = m.status >= 200 && m.status < 300;
+            return (
+              <div key={i} className="border-b px-2 py-1 hover:bg-white">
+                <div className="flex justify-between text-[10px] text-gray-400">
+                  <span>{fmtTime(m.ts)}</span>
+                  <span>{m.elapsed} ms</span>
+                </div>
+                <div>
+                  <span className={`font-bold ${ok ? "text-green-600" : "text-red-600"}`}>{m.status}</span>
+                  <span className="font-mono ml-1">{m.method}</span>
+                  <span className="font-mono ml-1 text-gray-700">{m.path}</span>
+                </div>
+                {m.error && <div className="text-red-600 text-[10px]">{m.error}</div>}
+                {m.response && (
+                  <pre className="text-[10px] text-gray-600 whitespace-pre-wrap break-words">{JSON.stringify(m.response, null, 1).slice(0, 600)}</pre>
+                )}
+              </div>
+            );
+          })}
+          {restLog.length === 0 && <div className="p-3 text-gray-400 text-sm">No requests yet.</div>}
+        </div>
+      );
+    }
+
+    function Tools({ api, ws }) {
+      const [searchQ, setSearchQ] = useState("");
+      const [searchResults, setSearchResults] = useState([]);
+      const [presenceUid, setPresenceUid] = useState("");
+      const [presenceResult, setPresenceResult] = useState(null);
+
+      async function doSearch() {
+        if (!searchQ.trim()) return;
+        const data = await api("GET", `/chat/search?q=${encodeURIComponent(searchQ)}&limit=20`);
+        setSearchResults(data?.items || []);
+      }
+
+      async function doPresence() {
+        const id = parseInt(presenceUid, 10);
+        if (!id) return;
+        const data = await api("GET", `/chat/users/${id}/presence`);
+        setPresenceResult(data);
+      }
+
+      return (
+        <div className="p-3 space-y-4 text-sm">
+          <div>
+            <div className="font-semibold mb-1">🔍 Search messages</div>
+            <div className="flex gap-1">
+              <input
+                value={searchQ} onChange={(e) => setSearchQ(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && doSearch()}
+                placeholder="query…" className="flex-1 p-1 border rounded text-xs"
+              />
+              <button onClick={doSearch} className="text-xs px-2 bg-blue-600 text-white rounded">Go</button>
+            </div>
+            {searchResults.length > 0 && (
+              <div className="mt-2 max-h-48 overflow-y-auto border rounded">
+                {searchResults.map((m) => (
+                  <div key={m.id} className="border-b p-1">
+                    <div className="text-[10px] text-gray-400">conv {m.conversation_id} · uid {m.sender_id}</div>
+                    <div className="text-xs">{m.body}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <div className="font-semibold mb-1">👁 Presence lookup</div>
+            <div className="flex gap-1">
+              <input
+                type="number" value={presenceUid} onChange={(e) => setPresenceUid(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && doPresence()}
+                placeholder="user_id" className="flex-1 p-1 border rounded text-xs"
+              />
+              <button onClick={doPresence} className="text-xs px-2 bg-blue-600 text-white rounded">Go</button>
+            </div>
+            {presenceResult && (
+              <pre className="mt-2 text-xs bg-white border rounded p-2">{JSON.stringify(presenceResult, null, 2)}</pre>
+            )}
+          </div>
+
+          <div>
+            <div className="font-semibold mb-1">📡 Send raw WS frame</div>
+            <RawWsSender ws={ws} />
+          </div>
+        </div>
+      );
+    }
+
+    function RawWsSender({ ws }) {
+      const [text, setText] = useState('{"action": "ping"}');
+      function go() {
+        try {
+          const parsed = JSON.parse(text);
+          ws.send(parsed);
+        } catch (e) { alert("Invalid JSON: " + e.message); }
+      }
+      return (
+        <div>
+          <textarea
+            value={text} onChange={(e) => setText(e.target.value)}
+            rows={4} className="w-full p-1 border rounded text-xs font-mono"
+          />
+          <button onClick={go} className="mt-1 w-full text-xs px-2 py-1 bg-blue-600 text-white rounded">Send frame</button>
+        </div>
+      );
+    }
+
+    /* ===========================================================
+       Mount
+       =========================================================== */
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
