@@ -81,6 +81,7 @@ class ChatMessage(Base):
     attachment_id = Column(Integer, ForeignKey("chat_message_attachments.id"), nullable=True)
     reply_to_message_id = Column(BigInteger, ForeignKey("chat_messages.id"), nullable=True)
     forwarded_from_message_id = Column(BigInteger, ForeignKey("chat_messages.id"), nullable=True)
+    forwarded_from_sender_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     edited_at = Column(DateTime, nullable=True)
     deleted_at = Column(DateTime, nullable=True)
     deleted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -137,6 +138,22 @@ class ChatMessageDelivery(Base):
 
     __table_args__ = (
         UniqueConstraint("message_id", "user_id", name="uq_msg_user_delivery"),
+    )
+
+
+class ChatMessageReaction(Base):
+    __tablename__ = "chat_message_reactions"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    message_id = Column(BigInteger, ForeignKey("chat_messages.id", ondelete="CASCADE"),
+                        nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    emoji = Column(String(32), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("message_id", "user_id", "emoji", name="uq_msg_user_emoji"),
+        Index("idx_react_message_id", "message_id"),
+        Index("idx_react_user", "user_id"),
     )
 
 

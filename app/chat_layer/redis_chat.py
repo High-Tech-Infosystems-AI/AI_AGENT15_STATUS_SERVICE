@@ -159,6 +159,28 @@ def publish_inbox_bump(user_id: int, conversation_id: int,
     })
 
 
+# ---------- Reactions ----------
+
+def publish_reaction_added(user_id: int, message_id: int, conversation_id: int,
+                           reactor_user_id: int, emoji: str) -> None:
+    _publish(user_id, "message.reaction.added", _enrich({
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "user_id": reactor_user_id,
+        "emoji": emoji,
+    }))
+
+
+def publish_reaction_removed(user_id: int, message_id: int, conversation_id: int,
+                             reactor_user_id: int, emoji: str) -> None:
+    _publish(user_id, "message.reaction.removed", _enrich({
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "user_id": reactor_user_id,
+        "emoji": emoji,
+    }))
+
+
 def fan_out(user_ids: List[int], type_: str, data: dict) -> None:
     for uid in user_ids:
         _publish(uid, type_, data)
