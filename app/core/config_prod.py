@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     AWS_REGION: str = Field(default_factory=lambda: os.getenv("AWS_REGION", "us-east-1"), env="AWS_REGION")
     AWS_S3_ENDPOINT_URL: str = Field(default_factory=lambda: os.getenv("AWS_S3_ENDPOINT_URL", ""), env="AWS_S3_ENDPOINT_URL")
     AWS_S3_BUCKET_CHAT: str = Field(default_factory=lambda: os.getenv("AWS_S3_BUCKET_CHAT", ""), env="AWS_S3_BUCKET_CHAT")
+    AWS_S3_BUCKET_PROFILES: str = Field(default_factory=lambda: os.getenv("AWS_S3_BUCKET_PROFILES", ""), env="AWS_S3_BUCKET_PROFILES")
     AWS_S3_PRESIGNED_TTL_SECONDS: int = Field(default_factory=lambda: int(os.getenv("AWS_S3_PRESIGNED_TTL_SECONDS", "3600")), env="AWS_S3_PRESIGNED_TTL_SECONDS")
 
     # Consul service discovery (optional)
