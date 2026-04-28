@@ -151,6 +151,17 @@ def member_user_ids(db: Session, conversation_id: int) -> List[int]:
     return [r[0] for r in rows]
 
 
+def inbox_row_for(db: Session, user_id: int, conversation_id: int) -> Optional[dict]:
+    """Return a single enriched inbox row for the given conversation, or
+    None if the user isn't a member / the conv is deleted. Same shape as
+    one item from `inbox_for_user` so endpoints can return consistent data."""
+    rows = inbox_for_user(db, user_id)
+    for r in rows:
+        if r["id"] == conversation_id:
+            return r
+    return None
+
+
 def inbox_for_user(db: Session, user_id: int) -> List[dict]:
     """
     Return the WhatsApp-style inbox: every conversation the user belongs to,
@@ -163,9 +174,15 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
         "members": [user_id, ...],
         "latest_message": {id, sender_id, message_type, body_preview,
                            created_at, deleted_at} | None,
-        "peer": {id, name, username, profile_image_key} | None,   # DM only
-        "team": {id, name} | None,                                # team only
+        "peer": {id, name, username,
+                 profile_image_key, profile_image_url} | None,   # DM only
+        "team": {id, name} | None,                               # team only
       }
+
+    `profile_image_url` is a short-lived presigned GET URL for the peer's
+    avatar in the profiles S3 bucket. Clients should render this directly
+    rather than constructing a URL from the raw key. May be None when the
+    user has no avatar or S3/profiles bucket isn't configured.
 
     Uses raw SQL with correlated subqueries to keep the round-trips bounded
     (one query for the headers, one for memberships, one for previews).
@@ -255,13 +272,16 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
         """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
             {"ids": list(set(dm_peer_ids))},
         ).all()
+        from app.chat_layer.s3_chat_service import presign_profile_image
         for r in peer_rows:
             m = r._mapping
+            key = m.get("profile_image_key")
             peer_by_id[m["id"]] = {
                 "id": m["id"],
                 "name": m["name"],
                 "username": m["username"],
-                "profile_image_key": m.get("profile_image_key"),
+                "profile_image_key": key,
+                "profile_image_url": presign_profile_image(key),
             }
 
     # 5. Team info for team conversations

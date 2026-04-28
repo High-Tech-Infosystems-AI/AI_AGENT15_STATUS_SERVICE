@@ -99,26 +99,53 @@ _URL_MEMO_LOCK = threading.Lock()
 _URL_MEMO_MAX = 4096
 
 
-def presign_get(s3_key: Optional[str]) -> Optional[str]:
-    if not s3_key or not _is_configured():
-        return None
+def _presign_against(bucket: str, s3_key: str) -> Optional[str]:
+    """Sign a GET URL for `s3_key` in `bucket`. Memoized per (bucket, key)
+    for half the URL lifetime so repeat calls reuse the same signature."""
+    cache_key = f"{bucket}/{s3_key}"
     now = time.time()
     with _URL_MEMO_LOCK:
-        entry = _URL_MEMO.get(s3_key)
+        entry = _URL_MEMO.get(cache_key)
         if entry and entry[1] > now:
             return entry[0]
     try:
         url = _client().generate_presigned_url(
             "get_object",
-            Params={"Bucket": settings.AWS_S3_BUCKET_CHAT, "Key": s3_key},
+            Params={"Bucket": bucket, "Key": s3_key},
             ExpiresIn=int(getattr(settings, "AWS_S3_PRESIGNED_TTL_SECONDS", 3600)),
         )
     except (BotoCoreError, ClientError) as e:
-        logger.warning("chat presign failed for %s: %s", s3_key, e)
+        logger.warning("presign failed for %s/%s: %s", bucket, s3_key, e)
         return None
     with _URL_MEMO_LOCK:
         if len(_URL_MEMO) >= _URL_MEMO_MAX:
             _URL_MEMO.clear()
         ttl = int(getattr(settings, "AWS_S3_PRESIGNED_TTL_SECONDS", 3600)) // 2
-        _URL_MEMO[s3_key] = (url, now + ttl)
+        _URL_MEMO[cache_key] = (url, now + ttl)
     return url
+
+
+def presign_get(s3_key: Optional[str]) -> Optional[str]:
+    if not s3_key or not _is_configured():
+        return None
+    return _presign_against(settings.AWS_S3_BUCKET_CHAT, s3_key)
+
+
+def presign_profile_image(s3_key: Optional[str]) -> Optional[str]:
+    """Presigned GET URL for a user profile image in the profiles bucket.
+    Returns None when the key is empty or the profiles bucket isn't configured.
+    Profile images live in a separate bucket (`AWS_S3_BUCKET_PROFILES`) owned
+    by the RBAC service; we sign here so chat clients can render avatars
+    without round-tripping through RBAC."""
+    if not s3_key:
+        return None
+    bucket = getattr(settings, "AWS_S3_BUCKET_PROFILES", "") or ""
+    if not bucket:
+        return None
+    if not (getattr(settings, "AWS_ACCESS_KEY_ID", "") and
+            getattr(settings, "AWS_SECRET_ACCESS_KEY", "")):
+        return None
+    cleaned = s3_key.strip().strip('"').strip("'").strip()
+    if not cleaned:
+        return None
+    return _presign_against(bucket, cleaned)

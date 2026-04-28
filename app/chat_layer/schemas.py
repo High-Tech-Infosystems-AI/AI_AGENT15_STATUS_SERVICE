@@ -84,6 +84,7 @@ class PeerInfo(BaseModel):
     name: str
     username: str
     profile_image_key: Optional[str] = None
+    profile_image_url: Optional[str] = None
 
 
 class TeamInfo(BaseModel):
