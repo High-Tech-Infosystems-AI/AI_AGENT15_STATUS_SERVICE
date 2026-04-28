@@ -163,3 +163,24 @@ class ChatUserPresence(Base):
     status = Column(String(10), nullable=False, server_default="offline")
     last_seen_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class ChatPushSubscription(Base):
+    """One row per (user, browser/device) Web Push subscription. Endpoint is
+    canonical; we also store its sha256 as the unique key so the index stays
+    short (FCM URLs can exceed 700 chars)."""
+    __tablename__ = "chat_push_subscriptions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    endpoint = Column(String(2048), nullable=False)
+    endpoint_hash = Column(String(64), nullable=False)
+    p256dh = Column(String(255), nullable=False)
+    auth_secret = Column(String(255), nullable=False)
+    user_agent = Column(String(512), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    last_used_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("endpoint_hash", name="uq_chat_push_endpoint"),
+        Index("idx_chat_push_user", "user_id"),
+    )
