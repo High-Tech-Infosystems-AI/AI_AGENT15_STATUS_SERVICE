@@ -73,40 +73,51 @@ async def ws_chat(websocket: WebSocket, token: str = Query(...)):
                     finally:
                         db.close()
             elif action == "mark_read":
-                mid = msg.get("message_id")
-                if mid:
-                    db = SessionLocal()
-                    try:
-                        store.mark_read(db, message_id=mid, user_id=user_id)
+                # Accept either `message_id` (single, legacy) or
+                # `message_ids` (bulk array). Bulk calls coalesce the
+                # `unread.update` event so the badge clears once per conv.
+                mids = []
+                if isinstance(msg.get("message_ids"), list):
+                    mids = [int(x) for x in msg["message_ids"] if x]
+                elif msg.get("message_id"):
+                    mids = [int(msg["message_id"])]
+                if not mids:
+                    continue
+                db = SessionLocal()
+                try:
+                    affected_convs: set = set()
+                    for mid in mids:
                         m = db.get(ChatMessage, mid)
-                        if m:
-                            conv = db.get(ChatConversation, m.conversation_id)
-                            store.update_last_read(db, conversation_id=m.conversation_id,
-                                                   user_id=user_id, message_id=m.id)
-                            if conv and conv.type == "dm":
-                                redis_chat.publish_message_read(
-                                    user_id=m.sender_id, message_id=m.id,
-                                    reader_user_id=user_id,
-                                    read_at=datetime.utcnow().isoformat(),
+                        if not m:
+                            continue
+                        conv = db.get(ChatConversation, m.conversation_id)
+                        if not conv:
+                            continue
+                        store.mark_read(db, message_id=mid, user_id=user_id)
+                        store.update_last_read(db, conversation_id=conv.id,
+                                               user_id=user_id, message_id=mid)
+                        now = datetime.utcnow().isoformat()
+                        if conv.type == "dm":
+                            redis_chat.publish_message_read(
+                                user_id=m.sender_id, message_id=mid,
+                                reader_user_id=user_id, read_at=now,
+                            )
+                        else:
+                            rc = store.read_count(db, mid)
+                            for uid in store.member_user_ids(db, conv.id):
+                                redis_chat.publish_message_read_count(
+                                    user_id=uid, message_id=mid,
+                                    conversation_id=conv.id, read_count=rc,
                                 )
-                            elif conv:
-                                rc = store.read_count(db, m.id)
-                                for uid in store.member_user_ids(db, m.conversation_id):
-                                    redis_chat.publish_message_read_count(
-                                        user_id=uid, message_id=m.id,
-                                        conversation_id=m.conversation_id,
-                                        read_count=rc,
-                                    )
-                            # Cross-tab badge clear
-                            unread = store.unread_count_for_user(
-                                db, m.conversation_id, user_id,
-                            )
-                            redis_chat.publish_unread_update(
-                                user_id=user_id, conversation_id=m.conversation_id,
-                                unread_count=unread,
-                            )
-                    finally:
-                        db.close()
+                        affected_convs.add(conv.id)
+                    for cid in affected_convs:
+                        unread = store.unread_count_for_user(db, cid, user_id)
+                        redis_chat.publish_unread_update(
+                            user_id=user_id, conversation_id=cid,
+                            unread_count=unread,
+                        )
+                finally:
+                    db.close()
     except WebSocketDisconnect:
         logger.info("ws_chat disconnect user=%s", user_id)
     finally:

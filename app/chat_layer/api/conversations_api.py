@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.chat_layer import store
+from app.chat_layer import presence as presence_helper, store
 from app.chat_layer.auth import current_user
 from app.chat_layer.chat_acl import can_post_dm, can_post_team
 from app.chat_layer.models import ChatConversation
@@ -52,8 +52,15 @@ def create_dm(req: CreateDMRequest, user: dict = Depends(current_user)):
             return _err("CHAT_USER_INACTIVE", "Peer user is not active", 403)
         if not can_post_dm(peer_active=True):
             return _err("CHAT_USER_INACTIVE", "Cannot DM inactive user", 403)
-        conv = store.get_or_create_dm(db, user["user_id"], req.peer_user_id)
+        conv, newly_added = store.get_or_create_dm(db, user["user_id"], req.peer_user_id)
         members = store.member_user_ids(db, conv.id)
+        # Both users now share this DM. Push current presence to both ends
+        # so they see each other's online dot immediately — without this,
+        # neither side gets a presence event until the next reconnect.
+        if newly_added:
+            presence_helper.announce_presence_to(
+                db=db, target_user_ids=members, about_user_ids=members,
+            )
         return _serialise(conv, members)
     finally:
         db.close()
@@ -93,11 +100,27 @@ def get_team_conversation(team_id: int, user: dict = Depends(current_user)):
         if not can_post_team(role_name=user.get("role_name"), is_member=is_member_local):
             return _err("CHAT_TEAM_MEMBERSHIP_REQUIRED",
                         "You are not a member of this team", 403)
-        conv = store.get_or_create_team_conversation(
+        conv, newly_added = store.get_or_create_team_conversation(
             db, team_id=team_id, member_user_ids=members,
             created_by=user["user_id"],
         )
-        return _serialise(conv, store.member_user_ids(db, conv.id))
+        all_members = store.member_user_ids(db, conv.id)
+        # Cross-announce only between newly-added members and existing ones.
+        # On a brand-new team chat that's everyone × everyone (still small for
+        # typical team sizes); on an established chat with one new member it's
+        # 2*(N-1) events instead of N*N.
+        if newly_added:
+            existing = [uid for uid in all_members if uid not in newly_added]
+            # Newly-added members learn about everyone (incl. each other).
+            presence_helper.announce_presence_to(
+                db=db, target_user_ids=newly_added, about_user_ids=all_members,
+            )
+            # Existing members learn about the new arrivals.
+            if existing:
+                presence_helper.announce_presence_to(
+                    db=db, target_user_ids=existing, about_user_ids=newly_added,
+                )
+        return _serialise(conv, all_members)
     finally:
         db.close()
 
