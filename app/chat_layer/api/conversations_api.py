@@ -135,6 +135,16 @@ def get_conversation(conversation_id: int, user: dict = Depends(current_user)):
         conv = db.get(ChatConversation, conversation_id)
         if not conv or conv.deleted_at is not None:
             return _err("CHAT_NOT_FOUND", "Conversation not found", 404)
+        # Return the SAME enriched shape the inbox endpoint returns —
+        # with peer info (DM), team info, latest_message preview, and
+        # unread_count. Without this, the client's per-conversation cache
+        # gets overwritten with a stripped-down record on every refetch
+        # (header flickers from "Alice" → "Direct Message").
+        enriched = store.inbox_row_for(db, user["user_id"], conv.id)
+        if enriched is not None:
+            return enriched
+        # Fallback: caller is technically a member but the inbox query
+        # didn't return a row (rare). Serve the basic shape.
         return _serialise(conv, store.member_user_ids(db, conv.id))
     finally:
         db.close()
