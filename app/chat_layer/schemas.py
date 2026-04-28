@@ -48,6 +48,28 @@ class MarkReadBulkRequest(BaseModel):
     message_ids: List[int] = Field(..., min_length=1, max_length=200)
 
 
+class AddReactionRequest(BaseModel):
+    """Body for `POST /chat/messages/{id}/reactions`. The same user can have
+    multiple distinct emoji reactions on the same message — but trying to
+    add the same emoji twice is idempotent (no error, no duplicate row)."""
+    emoji: str = Field(..., min_length=1, max_length=32)
+
+
+class ReactionUser(BaseModel):
+    user_id: int
+    username: Optional[str] = None
+    name: Optional[str] = None
+
+
+class ReactionGroup(BaseModel):
+    """One emoji on a message + the count and the list of who reacted with
+    it. The client renders this as a pill: e.g. `👍 3` with hover showing
+    "Alice, Bob, Carol"."""
+    emoji: str
+    count: int
+    users: List[ReactionUser] = []
+
+
 class LatestMessagePreview(BaseModel):
     id: int
     sender_id: int
@@ -108,6 +130,9 @@ class MessageOut(BaseModel):
     attachment: Optional[AttachmentOut] = None
     reply_to_message_id: Optional[int] = None
     forwarded_from_message_id: Optional[int] = None
+    forwarded_from_sender_id: Optional[int] = None
+    forwarded_from_sender_username: Optional[str] = None
+    forwarded_from_sender_name: Optional[str] = None
     edited_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
     created_at: datetime
@@ -119,6 +144,8 @@ class MessageOut(BaseModel):
     # without depending on volatile WS state.
     read_by: List[int] = []
     delivered_to: List[int] = []
+    # Reactions grouped by emoji. Empty when no reactions yet.
+    reactions: List[ReactionGroup] = []
 
     model_config = {"from_attributes": True}
 
