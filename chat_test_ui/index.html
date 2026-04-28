@@ -392,6 +392,42 @@
               ? { ...m, deleted_at: new Date().toISOString(), body: "[message deleted]" }
               : m
           ));
+        } else if (msg.type === "message.reaction.added") {
+          setMessages((prev) => prev.map((m) => {
+            if (m.id !== msg.data.message_id) return m;
+            const groups = [...(m.reactions || [])];
+            const idx = groups.findIndex((g) => g.emoji === msg.data.emoji);
+            const userEntry = {
+              user_id: msg.data.user_id,
+              username: msg.data.username,
+              name: msg.data.name,
+            };
+            if (idx === -1) {
+              groups.push({ emoji: msg.data.emoji, count: 1, users: [userEntry] });
+            } else {
+              const g = groups[idx];
+              if (g.users.some((u) => u.user_id === msg.data.user_id)) return m; // dedupe
+              groups[idx] = { ...g, count: g.count + 1, users: [...g.users, userEntry] };
+            }
+            return { ...m, reactions: groups };
+          }));
+        } else if (msg.type === "message.reaction.removed") {
+          setMessages((prev) => prev.map((m) => {
+            if (m.id !== msg.data.message_id) return m;
+            const groups = [];
+            for (const g of (m.reactions || [])) {
+              if (g.emoji !== msg.data.emoji) {
+                groups.push(g);
+                continue;
+              }
+              const filteredUsers = g.users.filter((u) => u.user_id !== msg.data.user_id);
+              if (filteredUsers.length > 0) {
+                groups.push({ ...g, users: filteredUsers, count: filteredUsers.length });
+              }
+              // If no users left for this emoji, drop the group entirely
+            }
+            return { ...m, reactions: groups };
+          }));
         } else if (msg.type === "message.delivered") {
           // Sender side: my message reached recipient `user_id`. Mark ✓✓ gray.
           setDeliveryStatus((prev) => {
@@ -953,6 +989,7 @@
       const [editing, setEditing] = useState(false);
       const [editBody, setEditBody] = useState(msg.body || "");
       const [forwarding, setForwarding] = useState(false);
+      const [reactPickerOpen, setReactPickerOpen] = useState(false);
 
       const isAdmin = isAdminRole(session.role_name);
 
@@ -960,6 +997,21 @@
       const repliedMsg = msg.reply_to_message_id
         ? messages.find((x) => x.id === msg.reply_to_message_id)
         : null;
+
+      async function toggleReaction(emoji) {
+        // If I already reacted with this emoji, remove it; else add it.
+        const myReaction = (msg.reactions || []).find(
+          (g) => g.emoji === emoji && g.users.some((u) => u.user_id === session.user_id)
+        );
+        try {
+          if (myReaction) {
+            await api("DELETE", `/chat/messages/${msg.id}/reactions?emoji=${encodeURIComponent(emoji)}`);
+          } else {
+            await api("POST", `/chat/messages/${msg.id}/reactions`, { body: { emoji } });
+          }
+        } catch {}
+        setReactPickerOpen(false);
+      }
 
       async function saveEdit() {
         try {
@@ -988,7 +1040,18 @@
               </div>
             )}
             {msg.forwarded_from_message_id && (
-              <div className="text-[11px] text-gray-500 italic">↪ forwarded</div>
+              <div className="text-[11px] text-gray-500 italic">
+                ↪ forwarded
+                {msg.forwarded_from_sender_name || msg.forwarded_from_sender_username ? (
+                  <> from <strong className="not-italic">
+                    {userLabel(
+                      msg.forwarded_from_sender_id,
+                      msg.forwarded_from_sender_name || userDir?.[msg.forwarded_from_sender_id]?.name,
+                      msg.forwarded_from_sender_username || userDir?.[msg.forwarded_from_sender_id]?.username
+                    )}
+                  </strong></>
+                ) : null}
+              </div>
             )}
 
             <div className="text-[10px] text-gray-500 flex items-center gap-1">
@@ -1028,16 +1091,47 @@
               <Attachment att={msg.attachment} />
             )}
 
+            {/* Reaction chips */}
+            {msg.reactions && msg.reactions.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {msg.reactions.map((g) => {
+                  const userReacted = g.users.some((u) => u.user_id === session.user_id);
+                  const tooltip = g.users.map((u) => u.name || u.username || `uid ${u.user_id}`).join(", ");
+                  return (
+                    <button
+                      key={g.emoji}
+                      onClick={() => toggleReaction(g.emoji)}
+                      title={tooltip}
+                      className={`text-[11px] px-1.5 py-0.5 rounded-full border ${
+                        userReacted
+                          ? "bg-blue-100 border-blue-300 text-blue-800"
+                          : "bg-white border-gray-300 text-gray-700 hover:bg-gray-50"
+                      }`}
+                    >
+                      {g.emoji} <span className="font-mono">{g.count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
             {!msg.deleted_at && !editing && (
-              <div className="text-[10px] mt-1 flex flex-wrap gap-2 text-gray-500">
+              <div className="text-[10px] mt-1 flex flex-wrap gap-2 text-gray-500 relative">
                 <button onClick={() => setReplyTo(msg)} className="hover:text-blue-600">↩ reply</button>
                 <button onClick={() => setForwarding(true)} className="hover:text-blue-600">↪ forward</button>
                 <button onClick={markReadManually} className="hover:text-blue-600">👁 mark read</button>
+                <button onClick={() => setReactPickerOpen((v) => !v)} className="hover:text-blue-600">😀 react</button>
                 {isMine && msg.message_type === "text" && (
                   <button onClick={() => { setEditing(true); setEditBody(msg.body || ""); }} className="hover:text-blue-600">✎ edit</button>
                 )}
                 {isAdmin && (
                   <button onClick={deleteMsg} className="hover:text-red-600">🗑 delete</button>
+                )}
+                {reactPickerOpen && (
+                  <ReactionPicker
+                    onPick={toggleReaction}
+                    onClose={() => setReactPickerOpen(false)}
+                  />
                 )}
               </div>
             )}
@@ -1122,6 +1216,38 @@
               title="Sent to server">
           ✓ <span className="text-[9px]">sent</span>
         </span>
+      );
+    }
+
+    /* Small popover for picking a reaction emoji. Common emojis as quick
+       buttons + a free-text input for arbitrary unicode (any single emoji
+       up to 32 chars works server-side, including ZWJ sequences). */
+    const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🙏", "🔥"];
+    function ReactionPicker({ onPick, onClose }) {
+      const [custom, setCustom] = useState("");
+      return (
+        <div className="absolute z-10 bottom-5 left-0 bg-white border rounded-lg shadow-lg p-2 flex flex-col gap-1"
+             onClick={(e) => e.stopPropagation()}>
+          <div className="flex gap-1">
+            {QUICK_REACTIONS.map((e) => (
+              <button key={e}
+                      onClick={() => onPick(e)}
+                      className="text-base hover:bg-gray-100 rounded px-1">{e}</button>
+            ))}
+          </div>
+          <div className="flex gap-1 border-t pt-1">
+            <input
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && custom.trim() && onPick(custom.trim())}
+              placeholder="other emoji…"
+              maxLength={32}
+              className="text-xs border rounded p-1 w-24"
+            />
+            <button onClick={onClose}
+                    className="text-xs px-1 text-gray-500 hover:text-red-600">×</button>
+          </div>
+        </div>
       );
     }
 

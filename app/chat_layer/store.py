@@ -16,6 +16,7 @@ from app.chat_layer.models import (
     ChatMessageEdit,
     ChatMessageMention,
     ChatMessageRead,
+    ChatMessageReaction,
     ChatUserPresence,
 )
 
@@ -358,7 +359,8 @@ def create_message(db: Session, *, conversation_id: int, sender_id: int,
                    message_type: str, body: Optional[str] = None,
                    attachment_id: Optional[int] = None,
                    reply_to_message_id: Optional[int] = None,
-                   forwarded_from_message_id: Optional[int] = None) -> ChatMessage:
+                   forwarded_from_message_id: Optional[int] = None,
+                   forwarded_from_sender_id: Optional[int] = None) -> ChatMessage:
     msg = ChatMessage(
         conversation_id=conversation_id,
         sender_id=sender_id,
@@ -367,6 +369,7 @@ def create_message(db: Session, *, conversation_id: int, sender_id: int,
         attachment_id=attachment_id,
         reply_to_message_id=reply_to_message_id,
         forwarded_from_message_id=forwarded_from_message_id,
+        forwarded_from_sender_id=forwarded_from_sender_id,
     )
     db.add(msg)
     db.flush()
@@ -469,6 +472,94 @@ def read_count(db: Session, message_id: int) -> int:
             ChatMessageRead.message_id == message_id
         )
     ).scalar_one()
+
+
+# ---------- Presence ----------
+
+# ---------- Reactions ----------
+
+def add_reaction(db: Session, *, message_id: int, user_id: int, emoji: str) -> bool:
+    """Add a (msg, user, emoji) reaction. Returns True if newly added,
+    False if it already existed (idempotent)."""
+    existing = db.execute(
+        select(ChatMessageReaction).where(and_(
+            ChatMessageReaction.message_id == message_id,
+            ChatMessageReaction.user_id == user_id,
+            ChatMessageReaction.emoji == emoji,
+        ))
+    ).scalar_one_or_none()
+    if existing:
+        return False
+    db.add(ChatMessageReaction(message_id=message_id, user_id=user_id, emoji=emoji))
+    db.commit()
+    return True
+
+
+def remove_reaction(db: Session, *, message_id: int, user_id: int, emoji: str) -> bool:
+    """Remove a (msg, user, emoji) reaction. Returns True if a row was
+    deleted, False if there was nothing to remove (idempotent)."""
+    existing = db.execute(
+        select(ChatMessageReaction).where(and_(
+            ChatMessageReaction.message_id == message_id,
+            ChatMessageReaction.user_id == user_id,
+            ChatMessageReaction.emoji == emoji,
+        ))
+    ).scalar_one_or_none()
+    if not existing:
+        return False
+    db.delete(existing)
+    db.commit()
+    return True
+
+
+def list_reactions_for_messages(db: Session, message_ids: List[int]) -> dict:
+    """Returns {message_id: [{emoji, user_id, username, name, created_at}, ...]}
+    Joined to `users` so we don't need a second lookup. Ordered by
+    `created_at ASC` so the chip list is stable."""
+    if not message_ids:
+        return {}
+    from sqlalchemy import bindparam, text as _text
+    rows = db.execute(_text("""
+        SELECT r.message_id, r.user_id, r.emoji, r.created_at,
+               u.username, u.name
+          FROM chat_message_reactions r
+          JOIN users u ON u.id = r.user_id
+         WHERE r.message_id IN :ids
+         ORDER BY r.created_at ASC
+    """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": message_ids}).all()
+    out: dict = {}
+    for r in rows:
+        m = r._mapping
+        out.setdefault(m["message_id"], []).append({
+            "emoji": m["emoji"],
+            "user_id": m["user_id"],
+            "username": m["username"],
+            "name": m["name"],
+            "created_at": m["created_at"],
+        })
+    return out
+
+
+def group_reactions_by_emoji(rxn_list) -> List[dict]:
+    """Group a flat reaction list (from list_reactions_for_messages) into
+    [{emoji, count, users}, ...]. Order of first appearance preserved."""
+    if not rxn_list:
+        return []
+    by_emoji: dict = {}
+    for r in rxn_list:
+        by_emoji.setdefault(r["emoji"], []).append(r)
+    return [
+        {
+            "emoji": emoji,
+            "count": len(items),
+            "users": [
+                {"user_id": x["user_id"], "username": x["username"], "name": x["name"]}
+                for x in items
+            ],
+        }
+        for emoji, items in by_emoji.items()
+    ]
 
 
 # ---------- Presence ----------

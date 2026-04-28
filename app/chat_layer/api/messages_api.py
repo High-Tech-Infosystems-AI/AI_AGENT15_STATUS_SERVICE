@@ -20,7 +20,7 @@ from app.chat_layer.models import (
     ChatConversation, ChatMessage, ChatMessageAttachment,
 )
 from app.chat_layer.schemas import (
-    AttachmentOut, EditMessageRequest, ErrorResponse,
+    AddReactionRequest, AttachmentOut, EditMessageRequest, ErrorResponse,
     ForwardMessageRequest, MarkReadBulkRequest,
     MessageOut, PaginatedMessages, SendMessageRequest,
 )
@@ -53,7 +53,7 @@ def _attachment_out(att) -> Optional[AttachmentOut]:
 
 
 def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
-                    read_by=None, delivered_to=None) -> dict:
+                    read_by=None, delivered_to=None, reactions=None) -> dict:
     body_out = msg.body
     if msg.deleted_at is not None:
         body_out = "[message deleted]"
@@ -62,6 +62,14 @@ def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
     sender_info = user_info_cache.get_user_info(msg.sender_id, db=db)
     rb = list(read_by or [])
     dt = list(delivered_to or [])
+    # Forwarded-from info: resolve the original sender's name when present.
+    fwd_sender_id = getattr(msg, "forwarded_from_sender_id", None)
+    fwd_sender_username = None
+    fwd_sender_name = None
+    if fwd_sender_id:
+        fwd_info = user_info_cache.get_user_info(fwd_sender_id, db=db)
+        fwd_sender_username = fwd_info.get("username")
+        fwd_sender_name = fwd_info.get("name")
     return MessageOut(
         id=msg.id, conversation_id=msg.conversation_id, sender_id=msg.sender_id,
         sender_username=sender_info.get("username"),
@@ -69,11 +77,15 @@ def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
         message_type=msg.message_type, body=body_out, attachment=att_out,
         reply_to_message_id=msg.reply_to_message_id,
         forwarded_from_message_id=msg.forwarded_from_message_id,
+        forwarded_from_sender_id=fwd_sender_id,
+        forwarded_from_sender_username=fwd_sender_username,
+        forwarded_from_sender_name=fwd_sender_name,
         edited_at=msg.edited_at, deleted_at=msg.deleted_at,
         created_at=msg.created_at, mentions=list(mention_ids or []),
         read_by=rb, delivered_to=dt,
         read_count=len(rb) if rb else None,
         delivered_count=len(dt) if dt else None,
+        reactions=reactions or [],
     ).model_dump(mode="json")
 
 
@@ -225,11 +237,12 @@ def list_messages(conversation_id: int, cursor: Optional[str] = None,
             limit=min(max(limit, 1), 100),
         )
 
-        # Batch-fetch delivery + read receipts so reload renders the right
-        # ticks. One query per kind, not N. Both are indexed by message_id.
+        # Batch-fetch delivery + read receipts + reactions so reload renders
+        # the right ticks AND reaction chips. One query per kind, not N.
         msg_ids = [m.id for m in rows]
         delivered_by_msg: dict = {}
         read_by_msg: dict = {}
+        reactions_by_msg: dict = {}
         if msg_ids:
             d_rows = db.execute(
                 _select(ChatMessageDelivery.message_id, ChatMessageDelivery.user_id)
@@ -243,14 +256,17 @@ def list_messages(conversation_id: int, cursor: Optional[str] = None,
             ).all()
             for mid, uid in r_rows:
                 read_by_msg.setdefault(mid, []).append(uid)
+            reactions_by_msg = store.list_reactions_for_messages(db, msg_ids)
 
         items = []
         for m in rows:
             att = _fetch_attachment(db, m.attachment_id) if m.attachment_id else None
+            grouped = store.group_reactions_by_emoji(reactions_by_msg.get(m.id, []))
             items.append(_to_message_out(
                 m, attachment=att, db=db,
                 delivered_to=delivered_by_msg.get(m.id, []),
                 read_by=read_by_msg.get(m.id, []),
+                reactions=grouped,
             ))
         return PaginatedMessages(items=items, next_cursor=next_cursor,
                                  has_more=has_more).model_dump(mode="json")
@@ -401,12 +417,17 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
                 return _err("CHAT_FORWARD_NOT_MEMBER",
                             f"Not a member of conversation {cid}", 403)
         out_payloads = []
+        # If the original was already forwarded, preserve the *true* origin
+        # so chains of forwards always credit the first author, not the
+        # intermediate hops.
+        true_origin_sender_id = orig.forwarded_from_sender_id or orig.sender_id
         for cid in req.conversation_ids:
             new_msg = store.create_message(
                 db, conversation_id=cid, sender_id=user["user_id"],
                 message_type=orig.message_type, body=orig.body,
                 attachment_id=orig.attachment_id,
                 forwarded_from_message_id=orig.id,
+                forwarded_from_sender_id=true_origin_sender_id,
             )
             att = _fetch_attachment(db, new_msg.attachment_id)
             payload = _to_message_out(new_msg, attachment=att, db=db)
@@ -426,5 +447,67 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
                         delivered_at=delivered_at,
                     )
         return out_payloads
+    finally:
+        db.close()
+
+
+# ---------- Reactions ----------
+
+@router.post("/messages/{message_id}/reactions",
+             status_code=status.HTTP_204_NO_CONTENT,
+             responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}})
+def add_reaction(message_id: int, req: AddReactionRequest,
+                 user: dict = Depends(current_user)):
+    """Add an emoji reaction to a message. Idempotent — re-adding the same
+    emoji is a no-op (no error, no duplicate event). Fans out
+    `message.reaction.added` to every conversation member."""
+    db = SessionLocal()
+    try:
+        msg, conv = _fetch_message_and_conv(db, message_id)
+        if not msg or not conv:
+            return _err("CHAT_NOT_FOUND", "Message not found", 404)
+        if not store.is_member(db, conv.id, user["user_id"]):
+            return _err("CHAT_NOT_MEMBER", "Not a member", 403)
+        if msg.deleted_at is not None:
+            return _err("CHAT_MESSAGE_DELETED",
+                        "Cannot react to deleted message", 410)
+        added = store.add_reaction(
+            db, message_id=msg.id, user_id=user["user_id"], emoji=req.emoji,
+        )
+        if added:
+            for uid in store.member_user_ids(db, conv.id):
+                redis_chat.publish_reaction_added(
+                    user_id=uid, message_id=msg.id, conversation_id=conv.id,
+                    reactor_user_id=user["user_id"], emoji=req.emoji,
+                )
+        return Response(status_code=204)
+    finally:
+        db.close()
+
+
+@router.delete("/messages/{message_id}/reactions",
+               status_code=status.HTTP_204_NO_CONTENT,
+               responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}})
+def remove_reaction(message_id: int, emoji: str,
+                    user: dict = Depends(current_user)):
+    """Remove your own emoji reaction from a message. `emoji` is a query
+    string parameter (DELETEs traditionally don't carry a body). Idempotent."""
+    db = SessionLocal()
+    try:
+        msg, conv = _fetch_message_and_conv(db, message_id)
+        if not msg or not conv:
+            return _err("CHAT_NOT_FOUND", "Message not found", 404)
+        if not store.is_member(db, conv.id, user["user_id"]):
+            return _err("CHAT_NOT_MEMBER", "Not a member", 403)
+        removed = store.remove_reaction(
+            db, message_id=msg.id, user_id=user["user_id"], emoji=emoji,
+        )
+        if removed:
+            for uid in store.member_user_ids(db, conv.id):
+                redis_chat.publish_reaction_removed(
+                    user_id=uid, message_id=msg.id, conversation_id=conv.id,
+                    reactor_user_id=user["user_id"], emoji=emoji,
+                )
+        return Response(status_code=204)
     finally:
         db.close()
