@@ -167,18 +167,42 @@ def _ensure_ai_assistant_dm(db: Session, user_id: int) -> None:
     fetches their inbox. Cheap when the bot user + DM already exist.
 
     Imported lazily to avoid a circular import (ai_chat_layer imports
-    chat_layer.store)."""
+    chat_layer.store).
+    """
+    import logging as _logging
+    _log = _logging.getLogger("app_logger")
     try:
         from app.ai_chat_layer.system_bot import ensure_ai_bot_user
-    except Exception:
+    except Exception as exc:  # pragma: no cover — import-time failure
+        _log.warning(
+            "ai_assistant DM skipped: ai_chat_layer import failed: %s", exc,
+        )
         return
     try:
         bot_id = ensure_ai_bot_user(db)
-        if bot_id and bot_id != user_id:
-            get_or_create_dm(db, user_id, bot_id)
-    except Exception:
-        # Non-fatal — inbox should still load if bot provisioning fails.
-        pass
+    except Exception as exc:
+        _log.warning(
+            "ai_assistant DM skipped: bot user provisioning failed: %s", exc,
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return
+    if not bot_id or bot_id == user_id:
+        return
+    try:
+        get_or_create_dm(db, user_id, bot_id)
+    except Exception as exc:
+        _log.warning(
+            "ai_assistant DM provisioning failed for user=%s bot=%s: %s",
+            user_id, bot_id, exc, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def inbox_for_user(db: Session, user_id: int) -> List[dict]:

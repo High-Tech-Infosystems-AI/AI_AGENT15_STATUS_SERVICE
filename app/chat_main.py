@@ -142,6 +142,21 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Status Bot bootstrap failed: %s", exc, exc_info=True)
 
+    # Provision the AI Assistant bot user. The chat service's inbox path
+    # auto-creates a DM with this user on first fetch; provisioning here
+    # means the bot row exists even when the AI chat service is offline,
+    # so the pinned "AI Assistant" thread always shows up in the sidebar.
+    try:
+        from app.ai_chat_layer.system_bot import ensure_ai_bot_user
+        from app.database_Layer.db_config import SessionLocal
+        _db = SessionLocal()
+        try:
+            ensure_ai_bot_user(_db)
+        finally:
+            _db.close()
+    except Exception as exc:
+        logger.warning("AI Assistant bot bootstrap failed: %s", exc, exc_info=True)
+
     yield
 
     # ---- shutdown ----
