@@ -10,7 +10,6 @@ import logging
 from threading import Lock
 from typing import Optional
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("app_logger")
@@ -29,55 +28,18 @@ def ensure_ai_bot_user(db: Session) -> int:
         if _BOT_USER_ID is not None:
             return _BOT_USER_ID
 
-        row = db.execute(
-            text("SELECT id FROM users WHERE username = :u LIMIT 1"),
-            {"u": AI_BOT_USERNAME},
-        ).first()
-        if row:
-            _BOT_USER_ID = int(row[0])
-            return _BOT_USER_ID
+        from app.chat_layer._synthetic_user import provision_synthetic_user
 
         try:
-            db.execute(
-                text("""
-                    INSERT INTO users
-                        (name, username, email, password, role_id,
-                         enable, deleted_at, created_at)
-                    VALUES
-                        (:name, :uname, :email, :pwd, NULL,
-                         0, NULL, NOW())
-                """),
-                {
-                    "name": AI_BOT_DISPLAY_NAME,
-                    "uname": AI_BOT_USERNAME,
-                    "email": "ai-assistant@chat.local",
-                    "pwd": "!disabled!",
-                },
+            _BOT_USER_ID = provision_synthetic_user(
+                db,
+                username=AI_BOT_USERNAME,
+                display_name=AI_BOT_DISPLAY_NAME,
+                email="ai-assistant@chat.local",
             )
-            db.commit()
-        except Exception as exc:
+        except Exception:
             db.rollback()
-            logger.warning("AI bot insert (full schema) failed: %s — minimal", exc)
-            db.execute(
-                text("""
-                    INSERT INTO users (name, username, email, enable)
-                    VALUES (:name, :uname, :email, 0)
-                """),
-                {
-                    "name": AI_BOT_DISPLAY_NAME,
-                    "uname": AI_BOT_USERNAME,
-                    "email": "ai-assistant@chat.local",
-                },
-            )
-            db.commit()
-
-        row = db.execute(
-            text("SELECT id FROM users WHERE username = :u LIMIT 1"),
-            {"u": AI_BOT_USERNAME},
-        ).first()
-        if not row:
-            raise RuntimeError("Failed to create AI Assistant user")
-        _BOT_USER_ID = int(row[0])
+            raise
         logger.info("AI Assistant user provisioned id=%s", _BOT_USER_ID)
         return _BOT_USER_ID
 
