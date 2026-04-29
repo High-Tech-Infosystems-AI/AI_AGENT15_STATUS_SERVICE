@@ -590,9 +590,70 @@ def get_user_role_name(db: Session, user_id: int) -> Optional[str]:
     return row[0] if row else None
 
 
+def has_access(db: Session, *, user_id: Optional[int],
+               role_name: Optional[str], type_: str,
+               entity_id) -> bool:
+    """Whether `user_id` can open the entity behind a chat card.
+
+    Admins (Admin / SuperAdmin) bypass all checks. For everyone else:
+      - job: must be in `user_jobs_assigned` for that job.
+      - candidate: must be linked through `candidate_jobs` to a job
+        in the caller's `user_jobs_assigned` set.
+      - company: must own at least one job in the caller's
+        `user_jobs_assigned` set.
+      - pipeline / user / team / report: always allowed (these are
+        non-sensitive references — pipeline templates, identities, and
+        chart catalogs).
+    Unknown types default to False so a future entity type doesn't
+    accidentally leak through.
+    """
+    if is_admin_role(role_name):
+        return True
+    if user_id is None:
+        return False
+    if type_ in ("pipeline", "user", "team", "report"):
+        return True
+    if type_ == "job":
+        row = db.execute(
+            text("SELECT 1 FROM user_jobs_assigned "
+                 "WHERE user_id = :uid AND job_id = :jid LIMIT 1"),
+            {"uid": user_id, "jid": int(entity_id)},
+        ).first()
+        return row is not None
+    if type_ == "candidate":
+        row = db.execute(
+            text("""SELECT 1
+                      FROM candidate_jobs cj
+                      JOIN user_jobs_assigned uja ON uja.job_id = cj.job_id
+                     WHERE cj.candidate_id = :cid
+                       AND uja.user_id = :uid
+                     LIMIT 1"""),
+            {"cid": str(entity_id), "uid": user_id},
+        ).first()
+        return row is not None
+    if type_ == "company":
+        row = db.execute(
+            text("""SELECT 1
+                      FROM job_openings j
+                      JOIN user_jobs_assigned uja ON uja.job_id = j.id
+                     WHERE j.company_id = :cid
+                       AND uja.user_id = :uid
+                     LIMIT 1"""),
+            {"cid": int(entity_id), "uid": user_id},
+        ).first()
+        return row is not None
+    return False
+
+
 def search(db: Session, *, type_: str, q: str, limit: int = 12,
+           offset: int = 0,
            scope_user_id: Optional[int] = None) -> List[dict]:
     """Search a single entity type for the picker.
+
+    Pagination via `offset` + `limit` — the FE uses infinite scroll and
+    bumps `offset` by `limit` for each successive page. Sort order is
+    deterministic (id DESC for most types, id ASC for users/teams) so
+    pages don't shuffle between requests.
 
     `scope_user_id`:
       - `None` → return everything matching the query (admin / unscoped view).
@@ -606,6 +667,7 @@ def search(db: Session, *, type_: str, q: str, limit: int = 12,
       - DM with regular-user peer: scope to that peer's user_id.
     """
     q = (q or "").strip()
+    offset = max(0, int(offset or 0))
     if type_ not in _RESOLVERS:
         return []
     if type_ == "report":
@@ -623,11 +685,12 @@ def search(db: Session, *, type_: str, q: str, limit: int = 12,
         # if they sit further down the list.
         report_cap = max(limit, 50)
         if not ql:
-            picks = catalog[:report_cap]
+            picks = catalog[offset : offset + report_cap]
         else:
-            picks = [r for r in catalog
-                     if ql in r["title"].lower()
-                     or ql in (r.get("subtitle") or "").lower()][:report_cap]
+            filtered = [r for r in catalog
+                        if ql in r["title"].lower()
+                        or ql in (r.get("subtitle") or "").lower()]
+            picks = filtered[offset : offset + report_cap]
         # Picker results — no params yet (the user picks filters next).
         # We still merge the catalog metadata into the card so the FE
         # filter step knows which filters to prompt for, and signal
@@ -642,50 +705,50 @@ def search(db: Session, *, type_: str, q: str, limit: int = 12,
         return [c for c in cards if c]
 
     if scope_user_id and type_ == "company":
-        sql, params = _q_companies_for_user(q, limit, scope_user_id)
+        sql, params = _q_companies_for_user(q, limit, offset, scope_user_id)
     elif scope_user_id and type_ == "job":
-        sql, params = _q_jobs_for_user(q, limit, scope_user_id)
+        sql, params = _q_jobs_for_user(q, limit, offset, scope_user_id)
     else:
-        sql, params = _SEARCH_QUERIES[type_](q, limit)
+        sql, params = _SEARCH_QUERIES[type_](q, limit, offset)
     rows = db.execute(text(sql), params).all()
     ids = [r._mapping["id"] for r in rows]
     cards = _RESOLVERS[type_](db, ids)
     return [c for c in cards if c]
 
 
-def _q_jobs(q: str, limit: int):
+def _q_jobs(q: str, limit: int, offset: int = 0):
     if q:
         return ("SELECT id FROM job_openings "
-                "WHERE title LIKE :q ORDER BY id DESC LIMIT :lim",
-                {"q": f"%{q}%", "lim": limit})
-    return ("SELECT id FROM job_openings ORDER BY id DESC LIMIT :lim",
-            {"lim": limit})
+                "WHERE title LIKE :q ORDER BY id DESC LIMIT :lim OFFSET :off",
+                {"q": f"%{q}%", "lim": limit, "off": offset})
+    return ("SELECT id FROM job_openings ORDER BY id DESC LIMIT :lim OFFSET :off",
+            {"lim": limit, "off": offset})
 
 
-def _q_candidates(q: str, limit: int):
+def _q_candidates(q: str, limit: int, offset: int = 0):
     # Candidates' primary key is `candidate_id` (String). Alias to `id` so
     # the search dispatcher (which reads `r._mapping["id"]`) stays generic.
     if q:
         return ("SELECT candidate_id AS id FROM candidates "
                 "WHERE candidate_name LIKE :q OR candidate_email LIKE :q "
-                "ORDER BY created_at DESC LIMIT :lim",
-                {"q": f"%{q}%", "lim": limit})
+                "ORDER BY created_at DESC LIMIT :lim OFFSET :off",
+                {"q": f"%{q}%", "lim": limit, "off": offset})
     return ("SELECT candidate_id AS id FROM candidates "
-            "ORDER BY created_at DESC LIMIT :lim",
-            {"lim": limit})
+            "ORDER BY created_at DESC LIMIT :lim OFFSET :off",
+            {"lim": limit, "off": offset})
 
 
-def _q_companies(q: str, limit: int):
+def _q_companies(q: str, limit: int, offset: int = 0):
     if q:
         return ("SELECT id FROM companies "
                 "WHERE company_name LIKE :q OR location LIKE :q "
-                "ORDER BY id DESC LIMIT :lim",
-                {"q": f"%{q}%", "lim": limit})
-    return ("SELECT id FROM companies ORDER BY id DESC LIMIT :lim",
-            {"lim": limit})
+                "ORDER BY id DESC LIMIT :lim OFFSET :off",
+                {"q": f"%{q}%", "lim": limit, "off": offset})
+    return ("SELECT id FROM companies ORDER BY id DESC LIMIT :lim OFFSET :off",
+            {"lim": limit, "off": offset})
 
 
-def _q_companies_for_user(q: str, limit: int, user_id: int):
+def _q_companies_for_user(q: str, limit: int, offset: int, user_id: int):
     """Companies owning at least one job assigned to `user_id`. Used when
     a non-admin caller opens the company picker — they should only see
     companies they're actively recruiting for."""
@@ -696,16 +759,16 @@ def _q_companies_for_user(q: str, limit: int, user_id: int):
     if q:
         return (
             base + " AND (c.company_name LIKE :q OR c.location LIKE :q) "
-            "ORDER BY c.id DESC LIMIT :lim",
-            {"uid": user_id, "q": f"%{q}%", "lim": limit},
+            "ORDER BY c.id DESC LIMIT :lim OFFSET :off",
+            {"uid": user_id, "q": f"%{q}%", "lim": limit, "off": offset},
         )
     return (
-        base + " ORDER BY c.id DESC LIMIT :lim",
-        {"uid": user_id, "lim": limit},
+        base + " ORDER BY c.id DESC LIMIT :lim OFFSET :off",
+        {"uid": user_id, "lim": limit, "off": offset},
     )
 
 
-def _q_jobs_for_user(q: str, limit: int, user_id: int):
+def _q_jobs_for_user(q: str, limit: int, offset: int, user_id: int):
     """Jobs assigned to `user_id`. Mirrors the company scoping so a
     non-admin caller sees the same slice of work in both pickers."""
     base = ("SELECT j.id FROM job_openings j "
@@ -713,43 +776,43 @@ def _q_jobs_for_user(q: str, limit: int, user_id: int):
             "WHERE uja.user_id = :uid")
     if q:
         return (
-            base + " AND j.title LIKE :q ORDER BY j.id DESC LIMIT :lim",
-            {"uid": user_id, "q": f"%{q}%", "lim": limit},
+            base + " AND j.title LIKE :q ORDER BY j.id DESC LIMIT :lim OFFSET :off",
+            {"uid": user_id, "q": f"%{q}%", "lim": limit, "off": offset},
         )
     return (
-        base + " ORDER BY j.id DESC LIMIT :lim",
-        {"uid": user_id, "lim": limit},
+        base + " ORDER BY j.id DESC LIMIT :lim OFFSET :off",
+        {"uid": user_id, "lim": limit, "off": offset},
     )
 
 
-def _q_pipelines(q: str, limit: int):
+def _q_pipelines(q: str, limit: int, offset: int = 0):
     if q:
         return ("SELECT id FROM pipelines WHERE name LIKE :q "
-                "ORDER BY id DESC LIMIT :lim",
-                {"q": f"%{q}%", "lim": limit})
-    return ("SELECT id FROM pipelines ORDER BY id DESC LIMIT :lim",
-            {"lim": limit})
+                "ORDER BY id DESC LIMIT :lim OFFSET :off",
+                {"q": f"%{q}%", "lim": limit, "off": offset})
+    return ("SELECT id FROM pipelines ORDER BY id DESC LIMIT :lim OFFSET :off",
+            {"lim": limit, "off": offset})
 
 
-def _q_users(q: str, limit: int):
+def _q_users(q: str, limit: int, offset: int = 0):
     if q:
         return ("SELECT id FROM users "
                 "WHERE deleted_at IS NULL AND enable = 1 "
                 "  AND (name LIKE :q OR username LIKE :q OR email LIKE :q) "
-                "ORDER BY id ASC LIMIT :lim",
-                {"q": f"%{q}%", "lim": limit})
+                "ORDER BY id ASC LIMIT :lim OFFSET :off",
+                {"q": f"%{q}%", "lim": limit, "off": offset})
     return ("SELECT id FROM users WHERE deleted_at IS NULL AND enable = 1 "
-            "ORDER BY id ASC LIMIT :lim",
-            {"lim": limit})
+            "ORDER BY id ASC LIMIT :lim OFFSET :off",
+            {"lim": limit, "off": offset})
 
 
-def _q_teams(q: str, limit: int):
+def _q_teams(q: str, limit: int, offset: int = 0):
     if q:
         return ("SELECT id FROM teams WHERE name LIKE :q "
-                "ORDER BY id ASC LIMIT :lim",
-                {"q": f"%{q}%", "lim": limit})
-    return ("SELECT id FROM teams ORDER BY id ASC LIMIT :lim",
-            {"lim": limit})
+                "ORDER BY id ASC LIMIT :lim OFFSET :off",
+                {"q": f"%{q}%", "lim": limit, "off": offset})
+    return ("SELECT id FROM teams ORDER BY id ASC LIMIT :lim OFFSET :off",
+            {"lim": limit, "off": offset})
 
 
 _SEARCH_QUERIES = {
