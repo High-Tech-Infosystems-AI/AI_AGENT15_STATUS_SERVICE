@@ -44,6 +44,35 @@ def _today_iso() -> str:
     return datetime.utcnow().date().isoformat()
 
 
+def _coerce_text(content: Any) -> str:
+    """Normalize a LangChain message `content` into a plain string.
+
+    Gemini can return the model output in three shapes:
+      - a plain string,
+      - a list of content blocks (dicts) like
+            [{"type": "text", "text": "..."}, ...],
+      - a list of strings (rare, from streaming concatenations).
+
+    We collapse all three to a stripped string so downstream code can
+    reliably index into it.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                t = block.get("text") or block.get("content")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "\n".join(p for p in parts if p).strip()
+    return str(content).strip()
+
+
 def _resolve_ref_cards(db: Session, refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Look up the EntityCard for each ref so we can show titles in the prompt."""
     if not refs:
@@ -199,7 +228,7 @@ def run_turn(
             messages.append(response)
             calls = getattr(response, "tool_calls", None) or []
             if not calls:
-                final_text = (response.content or "").strip() if hasattr(response, "content") else str(response)
+                final_text = _coerce_text(getattr(response, "content", None))
                 break
             # Execute each requested tool, append ToolMessage results.
             for call in calls:
