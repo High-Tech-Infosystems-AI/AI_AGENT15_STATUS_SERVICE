@@ -58,7 +58,7 @@ def _resolve_jobs(db: Session, ids: List[int]) -> List[Optional[dict]]:
     if not ids:
         return []
     rows = db.execute(text("""
-        SELECT j.id, j.title, j.status, j.stage, j.deadline,
+        SELECT j.id, j.job_id, j.title, j.status, j.stage, j.deadline,
                j.openings, j.location, j.work_mode,
                c.company_name AS company_name,
                (SELECT COUNT(*) FROM user_jobs_assigned uja
@@ -92,15 +92,21 @@ def _resolve_jobs(db: Session, ids: List[int]) -> List[Optional[dict]]:
             fields.append({"label": "Mode", "value": m["work_mode"]})
         # Click-through:
         #   ACTIVE jobs → the job's pipeline kanban (where work happens).
+        #     Note: the kanban route uses the public string `job_id`
+        #     (e.g. "JOB_ID_..."), not the integer PK. The FE also needs
+        #     the integer to fetch full job details before navigating;
+        #     that's exposed via card.id while the route uses external_id.
         #   Anything else (CLOSED, INACTIVE, ON_HOLD, …) → the jobs list,
-        #   since the pipeline view isn't useful for a job that's no
-        #   longer being worked on.
+        #     since the pipeline view isn't useful for a job that's no
+        #     longer being worked on.
         status_upper = (m["status"] or "").upper()
-        deep_link = (f"/job-pipeline/{m['id']}"
-                     if status_upper == "ACTIVE" else "/jobs")
+        external_id = m["job_id"]
+        deep_link = (f"/job-pipeline/{external_id}"
+                     if status_upper == "ACTIVE" and external_id else "/jobs")
         out.append({
             "type": "job",
             "id": m["id"],
+            "external_id": external_id,
             "title": m["title"] or f"Job {m['id']}",
             "subtitle": m["company_name"] or m["location"] or None,
             "status": status_upper or None,
