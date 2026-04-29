@@ -17,11 +17,11 @@ spec:
     tty: true
     resources:
       requests:
-        cpu: "200m"      # was 500m or 1
-        memory: "1Gi"  # was 2Gi or 3Gi
+        cpu: "300m"
+        memory: "2Gi"
       limits:
-        cpu: "500m"      # was 2
-        memory: "2Gi"    # was 4Gi
+        cpu: "1"
+        memory: "4Gi"
     volumeMounts:
     - name: docker-config
       mountPath: /kaniko/.docker
@@ -137,8 +137,13 @@ spec:
             kubectl get namespace ${K8S_NAMESPACE} || kubectl create namespace ${K8S_NAMESPACE}
 
             kubectl apply -f k8s/deployment.rendered.yaml -n ${K8S_NAMESPACE}
-            kubectl rollout status deployment/status-service -n ${K8S_NAMESPACE} --timeout=300s
+            # Rollout timeout bumped to 7 min to absorb the extra
+            # AI Chat process + LangChain/Gemini import warm-up.
+            kubectl rollout status deployment/status-service -n ${K8S_NAMESPACE} --timeout=420s
 
+            echo "Status API   -> ClusterIP svc/status-service:8515"
+            echo "Chat API     -> ClusterIP svc/chat-service:8517"
+            echo "AI Chat API  -> ClusterIP svc/ai-chat-service:8518"
             echo "Notification UI exposed on NodePort 30509"
           """
         }
