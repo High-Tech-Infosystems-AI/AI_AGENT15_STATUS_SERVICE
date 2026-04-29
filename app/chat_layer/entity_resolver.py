@@ -344,16 +344,8 @@ REPORTS_CATALOG: list[dict] = [
     # include it almost everywhere; `granularity` only on trend-shaped
     # endpoints.
 
-    {"id": "tiles", "title": "Dashboard Tiles",
-     "subtitle": "Period-over-period overview tiles",
-     "chart_type": "donut", "filters": ["date_range"]},
-
     {"id": "pipeline-funnel", "title": "Pipeline Funnel",
      "subtitle": "Stage-by-stage candidate count",
-     "chart_type": "funnel", "filters": ["date_range", "company", "job"]},
-
-    {"id": "pipeline-funnel-graph", "title": "Pipeline Funnel Graph",
-     "subtitle": "Pipeline funnel rendered as a graph",
      "chart_type": "funnel", "filters": ["date_range", "company", "job"]},
 
     {"id": "pipeline-funnel-details", "title": "Pipeline Funnel Details",
@@ -404,21 +396,33 @@ REPORTS_CATALOG: list[dict] = [
      "subtitle": "Drill-down for recruiter daily performance",
      "chart_type": "table", "filters": ["date_range", "user"]},
 
+    # Recruiter efficiency ships in two flavors so a sender can pick the
+    # right shape for the conversation:
+    #   - top-recruiters: leaderboard of best performers (group context).
+    #   - recruiter-efficiency: per-recruiter individual breakdown (DM
+    #     context, optionally team context). The "user" filter pins it
+    #     to a single recruiter; in DMs we auto-pin to the peer.
     {"id": "top-recruiters", "title": "Top Recruiters",
      "subtitle": "Ranked recruiter leaderboard",
-     "chart_type": "bar", "filters": ["date_range"]},
+     "chart_type": "bar", "filters": ["date_range"],
+     "scope": "group"},
 
     {"id": "recruiter-efficiency", "title": "Recruiter Efficiency",
-     "subtitle": "Conversion rate per recruiter",
-     "chart_type": "bar", "filters": ["date_range"]},
-
-    {"id": "recruiter-efficiency-top-performers", "title": "Top Performers",
-     "subtitle": "Top efficiency recruiters",
-     "chart_type": "bar", "filters": ["date_range"]},
+     "subtitle": "Per-recruiter conversion + activity breakdown",
+     "chart_type": "bar", "filters": ["date_range", "user"],
+     "scope": "any"},
 
     {"id": "user-logins-details", "title": "User Logins",
      "subtitle": "Login activity breakdown",
      "chart_type": "table", "filters": ["date_range"]},
+
+    {"id": "platform-metrics", "title": "Platform Metrics",
+     "subtitle": "Sourcing platform distribution",
+     "chart_type": "donut", "filters": ["date_range", "user", "job"]},
+
+    {"id": "ai-distribution", "title": "AI Distribution",
+     "subtitle": "AI-assisted activity per recruiter",
+     "chart_type": "bar", "filters": ["date_range", "user"]},
 
     {"id": "avg-time-stages", "title": "Avg Time Per Stage",
      "subtitle": "Average duration per pipeline stage",
@@ -610,20 +614,30 @@ def search(db: Session, *, type_: str, q: str, limit: int = 12,
         return []
     if type_ == "report":
         ql = q.lower()
+        # In a DM scoped to a regular-user peer, hide "group-only"
+        # reports (e.g. top-recruiters leaderboard) — they aren't a
+        # natural thing to send to one person. The caller (entities_api)
+        # signals this by passing scope_user_id.
+        catalog = REPORTS_CATALOG
+        if scope_user_id is not None:
+            catalog = [r for r in catalog if r.get("scope") != "group"]
         if not ql:
-            picks = REPORTS_CATALOG[:limit]
+            picks = catalog[:limit]
         else:
-            picks = [r for r in REPORTS_CATALOG
+            picks = [r for r in catalog
                      if ql in r["title"].lower()
                      or ql in (r.get("subtitle") or "").lower()][:limit]
         # Picker results — no params yet (the user picks filters next).
         # We still merge the catalog metadata into the card so the FE
-        # filter step knows which filters to prompt for.
+        # filter step knows which filters to prompt for, and signal
+        # which filter should auto-fill to the DM peer when applicable.
         cards = _resolve_reports(db, [{"type": "report", "id": r["id"]}
                                        for r in picks])
         for card, meta in zip(cards, picks):
             if card:
                 card["filters_spec"] = list(meta.get("filters") or [])
+                if scope_user_id is not None and "user" in (meta.get("filters") or []):
+                    card["autofill_user_id"] = scope_user_id
         return [c for c in cards if c]
 
     if scope_user_id and type_ == "company":
