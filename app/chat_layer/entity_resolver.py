@@ -90,14 +90,22 @@ def _resolve_jobs(db: Session, ids: List[int]) -> List[Optional[dict]]:
             fields.append({"label": "Stage", "value": m["stage"]})
         if m["work_mode"]:
             fields.append({"label": "Mode", "value": m["work_mode"]})
+        # Click-through:
+        #   ACTIVE jobs → the job's pipeline kanban (where work happens).
+        #   Anything else (CLOSED, INACTIVE, ON_HOLD, …) → the jobs list,
+        #   since the pipeline view isn't useful for a job that's no
+        #   longer being worked on.
+        status_upper = (m["status"] or "").upper()
+        deep_link = (f"/job-pipeline/{m['id']}"
+                     if status_upper == "ACTIVE" else "/jobs")
         out.append({
             "type": "job",
             "id": m["id"],
             "title": m["title"] or f"Job {m['id']}",
             "subtitle": m["company_name"] or m["location"] or None,
-            "status": (m["status"] or "").upper() or None,
+            "status": status_upper or None,
             "status_color": _status_color_for(m["status"]),
-            "deep_link": f"/edit-jobs/{m['id']}",
+            "deep_link": deep_link,
             "fields": fields,
         })
     return out
