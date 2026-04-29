@@ -209,6 +209,17 @@ def send_message(conversation_id: int, req: SendMessageRequest,
             r_dict = r.model_dump() if hasattr(r, "model_dump") else dict(r)
             if r_dict.get("type") in entity_resolver.ENTITY_TYPES:
                 refs_payload.append({"type": r_dict["type"], "id": r_dict["id"]})
+
+        # DM rule: only Admin / SuperAdmin may attach entity references in
+        # a direct message. Picker UI hides the affordance for non-admins,
+        # but enforce server-side too so a crafted request can't bypass.
+        if refs_payload and conv.type == "dm":
+            if not entity_resolver.is_admin_role(user.get("role_name")):
+                return _err(
+                    "CHAT_ENTITY_DM_FORBIDDEN",
+                    "Entity references in direct messages are restricted to admins.",
+                    403,
+                )
         msg = store.create_message(
             db, conversation_id=conv.id, sender_id=user["user_id"],
             message_type=req.message_type, body=clean_body,
