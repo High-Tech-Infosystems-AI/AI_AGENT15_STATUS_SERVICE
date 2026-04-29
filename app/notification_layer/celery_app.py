@@ -54,8 +54,17 @@ celery_app.conf.update(
             "task": "app.notification_layer.celery_tasks.expire_banners",
             "schedule": 60.0,  # every 60 seconds
         },
+        # AI chatbot — scheduled queries + anomaly subscriptions
+        "ai-run-due-scheduled-queries": {
+            "task": "app.ai_chat_layer.scheduler.run_due_scheduled_queries",
+            "schedule": 60.0,
+        },
+        "ai-evaluate-anomaly-subs": {
+            "task": "app.ai_chat_layer.scheduler.evaluate_anomaly_subs",
+            "schedule": 120.0,
+        },
     },
 )
 
 # Auto-discover tasks
-celery_app.autodiscover_tasks(["app.notification_layer"])
+celery_app.autodiscover_tasks(["app.notification_layer", "app.ai_chat_layer"])

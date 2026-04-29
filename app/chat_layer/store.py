@@ -162,6 +162,25 @@ def inbox_row_for(db: Session, user_id: int, conversation_id: int) -> Optional[d
     return None
 
 
+def _ensure_ai_assistant_dm(db: Session, user_id: int) -> None:
+    """Auto-create the per-user "AI Assistant" DM the first time the user
+    fetches their inbox. Cheap when the bot user + DM already exist.
+
+    Imported lazily to avoid a circular import (ai_chat_layer imports
+    chat_layer.store)."""
+    try:
+        from app.ai_chat_layer.system_bot import ensure_ai_bot_user
+    except Exception:
+        return
+    try:
+        bot_id = ensure_ai_bot_user(db)
+        if bot_id and bot_id != user_id:
+            get_or_create_dm(db, user_id, bot_id)
+    except Exception:
+        # Non-fatal — inbox should still load if bot provisioning fails.
+        pass
+
+
 def inbox_for_user(db: Session, user_id: int) -> List[dict]:
     """
     Return the WhatsApp-style inbox: every conversation the user belongs to,
@@ -188,6 +207,10 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
     (one query for the headers, one for memberships, one for previews).
     Sorted by last_message_at DESC NULLS LAST, then id DESC — same as WhatsApp.
     """
+    # First-touch hook: make sure the user has an AI Assistant DM so the
+    # FE can pin it at the top.
+    _ensure_ai_assistant_dm(db, user_id)
+
     from sqlalchemy import text as _text
 
     # 1. Conversation headers + unread count + latest message id
