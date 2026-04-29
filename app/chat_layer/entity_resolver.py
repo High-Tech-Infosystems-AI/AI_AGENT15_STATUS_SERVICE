@@ -52,12 +52,19 @@ def _status_color_for(s: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _resolve_jobs(db: Session, ids: List[int]) -> List[Optional[dict]]:
+    """Job card. Pulls from `job_openings` joined to `companies` for the
+    subtitle, plus two correlated subqueries to surface 'who's working on
+    this' (assigned recruiters) and 'how many candidates have joined'."""
     if not ids:
         return []
     rows = db.execute(text("""
-        SELECT j.id, j.title, j.status, j.deadline,
-               j.openings, j.closed_count,
-               c.company_name AS company_name
+        SELECT j.id, j.title, j.status, j.stage, j.deadline,
+               j.openings, j.location, j.work_mode,
+               c.company_name AS company_name,
+               (SELECT COUNT(*) FROM user_jobs_assigned uja
+                 WHERE uja.job_id = j.id) AS recruiter_count,
+               (SELECT COUNT(*) FROM candidate_jobs cj
+                 WHERE cj.job_id = j.id) AS applicant_count
           FROM job_openings j
      LEFT JOIN companies c ON c.id = j.company_id
          WHERE j.id IN :ids
@@ -71,54 +78,92 @@ def _resolve_jobs(db: Session, ids: List[int]) -> List[Optional[dict]]:
         if not m:
             out.append(None)
             continue
-        opens = (m["openings"] or 0) - (m["closed_count"] or 0)
+        fields = [
+            {"label": "Openings", "value": str(m["openings"] or 0)},
+            {"label": "Applicants", "value": str(m["applicant_count"] or 0)},
+        ]
+        if m["recruiter_count"]:
+            fields.append({"label": "Recruiters", "value": str(m["recruiter_count"])})
+        if m["deadline"]:
+            fields.append({"label": "Deadline", "value": m["deadline"].isoformat()})
+        if m["stage"]:
+            fields.append({"label": "Stage", "value": m["stage"]})
+        if m["work_mode"]:
+            fields.append({"label": "Mode", "value": m["work_mode"]})
         out.append({
             "type": "job",
             "id": m["id"],
             "title": m["title"] or f"Job {m['id']}",
-            "subtitle": m["company_name"] or None,
+            "subtitle": m["company_name"] or m["location"] or None,
             "status": (m["status"] or "").upper() or None,
             "status_color": _status_color_for(m["status"]),
             "deep_link": f"/edit-jobs/{m['id']}",
-            "fields": [
-                {"label": "Openings", "value": f"{opens} open / {m['openings'] or 0} total"},
-                {"label": "Deadline",
-                 "value": m["deadline"].isoformat() if m["deadline"] else "—"},
-            ],
+            "fields": fields,
         })
     return out
 
 
-def _resolve_candidates(db: Session, ids: List[int]) -> List[Optional[dict]]:
+def _resolve_candidates(db: Session, ids: list) -> List[Optional[dict]]:
+    """Candidate card.
+
+    PK on `candidates` is `candidate_id` (String), so we alias it to `id`
+    for resolver-uniform handling. The pill status is taken from the
+    latest row of the dedicated `candidate_status` table (Text column),
+    which carries the recruiter-curated state. We fall back to the raw
+    `employment_status` column when no status row exists yet, and to
+    nothing when both are empty.
+    """
     if not ids:
         return []
+    str_ids = [str(i) for i in ids]
     rows = db.execute(text("""
-        SELECT id, candidate_name, candidate_email, status,
-               experience, current_company
-          FROM candidates
-         WHERE id IN :ids
+        SELECT c.candidate_id AS id,
+               c.candidate_name, c.candidate_email, c.employment_status,
+               c.experience, c.current_company, c.current_location,
+               c.job_profile,
+               (SELECT cs.candidate_status
+                  FROM candidate_status cs
+                 WHERE cs.candidate_id = c.candidate_id
+              ORDER BY cs.updated_at DESC, cs.id DESC
+                 LIMIT 1) AS latest_status,
+               (SELECT COUNT(*) FROM candidate_jobs cj
+                 WHERE cj.candidate_id = c.candidate_id) AS job_count
+          FROM candidates c
+         WHERE c.candidate_id IN :ids
     """).bindparams(bindparam("ids", expanding=True)),
-        {"ids": ids},
+        {"ids": str_ids},
     ).all()
-    by_id = {r._mapping["id"]: r._mapping for r in rows}
+    by_id = {str(r._mapping["id"]): r._mapping for r in rows}
     out: List[Optional[dict]] = []
     for cid in ids:
-        m = by_id.get(cid)
+        m = by_id.get(str(cid))
         if not m:
             out.append(None)
             continue
         fields = []
+        if m["job_profile"]:
+            fields.append({"label": "Profile", "value": m["job_profile"]})
         if m["experience"] is not None:
             fields.append({"label": "Experience", "value": f"{m['experience']} yrs"})
         if m["current_company"]:
             fields.append({"label": "Currently at", "value": m["current_company"]})
+        if m["current_location"]:
+            fields.append({"label": "Location", "value": m["current_location"]})
+        if m["job_count"]:
+            fields.append({"label": "Applied to", "value": f"{m['job_count']} jobs"})
+        # Prefer the curated `candidate_status` text; fall back to
+        # `employment_status` (e.g. "Active", "On Notice").
+        raw = (m["latest_status"] or "").strip() or (m["employment_status"] or "").strip()
+        # Status text can be free-form / multi-line — take the first line
+        # and clamp to a 24-char pill so the layout stays clean.
+        status = (raw.split("\n", 1)[0][:24]).upper() if raw else None
         out.append({
             "type": "candidate",
             "id": m["id"],
             "title": m["candidate_name"] or f"Candidate {m['id']}",
             "subtitle": m["candidate_email"] or None,
-            "status": (m["status"] or "").upper() or None,
-            "status_color": _status_color_for(m["status"]),
+            "status": status,
+            "status_color": _status_color_for(raw),
             "deep_link": f"/candidates?id={m['id']}",
             "fields": fields,
         })
@@ -198,7 +243,7 @@ def _resolve_users(db: Session, ids: List[int]) -> List[Optional[dict]]:
         return []
     rows = db.execute(text("""
         SELECT u.id, u.name, u.username, u.email, u.profile_image_key, u.enable,
-               r.role_name
+               r.name AS role_name
           FROM users u
      LEFT JOIN roles r ON r.id = u.role_id
          WHERE u.id IN :ids AND u.deleted_at IS NULL
@@ -272,34 +317,65 @@ def _resolve_teams(db: Session, ids: List[int]) -> List[Optional[dict]]:
 # ---------------------------------------------------------------------------
 
 REPORTS_CATALOG: list[dict] = [
-    {"id": "pipeline-funnel",       "title": "Pipeline Funnel",
+    # Tile / overview
+    {"id": "tiles",                          "title": "Dashboard Tiles",
+     "subtitle": "Period-over-period overview tiles"},
+    # Funnels & trends
+    {"id": "pipeline-funnel",                "title": "Pipeline Funnel",
      "subtitle": "Stage-by-stage candidate count"},
-    {"id": "hiring-funnel",         "title": "Hiring Funnel",
+    {"id": "pipeline-funnel-graph",          "title": "Pipeline Funnel Graph",
+     "subtitle": "Pipeline funnel rendered as a graph"},
+    {"id": "pipeline-funnel-details",        "title": "Pipeline Funnel Details",
+     "subtitle": "Drill-down into each funnel stage"},
+    {"id": "hiring-funnel",                  "title": "Hiring Funnel",
      "subtitle": "Joined vs rejected over time"},
-    {"id": "daily-trend",           "title": "Daily Trend",
+    {"id": "daily-trend",                    "title": "Daily Trend",
      "subtitle": "Joined / rejected (hourly–yearly)"},
-    {"id": "latest-jobs",           "title": "Latest Jobs",
+    # Jobs
+    {"id": "latest-jobs",                    "title": "Latest Jobs",
      "subtitle": "Most recent job openings"},
-    {"id": "count-jobs",            "title": "Job Count",
+    {"id": "count-jobs",                     "title": "Job Count",
      "subtitle": "Aggregate open job count"},
-    {"id": "company-jobs-count",    "title": "Jobs by Company",
+    {"id": "company-jobs-count",             "title": "Jobs by Company",
      "subtitle": "Per-company job distribution"},
-    {"id": "count-candidates",      "title": "Candidate Count",
+    # Candidates
+    {"id": "count-candidates",               "title": "Candidate Count",
      "subtitle": "Aggregate candidate count"},
-    {"id": "user-candidate-share-today", "title": "Recruiter Load Today",
+    {"id": "user-candidate-share-today",     "title": "Recruiter Load Today",
      "subtitle": "Per-recruiter candidate distribution"},
-    {"id": "hiring-summary-details", "title": "Hiring Summary",
+    # Hiring metrics
+    {"id": "hiring-summary-details",         "title": "Hiring Summary",
      "subtitle": "Detailed hiring metrics"},
-    {"id": "pipeline-progress-details", "title": "Pipeline Progress",
+    {"id": "pipeline-progress-details",      "title": "Pipeline Progress",
      "subtitle": "Stage-wise progress breakdown"},
-    {"id": "clawback-metrics",      "title": "Clawback Metrics",
-     "subtitle": "Clawback rates by recruiter"},
-    {"id": "daily-performance",     "title": "Daily Performance",
+    # Recruiter performance
+    {"id": "daily-performance",              "title": "Daily Performance",
      "subtitle": "Recruiter daily performance"},
-    {"id": "avg-time-stages",       "title": "Avg Time Per Stage",
+    {"id": "daily-performance-details",      "title": "Daily Performance Details",
+     "subtitle": "Drill-down for recruiter daily performance"},
+    {"id": "top-recruiters",                 "title": "Top Recruiters",
+     "subtitle": "Ranked recruiter leaderboard"},
+    {"id": "recruiter-efficiency",           "title": "Recruiter Efficiency",
+     "subtitle": "Conversion rate per recruiter"},
+    {"id": "recruiter-efficiency-top-performers", "title": "Top Performers",
+     "subtitle": "Top efficiency recruiters"},
+    {"id": "user-logins-details",            "title": "User Logins",
+     "subtitle": "Login activity breakdown"},
+    # Pipeline velocity / SLA
+    {"id": "avg-time-stages",                "title": "Avg Time Per Stage",
      "subtitle": "Average duration per pipeline stage"},
-    {"id": "pipeline-velocity",     "title": "Pipeline Velocity",
+    {"id": "pipeline-velocity",              "title": "Pipeline Velocity",
      "subtitle": "Candidates moving per day"},
+    # Clawback
+    {"id": "clawback-metrics",               "title": "Clawback Metrics",
+     "subtitle": "Clawback rates by recruiter"},
+    {"id": "clawback-details",               "title": "Clawback Details",
+     "subtitle": "Per-candidate clawback drill-down"},
+    {"id": "clawback-status-graph",          "title": "Clawback Status Graph",
+     "subtitle": "Clawback status visualization"},
+    # Company / cross-cuts
+    {"id": "company-performance",            "title": "Company Performance",
+     "subtitle": "Per-company hiring metrics"},
 ]
 REPORTS_BY_ID = {r["id"]: r for r in REPORTS_CATALOG}
 
@@ -369,7 +445,39 @@ def resolve(db: Session, refs: Iterable[dict]) -> List[Optional[dict]]:
 # Returns up to `limit` results in card-shape.
 # ---------------------------------------------------------------------------
 
-def search(db: Session, *, type_: str, q: str, limit: int = 12) -> List[dict]:
+ADMIN_ROLES = {"admin", "superadmin", "super_admin", "super admin"}
+
+
+def is_admin_role(role_name: Optional[str]) -> bool:
+    return (role_name or "").strip().lower().replace(" ", "_") in ADMIN_ROLES
+
+
+def get_user_role_name(db: Session, user_id: int) -> Optional[str]:
+    """Resolve a user's role name. Used to decide DM scoping when the
+    caller is asking about entities visible to the DM peer."""
+    row = db.execute(text(
+        "SELECT r.name FROM users u "
+        "LEFT JOIN roles r ON r.id = u.role_id "
+        "WHERE u.id = :uid"
+    ), {"uid": user_id}).first()
+    return row[0] if row else None
+
+
+def search(db: Session, *, type_: str, q: str, limit: int = 12,
+           scope_user_id: Optional[int] = None) -> List[dict]:
+    """Search a single entity type for the picker.
+
+    `scope_user_id`:
+      - `None` → return everything matching the query (admin / unscoped view).
+      - `int`  → restrict to entities accessible to that user. Today only
+        applies to `company` and `job` types via `user_jobs_assigned`.
+        Other types are unaffected.
+
+    The caller (entities_api.search_entities) computes the right value:
+      - Team / general / no conversation: scope to the caller (or None for admins).
+      - DM with admin peer: None (full access on both sides).
+      - DM with regular-user peer: scope to that peer's user_id.
+    """
     q = (q or "").strip()
     if type_ not in _RESOLVERS:
         return []
@@ -383,7 +491,12 @@ def search(db: Session, *, type_: str, q: str, limit: int = 12) -> List[dict]:
                      or ql in (r.get("subtitle") or "").lower()][:limit]
         return [c for c in _resolve_reports(db, [r["id"] for r in picks]) if c]
 
-    sql, params = _SEARCH_QUERIES[type_](q, limit)
+    if scope_user_id and type_ == "company":
+        sql, params = _q_companies_for_user(q, limit, scope_user_id)
+    elif scope_user_id and type_ == "job":
+        sql, params = _q_jobs_for_user(q, limit, scope_user_id)
+    else:
+        sql, params = _SEARCH_QUERIES[type_](q, limit)
     rows = db.execute(text(sql), params).all()
     ids = [r._mapping["id"] for r in rows]
     cards = _RESOLVERS[type_](db, ids)
@@ -400,12 +513,15 @@ def _q_jobs(q: str, limit: int):
 
 
 def _q_candidates(q: str, limit: int):
+    # Candidates' primary key is `candidate_id` (String). Alias to `id` so
+    # the search dispatcher (which reads `r._mapping["id"]`) stays generic.
     if q:
-        return ("SELECT id FROM candidates "
+        return ("SELECT candidate_id AS id FROM candidates "
                 "WHERE candidate_name LIKE :q OR candidate_email LIKE :q "
-                "ORDER BY id DESC LIMIT :lim",
+                "ORDER BY created_at DESC LIMIT :lim",
                 {"q": f"%{q}%", "lim": limit})
-    return ("SELECT id FROM candidates ORDER BY id DESC LIMIT :lim",
+    return ("SELECT candidate_id AS id FROM candidates "
+            "ORDER BY created_at DESC LIMIT :lim",
             {"lim": limit})
 
 
@@ -417,6 +533,43 @@ def _q_companies(q: str, limit: int):
                 {"q": f"%{q}%", "lim": limit})
     return ("SELECT id FROM companies ORDER BY id DESC LIMIT :lim",
             {"lim": limit})
+
+
+def _q_companies_for_user(q: str, limit: int, user_id: int):
+    """Companies owning at least one job assigned to `user_id`. Used when
+    a non-admin caller opens the company picker — they should only see
+    companies they're actively recruiting for."""
+    base = ("SELECT DISTINCT c.id FROM companies c "
+            "JOIN job_openings j ON j.company_id = c.id "
+            "JOIN user_jobs_assigned uja ON uja.job_id = j.id "
+            "WHERE uja.user_id = :uid")
+    if q:
+        return (
+            base + " AND (c.company_name LIKE :q OR c.location LIKE :q) "
+            "ORDER BY c.id DESC LIMIT :lim",
+            {"uid": user_id, "q": f"%{q}%", "lim": limit},
+        )
+    return (
+        base + " ORDER BY c.id DESC LIMIT :lim",
+        {"uid": user_id, "lim": limit},
+    )
+
+
+def _q_jobs_for_user(q: str, limit: int, user_id: int):
+    """Jobs assigned to `user_id`. Mirrors the company scoping so a
+    non-admin caller sees the same slice of work in both pickers."""
+    base = ("SELECT j.id FROM job_openings j "
+            "JOIN user_jobs_assigned uja ON uja.job_id = j.id "
+            "WHERE uja.user_id = :uid")
+    if q:
+        return (
+            base + " AND j.title LIKE :q ORDER BY j.id DESC LIMIT :lim",
+            {"uid": user_id, "q": f"%{q}%", "lim": limit},
+        )
+    return (
+        base + " ORDER BY j.id DESC LIMIT :lim",
+        {"uid": user_id, "lim": limit},
+    )
 
 
 def _q_pipelines(q: str, limit: int):
