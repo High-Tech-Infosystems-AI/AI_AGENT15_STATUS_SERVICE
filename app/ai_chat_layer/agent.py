@@ -132,6 +132,13 @@ def run_turn(
     trace: List[Dict[str, Any]] = []
     model_name = settings.GEMINI_PRO_MODEL
 
+    # ---- 0. Persist the user's prompt as a real chat message ----
+    # Without this the user never sees their own typed text echoed in the
+    # AI thread (only the bot's reply is otherwise written). The broadcast
+    # also fires `message.new` + `inbox.bump` so the FE clears its local
+    # placeholder and renders the real row.
+    user_msg_id = _post_user_message(db, conversation_id, user_id, prompt, refs)
+
     # ---- 1. Quota probe ----
     est = llm.estimate_tokens(prompt) + 256  # cushion for system/turns
     try:
@@ -153,7 +160,8 @@ def run_turn(
             latency_ms=int((time.monotonic() - started) * 1000),
         )
         return {"message_id": msg_id, "text": final_text, "trace": trace,
-                "refs": [], "artifacts": []}
+                "refs": [], "artifacts": [],
+                "user_message_id": user_msg_id}
 
     # ---- 2. Access guard for tagged refs ----
     scope = apply_scope(db, user)
@@ -174,7 +182,8 @@ def run_turn(
             latency_ms=int((time.monotonic() - started) * 1000),
         )
         return {"message_id": msg_id, "text": final_text, "trace": trace,
-                "refs": [], "artifacts": []}
+                "refs": [], "artifacts": [],
+                "user_message_id": user_msg_id}
 
     # ---- 3. Build context + tools ----
     ctx = ToolContext(
@@ -284,6 +293,7 @@ def run_turn(
 
     return {
         "message_id": msg_id,
+        "user_message_id": user_msg_id,
         "text": final_text,
         "trace": trace,
         "refs": output_refs,
@@ -291,6 +301,76 @@ def run_turn(
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
     }
+
+
+def _broadcast_message(db: Session, msg, conversation_id: int) -> None:
+    """Push a freshly-created chat message onto every member's WS channel
+    + bump their inbox row. Same shape the regular chat send path uses,
+    so the FE handlers (`message.new`, `inbox.bump`) light up identically.
+    """
+    try:
+        # Imports kept local to keep agent.py's import surface small.
+        from app.chat_layer import (
+            redis_chat, store as _store, user_info_cache,
+        )
+        from app.chat_layer.api.messages_api import _to_message_out
+    except Exception as exc:  # pragma: no cover
+        logger.warning("broadcast helper import failed: %s", exc)
+        return
+    try:
+        members = _store.member_user_ids(db, conversation_id)
+        payload = _to_message_out(msg, attachment=None, mention_ids=[], db=db)
+        sender_info = user_info_cache.get_user_info(msg.sender_id, db=db)
+        preview = {
+            "id": msg.id,
+            "sender_id": msg.sender_id,
+            "sender_username": sender_info.get("username"),
+            "sender_name": sender_info.get("name"),
+            "message_type": msg.message_type,
+            "body_preview": _store._preview_for(
+                msg.message_type, msg.body, msg.deleted_at,
+            ),
+            "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            "deleted_at": None,
+        }
+        for uid in members:
+            redis_chat.publish_message_new(
+                user_id=uid, message=payload, conversation_id=conversation_id,
+            )
+            unread = _store.unread_count_for_user(db, conversation_id, uid)
+            redis_chat.publish_inbox_bump(
+                user_id=uid, conversation_id=conversation_id,
+                latest_message=preview, unread_count=unread,
+            )
+    except Exception as exc:
+        logger.warning("ai message broadcast failed: %s", exc, exc_info=True)
+
+
+def _post_user_message(
+    db: Session,
+    conversation_id: int,
+    user_id: int,
+    body: str,
+    refs: Optional[List[Dict[str, Any]]],
+) -> Optional[int]:
+    """Persist the caller's outgoing prompt as a real chat message and push
+    it on the WS. Without this the user never sees their own typed text in
+    the AI thread (the agent only writes the reply)."""
+    try:
+        msg = chat_store.create_message(
+            db,
+            conversation_id=conversation_id,
+            sender_id=user_id,
+            message_type="text",
+            body=body,
+            refs=(refs or None),
+            is_system=False,
+        )
+        _broadcast_message(db, msg, conversation_id)
+        return msg.id
+    except Exception as exc:
+        logger.warning("user prompt persist failed: %s", exc, exc_info=True)
+        return None
 
 
 def _post_reply(
@@ -301,8 +381,8 @@ def _post_reply(
     refs: List[Dict[str, Any]],
     artifacts: List[Dict[str, Any]],
 ) -> Optional[int]:
-    """Insert the reply as a chat message from the AI bot user. Best-effort —
-    logs and returns None on failure so the caller still gets a result."""
+    """Insert the AI reply as a chat message from the AI bot user. Best-effort
+    — logs and returns None on failure so the caller still gets a result."""
     try:
         bot_id = system_bot.ensure_ai_bot_user(db)
         # We embed artifacts inline as a JSON tail of the refs list with
@@ -330,6 +410,7 @@ def _post_reply(
             refs=all_refs or None,
             is_system=True,
         )
+        _broadcast_message(db, msg, conversation_id)
         return msg.id
     except Exception as exc:
         logger.exception("AI reply persist failed: %s", exc)
