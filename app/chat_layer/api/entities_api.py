@@ -41,6 +41,10 @@ def _err(code: str, msg: str, status: int) -> JSONResponse:
 class _Ref(BaseModel):
     type: str
     id: str | int
+    # Per-type extras — for reports this carries the selected filters
+    # (date_from, date_to, granularity, company_id, …) so the resolver
+    # can build a deep_link that opens the dashboard at the right state.
+    params: Optional[dict] = None
 
 
 class ResolveRequest(BaseModel):
@@ -118,7 +122,10 @@ def search_entities(type: str, q: str = "", limit: int = 12,
 
 @router.get("/entities/reports/catalog")
 def reports_catalog(_user: dict = Depends(current_user)):
-    """List of shareable reports/graphs the user can drop into a chat."""
+    """List of shareable reports/graphs the user can drop into a chat.
+    Each entry carries `chart_type` (drives the snapshot template the FE
+    renders) and `filters` (which inputs the picker should prompt for
+    before committing the ref)."""
     return {"items": entity_resolver.REPORTS_CATALOG}
 
 

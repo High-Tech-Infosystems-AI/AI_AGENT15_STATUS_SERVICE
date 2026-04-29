@@ -11,10 +11,17 @@ EntityType = Literal[
 
 class EntityRef(BaseModel):
     """A `(type, id)` pair embedded in a message. Body text holds an
-    @@ref:type:id@@ token at the position the matching card should render."""
+    @@ref:type:id@@ token at the position the matching card should render.
+
+    `params` carries per-type extra context. For reports it holds the
+    selected filters (date_from, date_to, granularity, etc.) so the card
+    snapshot and the click-through URL can both reflect them.
+    """
     type: EntityType
-    # Numeric for everything except `report` (which uses string slugs).
+    # Numeric for everything except `report` (which uses string slugs)
+    # and `candidate` (which uses string `candidate_id`).
     id: Union[int, str]
+    params: Optional[dict] = None
 
 
 class EntityField(BaseModel):
@@ -33,6 +40,12 @@ class EntityCard(BaseModel):
     deep_link: str
     avatar_url: Optional[str] = None
     fields: List[EntityField] = []
+    # For reports: which echarts shape the FE should render as a snapshot
+    # (line | funnel | bar | donut | table). Echoed back verbatim from the
+    # catalog so the snapshot component can pick its template.
+    chart_type: Optional[str] = None
+    # Echo of the params used so the FE can render a filter summary chip.
+    params: Optional[dict] = None
 
 
 class CreateDMRequest(BaseModel):
