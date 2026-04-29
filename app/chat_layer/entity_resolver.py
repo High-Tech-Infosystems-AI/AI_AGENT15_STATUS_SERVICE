@@ -325,85 +325,190 @@ def _resolve_teams(db: Session, ids: List[int]) -> List[Optional[dict]]:
 # ---------------------------------------------------------------------------
 
 REPORTS_CATALOG: list[dict] = [
-    # Tile / overview
-    {"id": "tiles",                          "title": "Dashboard Tiles",
-     "subtitle": "Period-over-period overview tiles"},
-    # Funnels & trends
-    {"id": "pipeline-funnel",                "title": "Pipeline Funnel",
-     "subtitle": "Stage-by-stage candidate count"},
-    {"id": "pipeline-funnel-graph",          "title": "Pipeline Funnel Graph",
-     "subtitle": "Pipeline funnel rendered as a graph"},
-    {"id": "pipeline-funnel-details",        "title": "Pipeline Funnel Details",
-     "subtitle": "Drill-down into each funnel stage"},
-    {"id": "hiring-funnel",                  "title": "Hiring Funnel",
-     "subtitle": "Joined vs rejected over time"},
-    {"id": "daily-trend",                    "title": "Daily Trend",
-     "subtitle": "Joined / rejected (hourly–yearly)"},
-    # Jobs
-    {"id": "latest-jobs",                    "title": "Latest Jobs",
-     "subtitle": "Most recent job openings"},
-    {"id": "count-jobs",                     "title": "Job Count",
-     "subtitle": "Aggregate open job count"},
-    {"id": "company-jobs-count",             "title": "Jobs by Company",
-     "subtitle": "Per-company job distribution"},
-    # Candidates
-    {"id": "count-candidates",               "title": "Candidate Count",
-     "subtitle": "Aggregate candidate count"},
-    {"id": "user-candidate-share-today",     "title": "Recruiter Load Today",
-     "subtitle": "Per-recruiter candidate distribution"},
-    # Hiring metrics
-    {"id": "hiring-summary-details",         "title": "Hiring Summary",
-     "subtitle": "Detailed hiring metrics"},
-    {"id": "pipeline-progress-details",      "title": "Pipeline Progress",
-     "subtitle": "Stage-wise progress breakdown"},
-    # Recruiter performance
-    {"id": "daily-performance",              "title": "Daily Performance",
-     "subtitle": "Recruiter daily performance"},
-    {"id": "daily-performance-details",      "title": "Daily Performance Details",
-     "subtitle": "Drill-down for recruiter daily performance"},
-    {"id": "top-recruiters",                 "title": "Top Recruiters",
-     "subtitle": "Ranked recruiter leaderboard"},
-    {"id": "recruiter-efficiency",           "title": "Recruiter Efficiency",
-     "subtitle": "Conversion rate per recruiter"},
+    # Each entry carries:
+    #   chart_type: how the FE snapshot component should render the
+    #     placeholder visual ("line", "bar", "funnel", "donut", "table").
+    #   filters:    list of filter keys the picker should prompt for
+    #     before committing the ref. Drives the UI form, not the SQL.
+    #     Recognized keys: date_range (date_from + date_to),
+    #       granularity (hourly|daily|weekly|monthly|yearly),
+    #       company, job, user.
+    #
+    # `date_range` is implicit-supported by every chart endpoint so we
+    # include it almost everywhere; `granularity` only on trend-shaped
+    # endpoints.
+
+    {"id": "tiles", "title": "Dashboard Tiles",
+     "subtitle": "Period-over-period overview tiles",
+     "chart_type": "donut", "filters": ["date_range"]},
+
+    {"id": "pipeline-funnel", "title": "Pipeline Funnel",
+     "subtitle": "Stage-by-stage candidate count",
+     "chart_type": "funnel", "filters": ["date_range", "company", "job"]},
+
+    {"id": "pipeline-funnel-graph", "title": "Pipeline Funnel Graph",
+     "subtitle": "Pipeline funnel rendered as a graph",
+     "chart_type": "funnel", "filters": ["date_range", "company", "job"]},
+
+    {"id": "pipeline-funnel-details", "title": "Pipeline Funnel Details",
+     "subtitle": "Drill-down into each funnel stage",
+     "chart_type": "table", "filters": ["date_range", "company", "job"]},
+
+    {"id": "hiring-funnel", "title": "Hiring Funnel",
+     "subtitle": "Joined vs rejected over time",
+     "chart_type": "line", "filters": ["date_range", "granularity", "company", "job"]},
+
+    {"id": "daily-trend", "title": "Daily Trend",
+     "subtitle": "Joined / rejected (hourly–yearly)",
+     "chart_type": "line", "filters": ["date_range", "granularity"]},
+
+    {"id": "latest-jobs", "title": "Latest Jobs",
+     "subtitle": "Most recent job openings",
+     "chart_type": "table", "filters": ["date_range"]},
+
+    {"id": "count-jobs", "title": "Job Count",
+     "subtitle": "Aggregate open job count",
+     "chart_type": "donut", "filters": ["date_range"]},
+
+    {"id": "company-jobs-count", "title": "Jobs by Company",
+     "subtitle": "Per-company job distribution",
+     "chart_type": "bar", "filters": ["date_range"]},
+
+    {"id": "count-candidates", "title": "Candidate Count",
+     "subtitle": "Aggregate candidate count",
+     "chart_type": "donut", "filters": ["date_range"]},
+
+    {"id": "user-candidate-share-today", "title": "Recruiter Load Today",
+     "subtitle": "Per-recruiter candidate distribution",
+     "chart_type": "bar", "filters": []},
+
+    {"id": "hiring-summary-details", "title": "Hiring Summary",
+     "subtitle": "Detailed hiring metrics",
+     "chart_type": "table", "filters": ["date_range"]},
+
+    {"id": "pipeline-progress-details", "title": "Pipeline Progress",
+     "subtitle": "Stage-wise progress breakdown",
+     "chart_type": "bar", "filters": ["date_range", "company", "job"]},
+
+    {"id": "daily-performance", "title": "Daily Performance",
+     "subtitle": "Recruiter daily performance",
+     "chart_type": "line", "filters": ["date_range", "granularity", "user"]},
+
+    {"id": "daily-performance-details", "title": "Daily Performance Details",
+     "subtitle": "Drill-down for recruiter daily performance",
+     "chart_type": "table", "filters": ["date_range", "user"]},
+
+    {"id": "top-recruiters", "title": "Top Recruiters",
+     "subtitle": "Ranked recruiter leaderboard",
+     "chart_type": "bar", "filters": ["date_range"]},
+
+    {"id": "recruiter-efficiency", "title": "Recruiter Efficiency",
+     "subtitle": "Conversion rate per recruiter",
+     "chart_type": "bar", "filters": ["date_range"]},
+
     {"id": "recruiter-efficiency-top-performers", "title": "Top Performers",
-     "subtitle": "Top efficiency recruiters"},
-    {"id": "user-logins-details",            "title": "User Logins",
-     "subtitle": "Login activity breakdown"},
-    # Pipeline velocity / SLA
-    {"id": "avg-time-stages",                "title": "Avg Time Per Stage",
-     "subtitle": "Average duration per pipeline stage"},
-    {"id": "pipeline-velocity",              "title": "Pipeline Velocity",
-     "subtitle": "Candidates moving per day"},
-    # Clawback
-    {"id": "clawback-metrics",               "title": "Clawback Metrics",
-     "subtitle": "Clawback rates by recruiter"},
-    {"id": "clawback-details",               "title": "Clawback Details",
-     "subtitle": "Per-candidate clawback drill-down"},
-    {"id": "clawback-status-graph",          "title": "Clawback Status Graph",
-     "subtitle": "Clawback status visualization"},
-    # Company / cross-cuts
-    {"id": "company-performance",            "title": "Company Performance",
-     "subtitle": "Per-company hiring metrics"},
+     "subtitle": "Top efficiency recruiters",
+     "chart_type": "bar", "filters": ["date_range"]},
+
+    {"id": "user-logins-details", "title": "User Logins",
+     "subtitle": "Login activity breakdown",
+     "chart_type": "table", "filters": ["date_range"]},
+
+    {"id": "avg-time-stages", "title": "Avg Time Per Stage",
+     "subtitle": "Average duration per pipeline stage",
+     "chart_type": "bar", "filters": ["date_range", "company", "job"]},
+
+    {"id": "pipeline-velocity", "title": "Pipeline Velocity",
+     "subtitle": "Candidates moving per day",
+     "chart_type": "line", "filters": ["date_range", "granularity"]},
+
+    {"id": "clawback-metrics", "title": "Clawback Metrics",
+     "subtitle": "Clawback rates by recruiter",
+     "chart_type": "bar", "filters": ["date_range"]},
+
+    {"id": "clawback-details", "title": "Clawback Details",
+     "subtitle": "Per-candidate clawback drill-down",
+     "chart_type": "table", "filters": ["date_range"]},
+
+    {"id": "clawback-status-graph", "title": "Clawback Status Graph",
+     "subtitle": "Clawback status visualization",
+     "chart_type": "donut", "filters": ["date_range"]},
+
+    {"id": "company-performance", "title": "Company Performance",
+     "subtitle": "Per-company hiring metrics",
+     "chart_type": "bar", "filters": ["date_range", "company"]},
 ]
 REPORTS_BY_ID = {r["id"]: r for r in REPORTS_CATALOG}
 
 
-def _resolve_reports(_db: Session, ids: List[str]) -> List[Optional[dict]]:
+# Filter keys we pass through into the dashboard URL. Anything else on
+# `params` is dropped at deep-link build time so a malformed payload can't
+# inject arbitrary query string content.
+_REPORT_FILTER_PARAM_KEYS = {
+    "date_from", "date_to", "granularity",
+    "company_id", "job_id", "user_id",
+}
+
+
+def _build_report_deep_link(report_id: str, params: Optional[dict]) -> str:
+    """Build a deterministic /dashboard URL with the report id + filters.
+    Empty / unknown keys are silently dropped so callers can pass partial
+    `params` without poisoning the URL."""
+    qs_parts = [f"chart={report_id}"]
+    if params:
+        for k, v in params.items():
+            if k not in _REPORT_FILTER_PARAM_KEYS:
+                continue
+            if v is None or v == "":
+                continue
+            qs_parts.append(f"{k}={v}")
+    return "/dashboard?" + "&".join(qs_parts)
+
+
+def _format_filter_summary(params: Optional[dict]) -> Optional[str]:
+    """Render a one-line "Last 30 days · Daily" subtitle for the card."""
+    if not params:
+        return None
+    parts: list[str] = []
+    df = params.get("date_from")
+    dt = params.get("date_to")
+    if df and dt:
+        parts.append(f"{df} → {dt}")
+    elif df:
+        parts.append(f"from {df}")
+    elif dt:
+        parts.append(f"until {dt}")
+    g = params.get("granularity")
+    if g:
+        parts.append(str(g).capitalize())
+    return " · ".join(parts) if parts else None
+
+
+def _resolve_reports(_db: Session, refs: list) -> List[Optional[dict]]:
+    """Reports resolver. Unlike the others this one reads `params` from
+    each ref and folds it into the card's deep_link + subtitle. Catalog
+    metadata (chart_type, filter spec) flows through to the card so the
+    snapshot component on the FE can pick the right template."""
     out: List[Optional[dict]] = []
-    for rid in ids:
+    for ref in refs:
+        rid = ref.get("id") if isinstance(ref, dict) else ref
+        params = ref.get("params") if isinstance(ref, dict) else None
         meta = REPORTS_BY_ID.get(rid)
         if not meta:
             out.append(None)
             continue
+        subtitle = _format_filter_summary(params) or meta["subtitle"]
         out.append({
             "type": "report",
             "id": meta["id"],
             "title": meta["title"],
-            "subtitle": meta["subtitle"],
+            "subtitle": subtitle,
             "status": None,
             "status_color": None,
-            "deep_link": f"/dashboard?chart={meta['id']}",
+            "deep_link": _build_report_deep_link(meta["id"], params),
             "fields": [],
+            "chart_type": meta.get("chart_type"),
+            "params": params or None,
         })
     return out
 
@@ -425,24 +530,32 @@ _RESOLVERS = {
 
 def resolve(db: Session, refs: Iterable[dict]) -> List[Optional[dict]]:
     """Resolve a heterogeneous list of references in one pass. Preserves
-    input order. Unknown types or missing rows return None at that index."""
+    input order. Unknown types or missing rows return None at that index.
+
+    Reports are dispatched with the full ref dict so per-ref `params`
+    (filters) flow through. Other types still receive an id-only list
+    since their cards don't vary with extra context.
+    """
     refs = list(refs)
     out: List[Optional[dict]] = [None] * len(refs)
-    by_type: dict[str, list[tuple[int, str | int]]] = {}
+    by_type: dict[str, list[tuple[int, dict]]] = {}
     for i, ref in enumerate(refs):
         t = (ref or {}).get("type")
         rid = (ref or {}).get("id")
         if t not in _RESOLVERS or rid is None:
             continue
-        by_type.setdefault(t, []).append((i, rid))
+        by_type.setdefault(t, []).append((i, ref))
     for t, items in by_type.items():
         positions = [i for i, _ in items]
-        ids = [rid for _, rid in items]
         try:
-            cards = _RESOLVERS[t](db, ids)
+            if t == "report":
+                cards = _resolve_reports(db, [r for _, r in items])
+            else:
+                ids = [r["id"] for _, r in items]
+                cards = _RESOLVERS[t](db, ids)
         except Exception as e:
-            logger.exception("entity resolve failed type=%s ids=%s: %s", t, ids, e)
-            cards = [None] * len(ids)
+            logger.exception("entity resolve failed type=%s: %s", t, e)
+            cards = [None] * len(items)
         for pos, card in zip(positions, cards):
             out[pos] = card
     return out
@@ -497,7 +610,15 @@ def search(db: Session, *, type_: str, q: str, limit: int = 12,
             picks = [r for r in REPORTS_CATALOG
                      if ql in r["title"].lower()
                      or ql in (r.get("subtitle") or "").lower()][:limit]
-        return [c for c in _resolve_reports(db, [r["id"] for r in picks]) if c]
+        # Picker results — no params yet (the user picks filters next).
+        # We still merge the catalog metadata into the card so the FE
+        # filter step knows which filters to prompt for.
+        cards = _resolve_reports(db, [{"type": "report", "id": r["id"]}
+                                       for r in picks])
+        for card, meta in zip(cards, picks):
+            if card:
+                card["filters_spec"] = list(meta.get("filters") or [])
+        return [c for c in cards if c]
 
     if scope_user_id and type_ == "company":
         sql, params = _q_companies_for_user(q, limit, scope_user_id)
