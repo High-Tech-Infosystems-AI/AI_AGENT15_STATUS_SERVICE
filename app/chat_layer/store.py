@@ -380,7 +380,9 @@ def create_message(db: Session, *, conversation_id: int, sender_id: int,
                    attachment_id: Optional[int] = None,
                    reply_to_message_id: Optional[int] = None,
                    forwarded_from_message_id: Optional[int] = None,
-                   forwarded_from_sender_id: Optional[int] = None) -> ChatMessage:
+                   forwarded_from_sender_id: Optional[int] = None,
+                   refs: Optional[list] = None,
+                   is_system: bool = False) -> ChatMessage:
     msg = ChatMessage(
         conversation_id=conversation_id,
         sender_id=sender_id,
@@ -390,6 +392,8 @@ def create_message(db: Session, *, conversation_id: int, sender_id: int,
         reply_to_message_id=reply_to_message_id,
         forwarded_from_message_id=forwarded_from_message_id,
         forwarded_from_sender_id=forwarded_from_sender_id,
+        refs=refs or None,
+        is_system=1 if is_system else 0,
     )
     db.add(msg)
     db.flush()
