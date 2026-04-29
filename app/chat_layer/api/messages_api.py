@@ -8,7 +8,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import bindparam, text
 
 import app.chat_layer.notification_bridge as bridge
-from app.chat_layer import redis_chat, s3_chat_service as s3, store, user_info_cache
+from app.chat_layer import (
+    entity_resolver, redis_chat, s3_chat_service as s3, status_bot, store,
+    user_info_cache,
+)
 from app.chat_layer.auth import current_user
 from app.chat_layer.ws_manager import ws_manager as chat_ws_manager
 from app.chat_layer.chat_acl import (
@@ -52,6 +55,17 @@ def _attachment_out(att) -> Optional[AttachmentOut]:
     )
 
 
+def _resolve_refs_for(msg, db) -> list[dict]:
+    """Resolve any structured `(type, id)` refs persisted on the message
+    into full cards for the response. Cheap when the message has no refs.
+    """
+    raw = getattr(msg, "refs", None) or []
+    if not raw:
+        return []
+    cards = entity_resolver.resolve(db, raw)
+    return [c for c in cards if c]
+
+
 def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
                     read_by=None, delivered_to=None, reactions=None) -> dict:
     body_out = msg.body
@@ -70,11 +84,14 @@ def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
         fwd_info = user_info_cache.get_user_info(fwd_sender_id, db=db)
         fwd_sender_username = fwd_info.get("username")
         fwd_sender_name = fwd_info.get("name")
+    refs_out = _resolve_refs_for(msg, db) if msg.deleted_at is None else []
     return MessageOut(
         id=msg.id, conversation_id=msg.conversation_id, sender_id=msg.sender_id,
         sender_username=sender_info.get("username"),
         sender_name=sender_info.get("name"),
+        is_system=bool(getattr(msg, "is_system", 0)),
         message_type=msg.message_type, body=body_out, attachment=att_out,
+        refs=refs_out,
         reply_to_message_id=msg.reply_to_message_id,
         forwarded_from_message_id=msg.forwarded_from_message_id,
         forwarded_from_sender_id=fwd_sender_id,
@@ -185,11 +202,19 @@ def send_message(conversation_id: int, req: SendMessageRequest,
             return err
 
         clean_body = sanitise_body(req.body) if req.body else None
+        # Validate refs against allowed types and shape early so a bad payload
+        # never reaches the DB.
+        refs_payload: list[dict] = []
+        for r in (req.refs or []):
+            r_dict = r.model_dump() if hasattr(r, "model_dump") else dict(r)
+            if r_dict.get("type") in entity_resolver.ENTITY_TYPES:
+                refs_payload.append({"type": r_dict["type"], "id": r_dict["id"]})
         msg = store.create_message(
             db, conversation_id=conv.id, sender_id=user["user_id"],
             message_type=req.message_type, body=clean_body,
             attachment_id=req.attachment_id,
             reply_to_message_id=req.reply_to_message_id,
+            refs=refs_payload or None,
         )
 
         # Resolve mentions — supports literal `@username` and `@everyone`.
@@ -264,9 +289,78 @@ def send_message(conversation_id: int, req: SendMessageRequest,
             db=db, conversation_id=conv.id, message=msg,
             sender=user, recipients=recipients,
         )
+
+        # ─── /status command: post a Status Bot reply with fresh cards ──
+        # Triggered when the user's body starts with "/status" AND the
+        # message either carries refs[] OR has @@ref:type:id@@ tokens
+        # inline. The bot's message is itself a regular chat row owned by
+        # the bot user, with `is_system=1` so the FE can style it.
+        try:
+            _maybe_post_status_bot_reply(
+                db=db, conv=conv, user=user, original_msg=msg,
+                original_refs=refs_payload, preview_helper=preview,
+            )
+        except Exception as e:
+            logger.warning("status bot reply failed: %s", e)
+
         return message_payload
     finally:
         db.close()
+
+
+def _maybe_post_status_bot_reply(*, db, conv, user, original_msg,
+                                 original_refs: list[dict],
+                                 preview_helper: dict) -> None:
+    """If the user just sent a `/status …@@ref…@@` message, persist a bot
+    reply containing freshly-resolved cards for those refs. Fans out the
+    reply on WS the same way a normal message does."""
+    body = (original_msg.body or "").strip()
+    inline = status_bot.find_status_command(body)
+    if inline is None and not (body.lower().startswith("/status") and original_refs):
+        return
+
+    refs_to_resolve: list[dict] = []
+    if inline:
+        for t, rid in inline:
+            try:
+                refs_to_resolve.append({"type": t, "id": int(rid) if rid.isdigit() else rid})
+            except Exception:
+                refs_to_resolve.append({"type": t, "id": rid})
+    refs_to_resolve.extend(original_refs or [])
+
+    cards = entity_resolver.resolve(db, refs_to_resolve)
+    if not any(cards):
+        return
+
+    bot_user_id = status_bot.ensure_status_bot_user(db)
+    bot_body = " ".join(f"@@ref:{r['type']}:{r['id']}@@"
+                        for r, c in zip(refs_to_resolve, cards) if c)
+    bot_msg = store.create_message(
+        db, conversation_id=conv.id, sender_id=bot_user_id,
+        message_type="text", body=bot_body or "Status",
+        refs=[{"type": r["type"], "id": r["id"]}
+              for r, c in zip(refs_to_resolve, cards) if c],
+        is_system=True,
+    )
+    bot_payload = _to_message_out(bot_msg, db=db)
+    members = store.member_user_ids(db, conv.id)
+    bot_preview = {
+        "id": bot_msg.id,
+        "sender_id": bot_user_id,
+        "sender_username": "status_bot",
+        "sender_name": "Status Bot",
+        "message_type": "text",
+        "body_preview": "Status update",
+        "created_at": bot_msg.created_at.isoformat() if bot_msg.created_at else None,
+        "deleted_at": None,
+    }
+    for uid in members:
+        redis_chat.publish_message_new(user_id=uid, message=bot_payload,
+                                       conversation_id=conv.id)
+        unread = store.unread_count_for_user(db, conv.id, uid)
+        redis_chat.publish_inbox_bump(user_id=uid, conversation_id=conv.id,
+                                      latest_message=bot_preview,
+                                      unread_count=unread if uid != user["user_id"] else 0)
 
 
 @router.get("/conversations/{conversation_id}/messages",
