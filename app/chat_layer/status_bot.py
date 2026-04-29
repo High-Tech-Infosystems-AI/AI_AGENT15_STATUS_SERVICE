@@ -18,7 +18,6 @@ import re
 from threading import Lock
 from typing import List, Optional, Tuple
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("app_logger")
@@ -37,65 +36,24 @@ _REF_TOKEN_RE = re.compile(
 
 def ensure_status_bot_user(db: Session) -> int:
     """Return the bot's user_id, creating the row if missing. Cached
-    in-process after the first call."""
+    in-process after the first call. Schema-aware INSERT — adapts to the
+    live `users` column set."""
     global _BOT_USER_ID
     with _BOT_LOCK:
         if _BOT_USER_ID is not None:
             return _BOT_USER_ID
 
-        row = db.execute(
-            text("SELECT id FROM users WHERE username = :u LIMIT 1"),
-            {"u": _BOT_USERNAME},
-        ).first()
-        if row:
-            _BOT_USER_ID = int(row[0])
-            return _BOT_USER_ID
-
-        # Create. We try to reuse the smallest column set so this works
-        # even if the users table has lots of NOT NULL columns we don't
-        # care about — fields below match what the existing schema needs.
+        from app.chat_layer._synthetic_user import provision_synthetic_user
         try:
-            db.execute(
-                text("""
-                    INSERT INTO users
-                        (name, username, email, password, role_id,
-                         enable, deleted_at, created_at)
-                    VALUES
-                        (:name, :uname, :email, :pwd, NULL,
-                         0, NULL, NOW())
-                """),
-                {
-                    "name": _BOT_DISPLAY_NAME,
-                    "uname": _BOT_USERNAME,
-                    "email": "status-bot@chat.local",
-                    "pwd": "!disabled!",
-                },
+            _BOT_USER_ID = provision_synthetic_user(
+                db,
+                username=_BOT_USERNAME,
+                display_name=_BOT_DISPLAY_NAME,
+                email="status-bot@chat.local",
             )
-            db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
-            logger.warning("status bot user insert (full schema) failed: %s — "
-                           "trying minimal insert", e)
-            db.execute(
-                text("""
-                    INSERT INTO users (name, username, email, enable)
-                    VALUES (:name, :uname, :email, 0)
-                """),
-                {
-                    "name": _BOT_DISPLAY_NAME,
-                    "uname": _BOT_USERNAME,
-                    "email": "status-bot@chat.local",
-                },
-            )
-            db.commit()
-
-        row = db.execute(
-            text("SELECT id FROM users WHERE username = :u LIMIT 1"),
-            {"u": _BOT_USERNAME},
-        ).first()
-        if not row:
-            raise RuntimeError("Failed to create Status Bot user")
-        _BOT_USER_ID = int(row[0])
+            raise
         logger.info("Status Bot user provisioned id=%s", _BOT_USER_ID)
         return _BOT_USER_ID
 
