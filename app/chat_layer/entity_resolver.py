@@ -344,6 +344,26 @@ REPORTS_CATALOG: list[dict] = [
     # include it almost everywhere; `granularity` only on trend-shaped
     # endpoints.
 
+    # — Featured / DM-friendly reports near the top so they're the
+    # first results the picker shows by default.
+    {"id": "recruiter-efficiency", "title": "Recruiter Efficiency",
+     "subtitle": "Per-recruiter conversion + activity breakdown",
+     "chart_type": "bar", "filters": ["date_range", "user"],
+     "scope": "any"},
+
+    {"id": "top-recruiters", "title": "Top Recruiters",
+     "subtitle": "Ranked recruiter leaderboard",
+     "chart_type": "bar", "filters": ["date_range"],
+     "scope": "group"},
+
+    {"id": "platform-metrics", "title": "Platform Metrics",
+     "subtitle": "Sourcing platform distribution",
+     "chart_type": "donut", "filters": ["date_range", "user", "job"]},
+
+    {"id": "ai-distribution", "title": "AI Distribution",
+     "subtitle": "AI-assisted activity per recruiter",
+     "chart_type": "bar", "filters": ["date_range", "user"]},
+
     {"id": "pipeline-funnel", "title": "Pipeline Funnel",
      "subtitle": "Stage-by-stage candidate count",
      "chart_type": "funnel", "filters": ["date_range", "company", "job"]},
@@ -396,33 +416,9 @@ REPORTS_CATALOG: list[dict] = [
      "subtitle": "Drill-down for recruiter daily performance",
      "chart_type": "table", "filters": ["date_range", "user"]},
 
-    # Recruiter efficiency ships in two flavors so a sender can pick the
-    # right shape for the conversation:
-    #   - top-recruiters: leaderboard of best performers (group context).
-    #   - recruiter-efficiency: per-recruiter individual breakdown (DM
-    #     context, optionally team context). The "user" filter pins it
-    #     to a single recruiter; in DMs we auto-pin to the peer.
-    {"id": "top-recruiters", "title": "Top Recruiters",
-     "subtitle": "Ranked recruiter leaderboard",
-     "chart_type": "bar", "filters": ["date_range"],
-     "scope": "group"},
-
-    {"id": "recruiter-efficiency", "title": "Recruiter Efficiency",
-     "subtitle": "Per-recruiter conversion + activity breakdown",
-     "chart_type": "bar", "filters": ["date_range", "user"],
-     "scope": "any"},
-
     {"id": "user-logins-details", "title": "User Logins",
      "subtitle": "Login activity breakdown",
      "chart_type": "table", "filters": ["date_range"]},
-
-    {"id": "platform-metrics", "title": "Platform Metrics",
-     "subtitle": "Sourcing platform distribution",
-     "chart_type": "donut", "filters": ["date_range", "user", "job"]},
-
-    {"id": "ai-distribution", "title": "AI Distribution",
-     "subtitle": "AI-assisted activity per recruiter",
-     "chart_type": "bar", "filters": ["date_range", "user"]},
 
     {"id": "avg-time-stages", "title": "Avg Time Per Stage",
      "subtitle": "Average duration per pipeline stage",
@@ -621,12 +617,17 @@ def search(db: Session, *, type_: str, q: str, limit: int = 12,
         catalog = REPORTS_CATALOG
         if scope_user_id is not None:
             catalog = [r for r in catalog if r.get("scope") != "group"]
+        # Reports tab is curated, so we don't apply the per-type `limit`
+        # the same way as searchable entities — return the whole catalog
+        # (capped generously) so newly-added reports always surface even
+        # if they sit further down the list.
+        report_cap = max(limit, 50)
         if not ql:
-            picks = catalog[:limit]
+            picks = catalog[:report_cap]
         else:
             picks = [r for r in catalog
                      if ql in r["title"].lower()
-                     or ql in (r.get("subtitle") or "").lower()][:limit]
+                     or ql in (r.get("subtitle") or "").lower()][:report_cap]
         # Picker results — no params yet (the user picks filters next).
         # We still merge the catalog metadata into the card so the FE
         # filter step knows which filters to prompt for, and signal
