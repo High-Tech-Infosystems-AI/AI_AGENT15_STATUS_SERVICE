@@ -25,6 +25,8 @@ spec:
               containerPort: 8515
             - name: chat
               containerPort: 8517
+            - name: ai-chat
+              containerPort: 8518
             - name: ui
               containerPort: 5009
           envFrom:
@@ -50,11 +52,30 @@ spec:
               value: "/chat"
             - name: CHAT_SERVICE_AUTH
               value: "mixed"
+            # AI Chat service (port 8518). Gateway routes /ai-chat/* here.
+            - name: AI_CHAT_SERVICE_PORT
+              value: "8518"
+            - name: AI_CHAT_SERVICE_NAME
+              value: "HRMIS_AI_CHAT_SERVICE"
+            - name: AI_CHAT_SERVICE_PATH
+              value: "/ai-chat"
+            - name: AI_CHAT_SERVICE_AUTH
+              value: "jwt"
+            # Celery worker + beat run inside this pod so AI scheduled
+            # queries and anomaly subscriptions fire on the beat tick.
+            - name: CELERY_ENABLED
+              value: "1"
+            # AI / Gemini secrets are read from the shared config map; the
+            # ones that are sensitive (GEMINI_API_KEY) come from the Secret
+            # mounted via envFrom on `__CONFIG_MAP_NAME__` (or via a
+            # dedicated Secret if your env splits config from secrets).
           livenessProbe:
             httpGet:
               path: /health
               port: 8515
-            initialDelaySeconds: 30
+            # 4 processes (status + chat + ai-chat + UI) plus optional
+            # Celery worker/beat — give startup a bit more headroom.
+            initialDelaySeconds: 45
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 5
@@ -62,7 +83,7 @@ spec:
             httpGet:
               path: /health
               port: 8515
-            initialDelaySeconds: 20
+            initialDelaySeconds: 30
             periodSeconds: 15
             timeoutSeconds: 10
           volumeMounts:
@@ -105,6 +126,23 @@ spec:
     - name: chat
       port: 8517
       targetPort: 8517
+  type: ClusterIP
+---
+# ClusterIP for the AI Chat API (internal traffic; gateway hits this via Consul)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-chat-service
+  labels:
+    app: status-service
+    component: ai-chat
+spec:
+  selector:
+    app: status-service
+  ports:
+    - name: ai-chat
+      port: 8518
+      targetPort: 8518
   type: ClusterIP
 ---
 # NodePort for the Notification UI (exposed to internet on port 30509)
