@@ -27,6 +27,16 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pywebpush>=2.0.0",
     "cryptography>=42.0.0",
+    # AI chatbot
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+    "langgraph>=0.2.0",
+    "google-generativeai>=0.8.0",
+    "croniter>=2.0.5",
+    "matplotlib>=3.9.0",
+    "reportlab>=4.2.0",
+    "mcp>=1.0.0",
 ]
 
 [dependency-groups]
