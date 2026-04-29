@@ -331,118 +331,81 @@ def _resolve_teams(db: Session, ids: List[int]) -> List[Optional[dict]]:
 # ---------------------------------------------------------------------------
 
 REPORTS_CATALOG: list[dict] = [
-    # Each entry carries:
-    #   chart_type: how the FE snapshot component should render the
-    #     placeholder visual ("line", "bar", "funnel", "donut", "table").
-    #   filters:    list of filter keys the picker should prompt for
-    #     before committing the ref. Drives the UI form, not the SQL.
-    #     Recognized keys: date_range (date_from + date_to),
-    #       granularity (hourly|daily|weekly|monthly|yearly),
-    #       company, job, user.
+    # Order mirrors the live PerformanceDashboard.tsx layout so the
+    # Reports tab in chat reads in the same sequence the user sees on
+    # /dashboard. Every entry maps to a real chart we render in the
+    # snapshot — placeholder-only chart_ids have been removed.
     #
-    # `date_range` is implicit-supported by every chart endpoint so we
-    # include it almost everywhere; `granularity` only on trend-shaped
-    # endpoints.
+    # Each entry carries:
+    #   chart_type: drives the placeholder shape only; rendering is
+    #     done by the matching chat component in ChatDashboardCharts.
+    #   filters:    filter keys the picker prompts for before commit.
+    #     Recognized: date_range, granularity, company, job, user.
+    #   scope:      "group" hides the report in DM-with-recruiter
+    #     contexts (see entity_resolver.search). Default = visible
+    #     everywhere.
 
-    # — Featured / DM-friendly reports near the top so they're the
-    # first results the picker shows by default.
-    {"id": "recruiter-efficiency", "title": "Recruiter Efficiency",
-     "subtitle": "Per-recruiter conversion + activity breakdown",
-     "chart_type": "bar", "filters": ["date_range", "user"],
-     "scope": "any"},
-
-    {"id": "top-recruiters", "title": "Top Recruiters",
-     "subtitle": "Ranked recruiter leaderboard",
-     "chart_type": "bar", "filters": ["date_range"],
-     "scope": "group"},
-
-    {"id": "platform-metrics", "title": "Platform Metrics",
-     "subtitle": "Sourcing platform distribution",
-     "chart_type": "donut", "filters": ["date_range", "user", "job"]},
-
-    {"id": "ai-distribution", "title": "AI Distribution",
-     "subtitle": "AI-assisted activity per recruiter",
-     "chart_type": "bar", "filters": ["date_range", "user"]},
-
+    # 1. Pipeline Funnel — DashboardPipelineFunnel.tsx (custom SVG)
     {"id": "pipeline-funnel", "title": "Pipeline Funnel",
      "subtitle": "Stage-by-stage candidate count",
      "chart_type": "funnel", "filters": ["date_range", "company", "job"]},
 
-    {"id": "pipeline-funnel-details", "title": "Pipeline Funnel Details",
-     "subtitle": "Drill-down into each funnel stage",
-     "chart_type": "table", "filters": ["date_range", "company", "job"]},
+    # 2. Platform Metrics — PlatformMatrix.tsx (smooth purple line)
+    {"id": "platform-metrics", "title": "Platform Metrics",
+     "subtitle": "Sourcing platform distribution",
+     "chart_type": "line", "filters": ["date_range", "user", "job"]},
 
+    # 3. Recruiter Efficiency — RolesEfficiency.tsx (multi-ring)
+    {"id": "recruiter-efficiency", "title": "Recruiter Efficiency",
+     "subtitle": "Per-recruiter stage-wise efficiency rings",
+     "chart_type": "donut", "filters": ["date_range", "user"],
+     "scope": "any"},
+
+    # 4. Top Recruiters — RolesEfficiency in top-performers mode
+    {"id": "top-recruiters", "title": "Top Recruiters",
+     "subtitle": "Ranked recruiter leaderboard (multi-ring)",
+     "chart_type": "donut", "filters": ["date_range"],
+     "scope": "group"},
+
+    # 5. AI Distribution — AiDistribution.tsx (donut + center total)
+    {"id": "ai-distribution", "title": "AI Distribution",
+     "subtitle": "AI-assisted activity by type",
+     "chart_type": "donut", "filters": ["date_range", "user"]},
+
+    # 6. Hiring Funnel — FunnelAnalysis.tsx (Candidates+Joined bars)
     {"id": "hiring-funnel", "title": "Hiring Funnel",
-     "subtitle": "Joined vs rejected over time",
-     "chart_type": "line", "filters": ["date_range", "granularity", "company", "job"]},
-
-    {"id": "daily-trend", "title": "Daily Trend",
-     "subtitle": "Joined / rejected (hourly–yearly)",
-     "chart_type": "line", "filters": ["date_range", "granularity"]},
-
-    {"id": "latest-jobs", "title": "Latest Jobs",
-     "subtitle": "Most recent job openings",
-     "chart_type": "table", "filters": ["date_range"]},
-
-    {"id": "count-jobs", "title": "Job Count",
-     "subtitle": "Aggregate open job count",
-     "chart_type": "donut", "filters": ["date_range"]},
-
-    {"id": "company-jobs-count", "title": "Jobs by Company",
-     "subtitle": "Per-company job distribution",
-     "chart_type": "bar", "filters": ["date_range"]},
-
-    {"id": "count-candidates", "title": "Candidate Count",
-     "subtitle": "Aggregate candidate count",
-     "chart_type": "donut", "filters": ["date_range"]},
-
-    {"id": "user-candidate-share-today", "title": "Recruiter Load Today",
-     "subtitle": "Per-recruiter candidate distribution",
-     "chart_type": "bar", "filters": []},
-
-    {"id": "hiring-summary-details", "title": "Hiring Summary",
-     "subtitle": "Detailed hiring metrics",
-     "chart_type": "table", "filters": ["date_range"]},
-
-    {"id": "pipeline-progress-details", "title": "Pipeline Progress",
-     "subtitle": "Stage-wise progress breakdown",
+     "subtitle": "Per-job candidates vs joined",
      "chart_type": "bar", "filters": ["date_range", "company", "job"]},
 
+    # 7. Daily Performance — DashboardDailyPerformance.tsx
     {"id": "daily-performance", "title": "Daily Performance",
-     "subtitle": "Recruiter daily performance",
+     "subtitle": "Recruiter daily performance trend",
      "chart_type": "line", "filters": ["date_range", "granularity", "user"]},
 
-    {"id": "daily-performance-details", "title": "Daily Performance Details",
-     "subtitle": "Drill-down for recruiter daily performance",
-     "chart_type": "table", "filters": ["date_range", "user"]},
-
-    {"id": "user-logins-details", "title": "User Logins",
-     "subtitle": "Login activity breakdown",
-     "chart_type": "table", "filters": ["date_range"]},
-
+    # 8. Avg Time Per Stage — AvgStageTimeChart.tsx
     {"id": "avg-time-stages", "title": "Avg Time Per Stage",
      "subtitle": "Average duration per pipeline stage",
      "chart_type": "bar", "filters": ["date_range", "company", "job"]},
 
+    # 9. Pipeline Velocity — PipelineVelocityChart.tsx
     {"id": "pipeline-velocity", "title": "Pipeline Velocity",
      "subtitle": "Candidates moving per day",
      "chart_type": "line", "filters": ["date_range", "granularity"]},
 
-    {"id": "clawback-metrics", "title": "Clawback Metrics",
-     "subtitle": "Clawback rates by recruiter",
+    # 10. Company Performance — CompanyPerformanceChart.tsx
+    {"id": "company-jobs-count", "title": "Company Performance",
+     "subtitle": "Per-company joined vs rejected",
      "chart_type": "bar", "filters": ["date_range"]},
 
-    {"id": "clawback-details", "title": "Clawback Details",
-     "subtitle": "Per-candidate clawback drill-down",
-     "chart_type": "table", "filters": ["date_range"]},
+    # 11. New Jobs Created — NewJobsCreatedChart.tsx
+    {"id": "count-jobs", "title": "New Jobs Created",
+     "subtitle": "Jobs created over time",
+     "chart_type": "line", "filters": ["date_range"]},
 
-    {"id": "clawback-status-graph", "title": "Clawback Status Graph",
-     "subtitle": "Clawback status visualization",
-     "chart_type": "donut", "filters": ["date_range"]},
-
-    {"id": "company-performance", "title": "Company Performance",
-     "subtitle": "Per-company hiring metrics",
-     "chart_type": "bar", "filters": ["date_range", "company"]},
+    # 12. Daily Trend — DashboardDailyTrend.tsx (joined / rejected over time)
+    {"id": "daily-trend", "title": "Daily Trend",
+     "subtitle": "Joined vs rejected over time",
+     "chart_type": "line", "filters": ["date_range", "granularity"]},
 ]
 REPORTS_BY_ID = {r["id"]: r for r in REPORTS_CATALOG}
 

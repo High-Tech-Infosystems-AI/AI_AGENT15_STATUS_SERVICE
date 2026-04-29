@@ -92,6 +92,19 @@ class Settings(BaseSettings):
     VAPID_KEYS_FILE: str = os.getenv("VAPID_KEYS_FILE", "./vapid_keys.json")
     WEB_PUSH_FRONTEND_BASE_URL: str = os.getenv("WEB_PUSH_FRONTEND_BASE_URL", "http://localhost:5173")
 
+    # AI Chatbot (Gemini, MCP, quotas)
+    GEMINI_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+    GEMINI_PRO_MODEL: str = os.getenv("GEMINI_PRO_MODEL", "gemini-2.5-pro")
+    GEMINI_FLASH_MODEL: str = os.getenv("GEMINI_FLASH_MODEL", "gemini-2.5-flash")
+    AI_DEFAULT_DAILY_LIMIT: int = int(os.getenv("AI_DEFAULT_DAILY_LIMIT", "50000"))
+    AI_DEFAULT_MONTHLY_LIMIT: int = int(os.getenv("AI_DEFAULT_MONTHLY_LIMIT", "1000000"))
+    AI_REDIS_DB: int = int(os.getenv("AI_REDIS_DB", "6"))
+    AI_SESSION_TTL_SECONDS: int = int(os.getenv("AI_SESSION_TTL_SECONDS", "86400"))
+    AI_MAX_TOOL_ITER: int = int(os.getenv("AI_MAX_TOOL_ITER", "5"))
+    AI_TOOL_TIMEOUT_SECONDS: int = int(os.getenv("AI_TOOL_TIMEOUT_SECONDS", "8"))
+    MCP_MYSQL_COMMAND: str = os.getenv("MCP_MYSQL_COMMAND", "")
+    MCP_MYSQL_ARGS: str = os.getenv("MCP_MYSQL_ARGS", "")
+
     @property
     def DB_URI(self) -> str:
         # Use mysql+mysqlconnector as ORM dialect and driver
