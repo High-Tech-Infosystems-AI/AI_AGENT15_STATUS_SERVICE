@@ -96,6 +96,7 @@ def _scope_for_search(db, *, caller_id: int, caller_role: Optional[str],
 
 @router.get("/entities/search")
 def search_entities(type: str, q: str = "", limit: int = 12,
+                    offset: int = 0,
                     conversation_id: Optional[int] = None,
                     user: dict = Depends(current_user)):
     if type not in entity_resolver.ENTITY_TYPES:
@@ -111,11 +112,55 @@ def search_entities(type: str, q: str = "", limit: int = 12,
         )
         if err:
             return err
+        page_size = max(1, min(limit, 50))
+        page_offset = max(0, int(offset or 0))
         cards = entity_resolver.search(
-            db, type_=type, q=q or "", limit=max(1, min(limit, 50)),
-            scope_user_id=scope_user_id,
+            db, type_=type, q=q or "", limit=page_size,
+            offset=page_offset, scope_user_id=scope_user_id,
         )
-        return {"items": cards}
+        # `has_more` — if the page is full, assume another exists. The
+        # FE stops paging when it sees fewer than `limit` items returned.
+        return {
+            "items": cards,
+            "limit": page_size,
+            "offset": page_offset,
+            "has_more": len(cards) >= page_size,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/entities/{type}/{entity_id}/access")
+def check_entity_access(type: str, entity_id: str,
+                        user: dict = Depends(current_user)):
+    """Pre-navigation access check for a chat entity card. The FE
+    calls this on click to decide whether to route to the entity's
+    page or surface a "you don't have access" toast. Lighter than
+    the full resolve since we only return a flag."""
+    if type not in entity_resolver.ENTITY_TYPES:
+        return _err("ENTITY_BAD_TYPE", "Unknown entity type", 400)
+    rid: str | int = entity_id
+    if type not in ("report", "candidate"):
+        try:
+            rid = int(entity_id)
+        except ValueError:
+            return _err("ENTITY_BAD_ID", "Numeric id required for this type", 400)
+    db = SessionLocal()
+    try:
+        ok = entity_resolver.has_access(
+            db,
+            user_id=user.get("user_id"),
+            role_name=user.get("role_name"),
+            type_=type,
+            entity_id=rid,
+        )
+        if not ok:
+            return _err(
+                "ENTITY_FORBIDDEN",
+                f"You do not have access to this {type}.",
+                403,
+            )
+        return {"granted": True}
     finally:
         db.close()
 
