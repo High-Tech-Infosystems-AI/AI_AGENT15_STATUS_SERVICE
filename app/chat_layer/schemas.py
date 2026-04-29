@@ -1,9 +1,38 @@
 """Pydantic schemas for chat REST API."""
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
 MessageType = Literal["text", "image", "voice", "file", "system"]
+EntityType = Literal[
+    "job", "candidate", "company", "pipeline", "user", "team", "report",
+]
+
+
+class EntityRef(BaseModel):
+    """A `(type, id)` pair embedded in a message. Body text holds an
+    @@ref:type:id@@ token at the position the matching card should render."""
+    type: EntityType
+    # Numeric for everything except `report` (which uses string slugs).
+    id: Union[int, str]
+
+
+class EntityField(BaseModel):
+    label: str
+    value: str
+
+
+class EntityCard(BaseModel):
+    """Resolver output — the renderable preview the FE shows in chat."""
+    type: EntityType
+    id: Union[int, str]
+    title: str
+    subtitle: Optional[str] = None
+    status: Optional[str] = None
+    status_color: Optional[str] = None
+    deep_link: str
+    avatar_url: Optional[str] = None
+    fields: List[EntityField] = []
 
 
 class CreateDMRequest(BaseModel):
@@ -15,12 +44,20 @@ class SendMessageRequest(BaseModel):
     body: Optional[str] = Field(default=None, max_length=4000)
     attachment_id: Optional[int] = Field(default=None, gt=0)
     reply_to_message_id: Optional[int] = Field(default=None, gt=0)
+    # Entity references embedded in `body` via @@ref:type:id@@ tokens.
+    # Caller may include this even when body has no tokens — useful when
+    # the card is the entire content (text body becomes a chip-only).
+    refs: List[EntityRef] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def _content_required(self):
         if self.message_type == "text":
-            if not self.body or not self.body.strip():
-                raise ValueError("body required for text messages")
+            has_text = bool(self.body and self.body.strip())
+            has_refs = bool(self.refs)
+            if not has_text and not has_refs:
+                raise ValueError(
+                    "body or at least one ref required for text messages",
+                )
         else:
             if self.attachment_id is None:
                 raise ValueError("attachment_id required for non-text messages")
@@ -126,9 +163,13 @@ class MessageOut(BaseModel):
     sender_id: int
     sender_username: Optional[str] = None
     sender_name: Optional[str] = None
+    is_system: bool = False
     message_type: str
     body: Optional[str] = None
     attachment: Optional[AttachmentOut] = None
+    # Resolved cards for any embedded references. The FE renders a card per
+    # entry; the ordering matches the @@ref:type:id@@ tokens in `body`.
+    refs: List[EntityCard] = []
     reply_to_message_id: Optional[int] = None
     forwarded_from_message_id: Optional[int] = None
     forwarded_from_sender_id: Optional[int] = None

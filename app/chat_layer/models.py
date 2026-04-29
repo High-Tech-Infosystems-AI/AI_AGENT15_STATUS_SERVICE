@@ -4,7 +4,7 @@ from sqlalchemy import (
     Column, Integer, BigInteger, String, Text, DateTime, ForeignKey,
     Index, UniqueConstraint, func,
 )
-from sqlalchemy.dialects.mysql import TINYINT
+from sqlalchemy.dialects.mysql import JSON, TINYINT
 from sqlalchemy.orm import relationship
 from app.database_Layer.db_config import Base
 
@@ -77,7 +77,13 @@ class ChatMessage(Base):
     conversation_id = Column(Integer, ForeignKey("chat_conversations.id"), nullable=False)
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     message_type = Column(String(10), nullable=False, server_default="text")
+    # Synthetic system messages (Status Bot replies, etc.) are flagged so the
+    # renderer can give them a distinct identity.
+    is_system = Column(TINYINT(1), nullable=False, server_default="0")
     body = Column(Text, nullable=True)
+    # Structured entity references — list of {type, id} dicts. The body holds
+    # opaque @@ref:type:id@@ tokens at the matching positions.
+    refs = Column(JSON, nullable=True)
     attachment_id = Column(Integer, ForeignKey("chat_message_attachments.id"), nullable=True)
     reply_to_message_id = Column(BigInteger, ForeignKey("chat_messages.id"), nullable=True)
     forwarded_from_message_id = Column(BigInteger, ForeignKey("chat_messages.id"), nullable=True)
