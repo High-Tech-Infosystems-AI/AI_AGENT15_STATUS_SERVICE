@@ -40,6 +40,12 @@ class EntityCard(BaseModel):
     deep_link: str
     avatar_url: Optional[str] = None
     fields: List[EntityField] = []
+    # Optional secondary identifier that the FE may need alongside the
+    # primary `id`. For jobs this carries the public string `job_id`
+    # (e.g. "JOB_ID_4202601...") — `id` is the integer PK used to fetch
+    # detail records, while routes consume the string slug. The FE uses
+    # both: PK to fetch via getJobById(), slug to construct the route.
+    external_id: Optional[str] = None
     # For reports: which echarts shape the FE should render as a snapshot
     # (line | funnel | bar | donut | table). Echoed back verbatim from the
     # catalog so the snapshot component can pick its template.
