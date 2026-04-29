@@ -130,6 +130,18 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to start Chat WS Redis subscriber: %s",
                        exc, exc_info=True)
 
+    # Provision the synthetic Status Bot user so /status can post replies.
+    try:
+        from app.chat_layer.status_bot import ensure_status_bot_user
+        from app.database_Layer.db_config import SessionLocal
+        _db = SessionLocal()
+        try:
+            ensure_status_bot_user(_db)
+        finally:
+            _db.close()
+    except Exception as exc:
+        logger.warning("Status Bot bootstrap failed: %s", exc, exc_info=True)
+
     yield
 
     # ---- shutdown ----
