@@ -56,7 +56,7 @@ def _resolve_jobs(db: Session, ids: List[int]) -> List[Optional[dict]]:
         return []
     rows = db.execute(text("""
         SELECT j.id, j.title, j.status, j.deadline,
-               j.openings, j.closed_count,
+               j.openings, j.location, j.work_mode,
                c.company_name AS company_name
           FROM job_openings j
      LEFT JOIN companies c ON c.id = j.company_id
@@ -71,20 +71,22 @@ def _resolve_jobs(db: Session, ids: List[int]) -> List[Optional[dict]]:
         if not m:
             out.append(None)
             continue
-        opens = (m["openings"] or 0) - (m["closed_count"] or 0)
+        fields = [
+            {"label": "Openings", "value": str(m["openings"] or 0)},
+        ]
+        if m["deadline"]:
+            fields.append({"label": "Deadline", "value": m["deadline"].isoformat()})
+        if m["work_mode"]:
+            fields.append({"label": "Mode", "value": m["work_mode"]})
         out.append({
             "type": "job",
             "id": m["id"],
             "title": m["title"] or f"Job {m['id']}",
-            "subtitle": m["company_name"] or None,
+            "subtitle": m["company_name"] or m["location"] or None,
             "status": (m["status"] or "").upper() or None,
             "status_color": _status_color_for(m["status"]),
             "deep_link": f"/edit-jobs/{m['id']}",
-            "fields": [
-                {"label": "Openings", "value": f"{opens} open / {m['openings'] or 0} total"},
-                {"label": "Deadline",
-                 "value": m["deadline"].isoformat() if m["deadline"] else "—"},
-            ],
+            "fields": fields,
         })
     return out
 
@@ -93,7 +95,7 @@ def _resolve_candidates(db: Session, ids: List[int]) -> List[Optional[dict]]:
     if not ids:
         return []
     rows = db.execute(text("""
-        SELECT id, candidate_name, candidate_email, status,
+        SELECT id, candidate_name, candidate_email, candidate_status,
                experience, current_company
           FROM candidates
          WHERE id IN :ids
@@ -112,13 +114,16 @@ def _resolve_candidates(db: Session, ids: List[int]) -> List[Optional[dict]]:
             fields.append({"label": "Experience", "value": f"{m['experience']} yrs"})
         if m["current_company"]:
             fields.append({"label": "Currently at", "value": m["current_company"]})
+        # candidate_status is a TEXT column — keep first ~20 chars for the pill.
+        status_raw = (m["candidate_status"] or "").strip()
+        status = (status_raw.split("\n", 1)[0][:20]).upper() if status_raw else None
         out.append({
             "type": "candidate",
             "id": m["id"],
             "title": m["candidate_name"] or f"Candidate {m['id']}",
             "subtitle": m["candidate_email"] or None,
-            "status": (m["status"] or "").upper() or None,
-            "status_color": _status_color_for(m["status"]),
+            "status": status,
+            "status_color": _status_color_for(status_raw),
             "deep_link": f"/candidates?id={m['id']}",
             "fields": fields,
         })
