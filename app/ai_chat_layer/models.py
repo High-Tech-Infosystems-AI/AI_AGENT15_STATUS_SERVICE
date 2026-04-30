@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM for the AI chatbot tables (migration v18)."""
+"""SQLAlchemy ORM for the AI chatbot tables (migrations v18, v19)."""
 from sqlalchemy import (
     BigInteger, Column, Date, DateTime, Enum, Index, Integer, String, Text,
     func,
@@ -116,4 +116,27 @@ class AiApproval(Base):
     __table_args__ = (
         Index("idx_approval_user_status", "user_id", "status"),
         Index("idx_approval_role_status", "approver_role", "status"),
+    )
+
+
+class AiArtifact(Base):
+    """Registry of AI-generated S3 artifacts (PDFs, charts, CSVs, markdown).
+
+    Lets `list_artifacts` / `get_artifact_url` recover prior outputs
+    after their original presigned URLs have expired.
+    """
+    __tablename__ = "ai_artifact"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False)
+    kind = Column(String(32), nullable=False)
+    s3_key = Column(String(512), nullable=False)
+    mime = Column(String(80), nullable=False)
+    file_name = Column(String(255), nullable=True)
+    title = Column(String(200), nullable=True)
+    meta = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_artifact_user_time", "user_id", "created_at"),
+        Index("idx_artifact_kind", "kind"),
     )

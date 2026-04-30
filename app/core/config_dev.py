@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     AI_SESSION_TTL_SECONDS: int = int(os.getenv("AI_SESSION_TTL_SECONDS", "86400"))
     AI_MAX_TOOL_ITER: int = int(os.getenv("AI_MAX_TOOL_ITER", "5"))
     AI_TOOL_TIMEOUT_SECONDS: int = int(os.getenv("AI_TOOL_TIMEOUT_SECONDS", "8"))
+    AI_QUERY_CACHE_TTL: int = int(os.getenv("AI_QUERY_CACHE_TTL", "300"))
     MCP_MYSQL_COMMAND: str = os.getenv("MCP_MYSQL_COMMAND", "")
     MCP_MYSQL_ARGS: str = os.getenv("MCP_MYSQL_ARGS", "")
 
