@@ -169,7 +169,18 @@ def build_tools(ctx: ToolContext) -> List[Any]:
 
     return [
         _wrap("render_chart", RenderChartArgs, _render_chart,
-              "Embed an existing dashboard chart by chart_id. Preferred when the user wants a standard metric — interactive, native dashboard look."),
+              ("Embed an existing dashboard chart inline in the chat reply. "
+               "MUST be called whenever the user asks for a chart, funnel, "
+               "graph, plot, trend, distribution, or visualization that maps "
+               "to a known chart_id (pipeline-funnel, hiring-funnel, "
+               "daily-trend, daily-performance, avg-time-stages, "
+               "pipeline-velocity, count-jobs, company-jobs-count, "
+               "company-performance, recruiter-efficiency, top-recruiters, "
+               "platform-metrics, ai-distribution). Pass job_id / "
+               "company_id / user_id / date_from / date_to as applicable. "
+               "Do NOT describe the chart in text instead of calling this.")),
         _wrap("render_adhoc_chart", AdhocChartArgs, _render_adhoc_chart,
-              "Render an ad-hoc chart (bar/line/donut) from explicit data. Stored as PNG in S3. Use only when no dashboard chart_id matches."),
+              ("Render an ad-hoc chart (bar/line/donut) from explicit data "
+               "you already have. Stored as PNG in S3. Use only when no "
+               "dashboard chart_id matches the request shape.")),
     ]

@@ -232,7 +232,9 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
     expanding = ["scope_cands"] if "scope_cands" in scope_params else None
 
     sql = f"""
-        SELECT c.candidate_id AS id, c.first_name, c.last_name, c.email,
+        SELECT c.candidate_id AS id,
+               c.candidate_name AS name,
+               c.candidate_email AS email,
                cj.stage, cj.applied_at, cj.job_id,
                j.title AS job_title, j.job_id AS job_external_id
           FROM candidates c
@@ -246,10 +248,11 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
     rows = ctx.mcp.query(sql, params, expanding_keys=expanding)
     items = []
     for r in rows:
-        full_name = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip()
         items.append({
-            "id": r["id"], "name": full_name or r.get("email"),
-            "email": r.get("email"), "stage": r.get("stage"),
+            "id": r["id"],
+            "name": (r.get("name") or r.get("email") or f"Candidate {r['id']}"),
+            "email": r.get("email"),
+            "stage": r.get("stage"),
             "applied_at": str(r.get("applied_at")) if r.get("applied_at") else None,
             "job_id": r.get("job_id"),
             "job_title": r.get("job_title"),
@@ -450,10 +453,11 @@ def _search_entities(ctx: ToolContext, args: SearchArgs) -> Dict[str, Any]:
     )
     cand_rows = ctx.mcp.query(
         f"""
-        SELECT c.candidate_id AS id, c.first_name, c.last_name, c.email
+        SELECT c.candidate_id AS id,
+               c.candidate_name AS name,
+               c.candidate_email AS email
           FROM candidates c
-         WHERE (CONCAT_WS(' ', c.first_name, c.last_name) LIKE :q
-                OR c.email LIKE :q)
+         WHERE (c.candidate_name LIKE :q OR c.candidate_email LIKE :q)
                {cand_scope}
          LIMIT :_limit
         """,
@@ -473,8 +477,7 @@ def _search_entities(ctx: ToolContext, args: SearchArgs) -> Dict[str, Any]:
                   "company_name": r.get("company_name")} for r in job_rows],
         "candidates": [
             {"id": r["id"],
-             "name": (f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip()
-                      or r.get("email")),
+             "name": (r.get("name") or r.get("email") or f"Candidate {r['id']}"),
              "email": r.get("email")} for r in cand_rows
         ],
         "companies": [{"id": r["id"], "name": r.get("company_name")} for r in co_rows],
@@ -482,20 +485,24 @@ def _search_entities(ctx: ToolContext, args: SearchArgs) -> Dict[str, Any]:
 
 
 def _dashboard_data(ctx: ToolContext, args: DashboardArgs) -> Dict[str, Any]:
-    """Pass-through to the existing dashboard chart catalog. Lets the model
-    request a precomputed series by chart_id (e.g. `daily-trend`) so the FE
-    can render the matching interactive chart."""
-    return {
-        "chart_id": args.chart_id,
-        "params": {
-            "date_from": args.date_from, "date_to": args.date_to,
-            "company_id": args.company_id, "job_id": args.job_id,
-            "user_id": args.user_id,
-        },
-        # The actual data fetch happens FE-side via ReportSnapshot, which
-        # mounts the matching dashboard component. Here we just hand back
-        # the spec — render_chart can consume it directly.
+    """Convenience alias for `render_chart` — emits the same report ref so
+    the FE renders the matching interactive dashboard chart inline. Kept
+    so the model can pick either name without producing a no-op."""
+    params = {
+        "date_from": args.date_from, "date_to": args.date_to,
+        "company_id": args.company_id, "job_id": args.job_id,
+        "user_id": args.user_id,
     }
+    params = {k: v for k, v in params.items() if v is not None}
+    ref = {
+        "type": "report",
+        "id": args.chart_id,
+        "title": args.chart_id.replace("-", " ").title(),
+        "params": params,
+    }
+    ctx.add_output_ref(ref)
+    return {"rendered": True, "chart_id": args.chart_id, "params": params,
+            "ref": ref, "interactive": True}
 
 
 # ---------------------------------------------------------------------------
@@ -544,5 +551,8 @@ def build_tools(ctx: ToolContext) -> List[Any]:
         _wrap("search_entities", SearchArgs, _search_entities,
               "Fuzzy free-text search across jobs, candidates, and companies."),
         _wrap("dashboard_data", DashboardArgs, _dashboard_data,
-              "Request a precomputed dashboard chart by chart_id (e.g. daily-trend, hiring-funnel) to render inline."),
+              ("Alias for render_chart — embeds the matching dashboard chart "
+               "inline by chart_id (e.g. pipeline-funnel, daily-trend, "
+               "hiring-funnel). Prefer render_chart; this is kept only so the "
+               "model can use either name and still produce a chart.")),
     ]
