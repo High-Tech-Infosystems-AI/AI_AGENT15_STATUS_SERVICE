@@ -108,66 +108,6 @@ def _collect_message_refs(refs_for_output: List[Dict[str, Any]]) -> List[Dict[st
     return out
 
 
-# Greetings / identity messages should bypass the heavy agent (system
-# prompt + tool registry + Pro model) — they don't need tools, and
-# spending 5-10s on Pro for "hey" is bad UX. We catch these patterns
-# locally and reply with a short canned answer streamed verbatim through
-# the same WS path as a normal turn so the FE flow doesn't change.
-import re as _re
-_FAST_GREETING_RE = _re.compile(
-    r"^\s*(?:"
-    r"hi|hii+|hello+|hey+|yo|hola|sup|namaste|"
-    r"good\s+(?:morning|afternoon|evening|day)|"
-    r"thanks?|thank\s+you|thx|ty|ok|okay|cool|nice"
-    r")"
-    # Optional trailing greeting filler: "there", "team", "all", "y'all",
-    # "everyone", a name, "!" / "." / "?" — keep it bounded so we don't
-    # accidentally match real questions.
-    r"(?:[!.?,\s]+(?:there|team|all|y'all|everyone|guys|folks|chat|bot)?)*"
-    r"[!.?\s]*$",
-    _re.IGNORECASE,
-)
-_FAST_INTRO_RE = _re.compile(
-    r"^\s*(?:who\s+are\s+you|what\s+are\s+you|introduce\s+yourself|"
-    r"what\s+can\s+you\s+do|what\s+do\s+you\s+do|help|what\s+is\s+this|"
-    r"how\s+can\s+you\s+help)[!.?\s]*$",
-    _re.IGNORECASE,
-)
-
-_FAST_GREETING_REPLY = (
-    "Hi! I'm **HTI Chat**, your assistant for the High Tech Infosystems "
-    "HRMIS workspace. How can I help?"
-)
-_FAST_INTRO_REPLY = (
-    "I'm **HTI Chat** — the in-product AI for High Tech Infosystems' "
-    "Recruitment & HR Management platform. I can answer questions about "
-    "your jobs, candidates, companies, recruiters, teams, and pipeline "
-    "stages, and I can render any of the dashboard charts inline.\n\n"
-    "Try asking me things like:\n"
-    "- *Show me the pipeline funnel for this job this quarter* (tag a job)\n"
-    "- *Top 5 candidates who are selected for the CSA role*\n"
-    "- *Compare these two recruiters' performance this month*\n"
-    "- *Tell me about this candidate* (tag a candidate)"
-)
-
-
-def _maybe_fast_path(prompt: str, refs: List[Dict[str, Any]]) -> Optional[str]:
-    """Return a canned reply for trivial greetings / identity questions
-    so we don't pay Gemini Pro latency for them. Returns None when the
-    prompt needs the full agent."""
-    if refs:
-        # If the user tagged anything, they almost certainly have a
-        # specific data question — let the full agent handle it.
-        return None
-    if not prompt or len(prompt) > 60:
-        return None
-    if _FAST_GREETING_RE.match(prompt):
-        return _FAST_GREETING_REPLY
-    if _FAST_INTRO_RE.match(prompt):
-        return _FAST_INTRO_REPLY
-    return None
-
-
 TOOL_LABELS: Dict[str, str] = {
     "list_jobs": "Listing jobs",
     "job_detail": "Fetching job details",
@@ -195,6 +135,7 @@ TOOL_LABELS: Dict[str, str] = {
     "render_adhoc_chart": "Drawing chart",
     "generate_pdf_report": "Generating PDF report",
     "whatif_throughput": "Running what-if simulation",
+    "suggest_followups": "Adding follow-up suggestions",
 }
 
 
@@ -232,39 +173,6 @@ def run_turn(
     # placeholder and renders the real row.
     user_msg_id = _post_user_message(db, conversation_id, user_id, prompt, refs)
 
-    # ---- 0a. Fast path for greetings / identity questions ----
-    # No tools, no Gemini Pro, no memory load — just stream a canned
-    # reply. Saves ~5-10s on greeting turns and zero LLM tokens.
-    fast_reply = _maybe_fast_path(prompt, refs)
-    if fast_reply is not None:
-        if stream_cb:
-            try:
-                stream_cb(fast_reply)
-            except Exception:
-                pass
-        msg_id = _post_reply(db, conversation_id, user_id, fast_reply, [], [])
-        ai_session.append_turn(user_id, conversation_id, "user", prompt)
-        ai_session.append_turn(user_id, conversation_id, "assistant", fast_reply)
-        audit.log_query(
-            db, user_id=user_id, prompt=prompt, model="fast-path",
-            prompt_version=PROMPT_VERSION, status="ok",
-            conversation_id=conversation_id,
-            refs=refs,
-            tools_called=[{"name": "fast_path", "args": {}, "ms": 0, "ok": True}],
-            tokens_in=0, tokens_out=0,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            ip_address=ip_address,
-        )
-        return {
-            "message_id": msg_id,
-            "user_message_id": user_msg_id,
-            "text": fast_reply,
-            "trace": [],
-            "refs": [],
-            "artifacts": [],
-            "tokens_in": 0,
-            "tokens_out": 0,
-        }
 
     # ---- 1. Quota probe ----
     est = llm.estimate_tokens(prompt) + 256  # cushion for system/turns
