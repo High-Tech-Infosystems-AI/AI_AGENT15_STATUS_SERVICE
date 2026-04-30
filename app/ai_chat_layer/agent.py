@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from sqlalchemy.orm import Session
 
@@ -109,6 +110,9 @@ def _collect_message_refs(refs_for_output: List[Dict[str, Any]]) -> List[Dict[st
 
 
 TOOL_LABELS: Dict[str, str] = {
+    "query_data": "Running analytics query",
+    "describe_schema": "Inspecting schema",
+    "list_measures_dimensions": "Looking up available metrics",
     "list_jobs": "Listing jobs",
     "job_detail": "Fetching job details",
     "candidate_detail": "Fetching candidate details",
@@ -133,10 +137,188 @@ TOOL_LABELS: Dict[str, str] = {
     "dashboard_data": "Preparing chart",
     "render_chart": "Preparing chart",
     "render_adhoc_chart": "Drawing chart",
+    "chart_from_data": "Charting the data",
+    "list_chart_types": "Looking up chart options",
+    "compare_jobs": "Comparing jobs",
+    "compare_companies": "Comparing companies",
+    "compare_candidates": "Comparing candidates",
+    "compare_periods": "Comparing periods",
+    "recent_activity_feed": "Loading recent activity",
     "generate_pdf_report": "Generating PDF report",
+    "export_csv": "Exporting CSV",
+    "export_markdown": "Composing markdown",
+    "list_artifacts": "Looking up your artifacts",
+    "get_artifact_url": "Refreshing download link",
+    "schedule_report": "Scheduling a recurring report",
+    "list_scheduled_reports": "Loading your schedules",
+    "pause_scheduled_report": "Pausing schedule",
+    "resume_scheduled_report": "Resuming schedule",
+    "delete_scheduled_report": "Deleting schedule",
+    "run_scheduled_report": "Running schedule now",
+    "search_audit": "Searching audit log",
     "whatif_throughput": "Running what-if simulation",
     "suggest_followups": "Adding follow-up suggestions",
 }
+
+
+def _call_meta(call: Any) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
+    """Pull (name, args, id) out of a tool_call entry — Gemini sometimes
+    sends dicts and sometimes typed objects."""
+    if isinstance(call, dict):
+        return call.get("name"), call.get("args") or {}, call.get("id")
+    return (
+        getattr(call, "name", None),
+        getattr(call, "args", {}) or {},
+        getattr(call, "id", None),
+    )
+
+
+def _execute_tool_call(
+    *, call: Any, ctx_template: ToolContext, refs: List[Dict[str, Any]],
+) -> Tuple[Any, Dict[str, Any], List[Dict[str, Any]],
+           List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Run ONE tool call in a fresh sub-context with its own DB session
+    + tool registry. Returns (call, payload, sub_trace, sub_output_refs,
+    sub_artifacts) so the main loop can merge them back into the shared
+    ctx in deterministic order.
+    """
+    # Lazy imports — keep agent.py's import surface small + avoid
+    # circular imports with tools/__init__.
+    from app.ai_chat_layer.mcp_client import McpClient
+    from app.ai_chat_layer.tools import get_registry
+    from app.database_Layer.db_config import SessionLocal
+
+    sub_db = SessionLocal()
+    name, args, _id = _call_meta(call)
+    try:
+        sub_ctx = ToolContext(
+            db=sub_db, user=ctx_template.user, scope=ctx_template.scope,
+            mcp=McpClient(sub_db), refs=refs,
+        )
+        tools = get_registry(sub_ctx)
+        lookup = {getattr(t, "name", ""): t for t in tools}
+        tool = lookup.get(name)
+        if tool is None:
+            payload: Any = {"error": f"unknown tool: {name}"}
+        else:
+            try:
+                payload = tool.invoke(args)
+            except Exception as exc:
+                payload = {"error": str(exc)}
+        return (call, payload, list(sub_ctx.trace),
+                list(sub_ctx.output_refs), list(sub_ctx.artifacts))
+    finally:
+        try:
+            sub_db.close()
+        except Exception:
+            logger.exception("sub-session close failed")
+
+
+def _dispatch_tool_calls(
+    *, calls: List[Any], ctx: ToolContext, refs: List[Dict[str, Any]],
+    status_cb: Optional[Callable[[Union[str, Dict[str, Any]]], None]],
+    parallel: bool, max_workers: int,
+) -> List[Tuple[Any, Any]]:
+    """Run a batch of tool calls and merge their outputs into the shared
+    ctx. Single calls go through the same code path serially; multiple
+    independent calls fan out across `max_workers` threads when
+    `parallel=True`. Returns [(call, payload), ...] in the order the
+    model emitted them so ToolMessages line up with their tool_call_ids.
+    """
+    if not calls:
+        return []
+
+    # Status hint while the batch is in flight. We send a STRUCTURED
+    # payload now so the UI can render a rich indicator: a primary
+    # label (the first tool's friendly name) plus the full list of
+    # tool names + labels when the model fans out. The sender may
+    # accept either a plain string (legacy) or a dict.
+    if status_cb:
+        names = [(_call_meta(c)[0] or "") for c in calls]
+        tools_payload = [
+            {"name": n, "label": TOOL_LABELS.get(n, "Working")}
+            for n in names
+        ]
+        primary_label = TOOL_LABELS.get(names[0], "Working")
+        try:
+            status_cb({
+                "phase": "tools_running",
+                "label": primary_label,
+                "tools": tools_payload,
+            })
+        except Exception:
+            logger.exception("status_cb failed")
+
+    def _emit_complete(name: Optional[str]) -> None:
+        """Push a `tool_complete` heartbeat so the FE can flip a chip to
+        ✓ as each tool resolves. Best-effort — failures never abort the
+        tool batch."""
+        if not (status_cb and name):
+            return
+        try:
+            status_cb({"phase": "tool_complete", "tool_name": name})
+        except Exception:
+            logger.exception("status_cb tool_complete failed")
+
+    if not parallel or len(calls) == 1:
+        results: List[Tuple[Any, Any]] = []
+        for call in calls:
+            tup = _execute_tool_call(call=call, ctx_template=ctx, refs=refs)
+            _merge_sub_ctx(ctx, tup)
+            results.append((tup[0], tup[1]))
+            _emit_complete(_call_meta(call)[0])
+        return results
+
+    workers = max(1, min(max_workers, len(calls)))
+    indexed: List[Optional[Tuple[Any, Any, List[Dict[str, Any]],
+                                  List[Dict[str, Any]],
+                                  List[Dict[str, Any]]]]] = [None] * len(calls)
+    with ThreadPoolExecutor(max_workers=workers,
+                             thread_name_prefix="ai-tool") as pool:
+        futures = {
+            pool.submit(
+                _execute_tool_call, call=c, ctx_template=ctx, refs=refs,
+            ): idx
+            for idx, c in enumerate(calls)
+        }
+        # Iterate in completion order so the FE gets each ✓ as it
+        # actually lands (instead of all at once when the slowest
+        # finishes). The `indexed` array is still keyed by emission
+        # order so the merge below stays deterministic.
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                indexed[idx] = fut.result()
+            except Exception as exc:
+                logger.exception("parallel tool call %s failed", idx)
+                indexed[idx] = (
+                    calls[idx], {"error": str(exc)}, [], [], [],
+                )
+            _emit_complete(_call_meta(calls[idx])[0])
+
+    # Merge in original order so trace + refs ordering is deterministic.
+    results = []
+    for tup in indexed:
+        if tup is None:
+            continue
+        _merge_sub_ctx(ctx, tup)
+        results.append((tup[0], tup[1]))
+    return results
+
+
+def _merge_sub_ctx(
+    ctx: ToolContext,
+    tup: Tuple[Any, Any, List[Dict[str, Any]],
+               List[Dict[str, Any]], List[Dict[str, Any]]],
+) -> None:
+    """Pull a worker thread's collected trace / refs / artifacts back
+    into the shared ctx. Append-only on the main thread, so no further
+    locking is needed."""
+    _call, _payload, sub_trace, sub_refs, sub_arts = tup
+    ctx.trace.extend(sub_trace)
+    for r in sub_refs:
+        ctx.add_output_ref(r)  # dedup-aware
+    ctx.artifacts.extend(sub_arts)
 
 
 def run_turn(
@@ -149,7 +331,7 @@ def run_turn(
     ip_address: Optional[str] = None,
     stream_cb: Optional[Callable[[str], None]] = None,
     refs_cb: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
-    status_cb: Optional[Callable[[str], None]] = None,
+    status_cb: Optional[Callable[[Union[str, Dict[str, Any]]], None]] = None,
 ) -> Dict[str, Any]:
     """Execute one turn. Returns the persisted message + metadata."""
     user_id = int(user.get("user_id"))
@@ -262,7 +444,12 @@ def run_turn(
         messages.append(HumanMessage(content=prompt))
 
         max_iter = int(getattr(settings, "AI_MAX_TOOL_ITER", 5) or 5)
-        tool_lookup = {getattr(t, "name", ""): t for t in tools}
+        parallel_enabled = bool(
+            getattr(settings, "AI_PARALLEL_TOOL_CALLS", True),
+        )
+        parallel_workers = int(
+            getattr(settings, "AI_PARALLEL_TOOL_WORKERS", 4) or 4,
+        )
 
         # Track which output_refs we've already pushed to the FE so we
         # only stream the deltas (e.g. when a new chart card lands).
@@ -314,28 +501,17 @@ def run_turn(
             if not calls:
                 final_text = _coerce_text(getattr(response, "content", None))
                 break
-            # Execute each requested tool, append ToolMessage results.
-            for call in calls:
-                name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
-                args = call.get("args") if isinstance(call, dict) else getattr(call, "args", {})
-                call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
-                # Surface a human-friendly status to the UI so the user
-                # sees "Fetching job details…" instead of a static
-                # "Thinking…" while we hit the data layer.
-                if status_cb:
-                    label = TOOL_LABELS.get(name or "", "Working") + "…"
-                    try:
-                        status_cb(label)
-                    except Exception:
-                        logger.exception("status_cb failed")
-                tool = tool_lookup.get(name)
-                if tool is None:
-                    out_payload = {"error": f"unknown tool: {name}"}
-                else:
-                    try:
-                        out_payload = tool.invoke(args or {})
-                    except Exception as exc:
-                        out_payload = {"error": str(exc)}
+            # Dispatch the batch (single call → serial; >1 calls → fanned
+            # out across `parallel_workers` threads when enabled). The
+            # helper merges per-thread trace / refs / artifacts back into
+            # the shared ctx in deterministic order so the model sees the
+            # ToolMessages in the same order it requested them.
+            results = _dispatch_tool_calls(
+                calls=calls, ctx=ctx, refs=refs, status_cb=status_cb,
+                parallel=parallel_enabled, max_workers=parallel_workers,
+            )
+            for call, out_payload in results:
+                name, _args, call_id = _call_meta(call)
                 messages.append(ToolMessage(
                     content=str(out_payload),
                     tool_call_id=call_id or name or "tool",
@@ -344,7 +520,11 @@ def run_turn(
             # — this is the bridge state between data fetch and streaming.
             if calls and status_cb:
                 try:
-                    status_cb("Composing reply…")
+                    status_cb({
+                        "phase": "compose",
+                        "label": "Composing reply",
+                        "tools": [],
+                    })
                 except Exception:
                     pass
             # After each tool round, surface any newly added refs so the

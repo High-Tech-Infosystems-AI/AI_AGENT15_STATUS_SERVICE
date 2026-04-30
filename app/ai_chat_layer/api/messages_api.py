@@ -77,14 +77,37 @@ def _run_in_background(*, prompt: str, refs: List[Dict[str, Any]],
             "refs": new_refs,
         })
 
-    def _on_status(label: str) -> None:
-        if not label:
-            return
-        _publish_event(user_id, "ai.status", {
-            "task_id": task_id,
-            "conversation_id": conversation_id,
-            "status": label,
-        })
+    def _on_status(label_or_event) -> None:
+        # Backward compat: agent may send a plain string (legacy) OR a
+        # dict with {phase, label, tools, tool_name}. We forward both
+        # with a single `status` text field for legacy clients plus
+        # the structured fields the new live-thinking indicator uses.
+        if isinstance(label_or_event, dict):
+            phase = label_or_event.get("phase")
+            tool_name = label_or_event.get("tool_name")
+            status_text = (label_or_event.get("label") or "").strip()
+            # Allow empty-label heartbeats (e.g. tool_complete) through —
+            # they still carry useful FE state in `phase` + `tool_name`.
+            if not status_text and not phase:
+                return
+            payload = {
+                "task_id": task_id,
+                "conversation_id": conversation_id,
+                "status": status_text,
+                "phase": phase,
+                "tools": label_or_event.get("tools") or [],
+                "tool_name": tool_name,
+            }
+        else:
+            label = (label_or_event or "").strip()
+            if not label:
+                return
+            payload = {
+                "task_id": task_id,
+                "conversation_id": conversation_id,
+                "status": label,
+            }
+        _publish_event(user_id, "ai.status", payload)
 
     try:
         _publish_event(user_id, "ai.start", {

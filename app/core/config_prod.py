@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     AI_SESSION_TTL_SECONDS: int = Field(default_factory=lambda: int(os.getenv("AI_SESSION_TTL_SECONDS", "86400")), env="AI_SESSION_TTL_SECONDS")
     AI_MAX_TOOL_ITER: int = Field(default_factory=lambda: int(os.getenv("AI_MAX_TOOL_ITER", "5")), env="AI_MAX_TOOL_ITER")
     AI_TOOL_TIMEOUT_SECONDS: int = Field(default_factory=lambda: int(os.getenv("AI_TOOL_TIMEOUT_SECONDS", "8")), env="AI_TOOL_TIMEOUT_SECONDS")
+    AI_QUERY_CACHE_TTL: int = Field(default_factory=lambda: int(os.getenv("AI_QUERY_CACHE_TTL", "300")), env="AI_QUERY_CACHE_TTL")
     MCP_MYSQL_COMMAND: str = Field(default_factory=lambda: os.getenv("MCP_MYSQL_COMMAND", ""), env="MCP_MYSQL_COMMAND")
     MCP_MYSQL_ARGS: str = Field(default_factory=lambda: os.getenv("MCP_MYSQL_ARGS", ""), env="MCP_MYSQL_ARGS")
 
