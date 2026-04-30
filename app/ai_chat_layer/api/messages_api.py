@@ -77,6 +77,15 @@ def _run_in_background(*, prompt: str, refs: List[Dict[str, Any]],
             "refs": new_refs,
         })
 
+    def _on_status(label: str) -> None:
+        if not label:
+            return
+        _publish_event(user_id, "ai.status", {
+            "task_id": task_id,
+            "conversation_id": conversation_id,
+            "status": label,
+        })
+
     try:
         _publish_event(user_id, "ai.start", {
             "task_id": task_id, "conversation_id": conversation_id,
@@ -86,6 +95,7 @@ def _run_in_background(*, prompt: str, refs: List[Dict[str, Any]],
             conversation_id=conversation_id, ip_address=ip_address,
             stream_cb=_on_delta,
             refs_cb=_on_refs,
+            status_cb=_on_status,
         )
         _publish_event(user_id, "ai.token", {
             "task_id": task_id, "conversation_id": conversation_id,
