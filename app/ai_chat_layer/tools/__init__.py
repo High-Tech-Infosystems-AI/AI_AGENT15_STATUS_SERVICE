@@ -19,6 +19,7 @@ from typing import Any, List
 from app.ai_chat_layer.tools import (
     chart_tools,
     data_tools,
+    elicit_tools,
     pdf_tools,
     simulation_tools,
 )
@@ -32,4 +33,5 @@ def get_registry(ctx) -> List[Any]:
     tools.extend(chart_tools.build_tools(ctx))
     tools.extend(pdf_tools.build_tools(ctx))
     tools.extend(simulation_tools.build_tools(ctx))
+    tools.extend(elicit_tools.build_tools(ctx))
     return tools
