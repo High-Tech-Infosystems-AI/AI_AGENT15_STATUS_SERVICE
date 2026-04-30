@@ -173,6 +173,22 @@ class CompanyJobsArgs(DateRange):
 class SearchArgs(BaseModel):
     query: str = Field(..., min_length=1, max_length=120)
     limit: int = Field(default=10, ge=1, le=50)
+    disambiguate_kind: Optional[
+        Literal["job", "candidate", "company", "user", "team"]
+    ] = Field(
+        default=None,
+        description=(
+            "When set, the tool focuses on this entity kind. If the search "
+            "returns a SINGLE match, you get a `resolved` payload with the "
+            "id ready to use. If MULTIPLE matches, the tool surfaces an "
+            "elicitation form so the user picks one, and the next turn "
+            "delivers the chosen id back. If ZERO matches, the tool "
+            "returns `not_found` and you should say so plainly. Use this "
+            "whenever the user names a person / candidate / company / job "
+            "/ team without tagging them — it removes the ambiguity in "
+            "one round-trip."
+        ),
+    )
 
 
 class DashboardArgs(DateRange):
@@ -869,7 +885,9 @@ def _company_jobs_summary(ctx: ToolContext, args: CompanyJobsArgs) -> Dict[str, 
 
 
 def _search_entities(ctx: ToolContext, args: SearchArgs) -> Dict[str, Any]:
-    """Free-text fuzzy search across job titles + candidate names + companies."""
+    """Free-text fuzzy search across jobs, candidates, companies, users
+    and teams. Returns one bucket per entity kind so the model can pick
+    the right id (e.g. user_id) for the follow-up tool call."""
     q = f"%{args.query.strip()}%"
     params = {"q": q, "_limit": args.limit}
     job_scope, job_scope_p = _scope_job_filter(ctx)
@@ -912,16 +930,133 @@ def _search_entities(ctx: ToolContext, args: SearchArgs) -> Dict[str, Any]:
         """,
         {"q": q, "_limit": args.limit},
     )
-    return {
-        "jobs": [{"id": r["id"], "title": r.get("title"),
-                  "company_name": r.get("company_name")} for r in job_rows],
-        "candidates": [
-            {"id": r["id"],
-             "name": (r.get("name") or r.get("email") or f"Candidate {r['id']}"),
-             "email": r.get("email")} for r in cand_rows
-        ],
-        "companies": [{"id": r["id"], "name": r.get("company_name")} for r in co_rows],
+    # Users — searchable by name / username / email so prompts like
+    # "Tell me jobs assigned to Supriyo Chowdhury" can be resolved.
+    user_rows = ctx.mcp.query(
+        """
+        SELECT u.id, u.name, u.username, u.email,
+               COALESCE(r.name, '') AS role_name
+          FROM users u
+     LEFT JOIN roles r ON r.id = u.role_id
+         WHERE u.deleted_at IS NULL
+           AND (u.name LIKE :q OR u.username LIKE :q OR u.email LIKE :q)
+         LIMIT :_limit
+        """,
+        {"q": q, "_limit": args.limit},
+    )
+    team_rows = ctx.mcp.query(
+        """
+        SELECT t.id, t.name
+          FROM teams t
+         WHERE t.name LIKE :q
+         LIMIT :_limit
+        """,
+        {"q": q, "_limit": args.limit},
+    )
+    jobs = [{"id": r["id"], "title": r.get("title"),
+             "company_name": r.get("company_name")} for r in job_rows]
+    candidates = [
+        {"id": r["id"],
+         "name": (r.get("name") or r.get("email") or f"Candidate {r['id']}"),
+         "email": r.get("email")} for r in cand_rows
+    ]
+    companies = [{"id": r["id"], "name": r.get("company_name")}
+                 for r in co_rows]
+    users = [
+        {"id": r["id"], "name": r.get("name"),
+         "username": r.get("username"), "email": r.get("email"),
+         "role": r.get("role_name") or None}
+        for r in user_rows
+    ]
+    teams = [{"id": r["id"], "name": r.get("name")} for r in team_rows]
+
+    full_payload = {
+        "jobs": jobs, "candidates": candidates, "companies": companies,
+        "users": users, "teams": teams,
     }
+
+    # Disambiguation flow — single tool call resolves the entity OR
+    # surfaces a "pick one" form so the user clicks instead of retyping.
+    if args.disambiguate_kind:
+        bucket = full_payload.get(args.disambiguate_kind + "s") or []
+        if len(bucket) == 0:
+            return {
+                "not_found": True,
+                "kind": args.disambiguate_kind,
+                "query": args.query,
+                "results": full_payload,
+                "note": (
+                    f"No {args.disambiguate_kind} found matching "
+                    f"'{args.query}'. Tell the user plainly; suggest they "
+                    "double-check the spelling or tag the entity with the "
+                    "+ button."
+                ),
+            }
+        if len(bucket) == 1:
+            row = bucket[0]
+            return {
+                "resolved": True,
+                "kind": args.disambiguate_kind,
+                "id": row.get("id"),
+                "label": (
+                    row.get("name") or row.get("title") or row.get("email")
+                    or str(row.get("id"))
+                ),
+                "match": row,
+                "results": full_payload,
+            }
+        # Multiple matches → fire an elicitation form so the user picks.
+        # The picked value is the entity id; the answer lands as
+        # `[elicit:<id>] {"selection": "<id>"}` on the next turn so the
+        # model just feeds that id into the follow-up tool call.
+        kind_label_map = {
+            "job": "job", "candidate": "candidate", "company": "company",
+            "user": "user", "team": "team",
+        }
+        kind_label = kind_label_map.get(args.disambiguate_kind, args.disambiguate_kind)
+        options: List[ElicitationOption] = []
+        for row in bucket[:10]:
+            label = (
+                row.get("name") or row.get("title")
+                or row.get("email") or f"#{row.get('id')}"
+            )
+            desc_parts: List[str] = []
+            if row.get("email"):
+                desc_parts.append(str(row["email"]))
+            if row.get("username") and row.get("username") != row.get("name"):
+                desc_parts.append(f"@{row['username']}")
+            if row.get("role"):
+                desc_parts.append(f"role: {row['role']}")
+            if row.get("company_name"):
+                desc_parts.append(str(row["company_name"]))
+            options.append(ElicitationOption(
+                value=str(row.get("id")),
+                label=str(label),
+                description=" · ".join(desc_parts) or None,
+            ))
+        spec = ElicitationSpec(
+            title=f"Which {kind_label} did you mean?",
+            intro=(
+                f"I found {len(bucket)} {kind_label}s matching "
+                f"'{args.query}'. Pick the one you meant and I'll continue."
+            ),
+            fields=[
+                ElicitationField(
+                    name="selection",
+                    label=kind_label.title(),
+                    kind="select" if len(options) > 4 else "buttons",
+                    options=options,
+                    required=True,
+                ),
+            ],
+            submit_label=f"Use this {kind_label}",
+        )
+        payload = make_elicitation(spec)
+        # Carry the original payload so the model still has context.
+        payload["results"] = full_payload
+        return payload
+
+    return full_payload
 
 
 def _dashboard_data(ctx: ToolContext, args: DashboardArgs) -> Dict[str, Any]:
@@ -1490,7 +1625,21 @@ def build_tools(ctx: ToolContext) -> List[Any]:
         _wrap("company_jobs_summary", CompanyJobsArgs, _company_jobs_summary,
               "Companies the caller can see, ordered by total job openings, with active job counts."),
         _wrap("search_entities", SearchArgs, _search_entities,
-              "Fuzzy free-text search across jobs, candidates, and companies."),
+              ("Fuzzy free-text search across jobs, candidates, companies, "
+               "users and teams. Returns five buckets — `jobs`, "
+               "`candidates`, `companies`, `users`, `teams`.\n\n"
+               "**Disambiguation: pass `disambiguate_kind` whenever the "
+               "user names a single entity that isn't tagged.** With it "
+               "set, the tool routes the result for you:\n"
+               "  * 1 match → `{resolved: true, id, label}` — use `id` "
+               "    directly in the follow-up call.\n"
+               "  * 2+ matches → `{elicitation_pending: true}` and a "
+               "    pick-one form is shown to the user; STOP this turn "
+               "    and wait for their selection (it arrives as "
+               "    `[elicit:<id>] {selection: <id>}`).\n"
+               "  * 0 matches → `{not_found: true}` — tell the user "
+               "    plainly. NEVER claim someone 'is not a recruiter' "
+               "    or 'doesn't exist' without trying this first.")),
         _wrap("dashboard_data", DashboardArgs, _dashboard_data,
               ("Alias for render_chart — embeds the matching dashboard chart "
                "inline by chart_id (e.g. pipeline-funnel, daily-trend, "
