@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -116,6 +116,8 @@ def run_turn(
     refs: Optional[List[Dict[str, Any]]],
     conversation_id: int,
     ip_address: Optional[str] = None,
+    stream_cb: Optional[Callable[[str], None]] = None,
+    refs_cb: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> Dict[str, Any]:
     """Execute one turn. Returns the persisted message + metadata."""
     user_id = int(user.get("user_id"))
@@ -229,8 +231,48 @@ def run_turn(
         max_iter = int(getattr(settings, "AI_MAX_TOOL_ITER", 5) or 5)
         tool_lookup = {getattr(t, "name", ""): t for t in tools}
 
+        # Track which output_refs we've already pushed to the FE so we
+        # only stream the deltas (e.g. when a new chart card lands).
+        refs_pushed = 0
+
+        def _stream_once(messages_so_far):
+            """Stream the model's next message; return the assembled
+            AIMessage / AIMessageChunk-equivalent so the rest of the loop
+            can read tool_calls + content like before.
+
+            For each text fragment we get, push it onto the FE via the
+            stream_cb so the UI bubble grows live.
+            """
+            assembled = None
+            text_so_far = ""
+            try:
+                stream_iter = client.stream(messages_so_far)
+            except Exception:
+                # Provider doesn't support .stream() on bound tools — fall
+                # back to a single .invoke() call.
+                resp = client.invoke(messages_so_far)
+                content_text = _coerce_text(getattr(resp, "content", None))
+                if stream_cb and content_text:
+                    try:
+                        stream_cb(content_text)
+                    except Exception:
+                        pass
+                return resp
+            for chunk in stream_iter:
+                # AIMessageChunk supports `chunk + chunk` to accumulate.
+                assembled = chunk if assembled is None else assembled + chunk
+                fragment = _coerce_text(getattr(chunk, "content", None))
+                if fragment:
+                    text_so_far += fragment
+                    if stream_cb:
+                        try:
+                            stream_cb(fragment)
+                        except Exception:
+                            logger.exception("stream_cb failed")
+            return assembled
+
         for _ in range(max_iter):
-            response = client.invoke(messages)
+            response = _stream_once(messages)
             usage = llm.usage_metadata(response)
             tokens_in += usage.get("tokens_in", 0)
             tokens_out += usage.get("tokens_out", 0)
@@ -256,6 +298,15 @@ def run_turn(
                     content=str(out_payload),
                     tool_call_id=call_id or name or "tool",
                 ))
+            # After each tool round, surface any newly added refs so the
+            # FE can render entity / chart cards mid-stream — the user
+            # sees the cards appear as soon as their tool produces them.
+            if refs_cb and len(ctx.output_refs) > refs_pushed:
+                try:
+                    refs_cb(ctx.output_refs[refs_pushed:])
+                except Exception:
+                    logger.exception("refs_cb failed")
+                refs_pushed = len(ctx.output_refs)
         else:
             # Loop exhausted without a final composed reply.
             final_text = (final_text
