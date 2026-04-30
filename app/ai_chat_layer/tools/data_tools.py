@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
@@ -182,6 +182,32 @@ class DashboardArgs(DateRange):
     user_id: Optional[int] = None
 
 
+# ─── New args schemas for the v2 tool surface ───────────────────────────
+
+class FunnelArgs(DateRange):
+    """Pipeline funnel scoped by job / company / user / team / global."""
+    scope: Literal["job", "company", "user", "team", "global"] = "global"
+    scope_id: Optional[int] = None
+    limit_per_tag: int = Field(default=5, ge=1, le=25)
+
+
+class TeamArgs(BaseModel):
+    team_id: int
+
+
+class UserArgs(BaseModel):
+    user_id: int
+
+
+class UserCompareArgs(DateRange):
+    user_ids: List[int] = Field(..., min_length=2, max_length=8)
+
+
+class UserSourcingArgs(DateRange):
+    user_id: int
+    limit: int = Field(default=20, ge=1, le=100)
+
+
 # ---------------------------------------------------------------------------
 # Implementations
 # ---------------------------------------------------------------------------
@@ -270,6 +296,117 @@ def _job_detail(ctx: ToolContext, args: JobOnlyArgs) -> Dict[str, Any]:
     }
 
 
+def _candidate_detail(ctx: ToolContext, args: CandidateOnlyArgs) -> Dict[str, Any]:
+    """Full candidate profile from the `candidates` table plus their job
+    pipeline links (one row per candidate_jobs, with current stage and
+    outcome tag from candidate_pipeline_status / pipeline_stage_status).
+
+    Mirrors the dashboard / job-service convention — the chatbot asked
+    only `candidate_jobs` rows before, which lacked profile data; this
+    tool returns the full row from `candidates` so the model can answer
+    questions like "what's their experience?" or "where are they based?".
+    """
+    cand_id = str(args.candidate_id)
+    if not ctx.scope.has_candidate(cand_id):
+        return {"access_denied": True, "type": "candidate", "id": cand_id}
+
+    rows = ctx.mcp.query(
+        """
+        SELECT c.candidate_id   AS id,
+               c.candidate_name AS name,
+               c.candidate_email AS email,
+               c.employment_status,
+               c.experience,
+               c.current_company,
+               c.current_location,
+               c.job_profile,
+               (SELECT cs.candidate_status
+                  FROM candidate_status cs
+                 WHERE cs.candidate_id = c.candidate_id
+                 ORDER BY cs.updated_at DESC, cs.id DESC
+                 LIMIT 1) AS latest_status,
+               (SELECT COUNT(*) FROM candidate_jobs cj
+                 WHERE cj.candidate_id = c.candidate_id) AS job_count
+          FROM candidates c
+         WHERE c.candidate_id = :cid
+         LIMIT 1
+        """,
+        {"cid": cand_id},
+    )
+    if not rows:
+        return {"not_found": True, "type": "candidate", "id": cand_id}
+    p = rows[0]
+
+    # Candidate's pipeline links — one row per candidate_jobs with their
+    # current stage and outcome tag. Useful for "where is X in the
+    # pipeline" / "what offers do they have" questions.
+    pipeline_rows = ctx.mcp.query(
+        """
+        SELECT cj.id        AS candidate_job_id,
+               cj.job_id    AS job_id,
+               j.job_id     AS job_external_id,
+               j.title      AS job_title,
+               j.status     AS job_status,
+               co.company_name AS company_name,
+               cj.applied_at,
+               ps.id        AS stage_id,
+               ps.name      AS stage,
+               ps.`order`   AS stage_order,
+               cps.status   AS status_option,
+               pss.tag      AS outcome_tag
+          FROM candidate_jobs cj
+          LEFT JOIN job_openings j ON j.id = cj.job_id
+          LEFT JOIN companies co ON co.id = j.company_id
+          LEFT JOIN candidate_pipeline_status cps
+                 ON cps.candidate_job_id = cj.id AND cps.latest = 1
+          LEFT JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
+          LEFT JOIN pipeline_stage_status pss
+                 ON pss.pipeline_stage_id = cps.pipeline_stage_id
+                AND UPPER(pss.option) = UPPER(cps.status)
+         WHERE cj.candidate_id = :cid
+         ORDER BY cj.applied_at DESC
+        """,
+        {"cid": cand_id},
+    )
+    pipeline = []
+    for r in pipeline_rows:
+        pipeline.append({
+            "candidate_job_id": r.get("candidate_job_id"),
+            "job_id": r.get("job_id"),
+            "job_external_id": r.get("job_external_id"),
+            "job_title": r.get("job_title"),
+            "job_status": (r.get("job_status") or "").upper() or None,
+            "company_name": r.get("company_name"),
+            "applied_at": (
+                str(r.get("applied_at")) if r.get("applied_at") else None
+            ),
+            "stage": r.get("stage"),
+            "status": r.get("status_option"),
+            "outcome": r.get("outcome_tag"),
+        })
+
+    ctx.add_output_ref({"type": "candidate", "id": cand_id})
+
+    # Surface a chip card for the most recent job too, so the user can
+    # one-click into the related kanban from the candidate's reply.
+    if pipeline and pipeline[0].get("job_id"):
+        ctx.add_output_ref({"type": "job", "id": pipeline[0]["job_id"]})
+
+    return {
+        "id": p["id"],
+        "name": p.get("name"),
+        "email": p.get("email"),
+        "employment_status": p.get("employment_status"),
+        "experience_years": p.get("experience"),
+        "current_company": p.get("current_company"),
+        "current_location": p.get("current_location"),
+        "job_profile": p.get("job_profile"),
+        "latest_status": p.get("latest_status"),
+        "job_count": int(p.get("job_count") or 0),
+        "pipeline": pipeline,
+    }
+
+
 _AMBIGUOUS_STAGE_TERMS = {
     "selected", "shortlisted", "best", "top", "good",
     "qualified", "approved", "final", "winning",
@@ -321,7 +458,9 @@ def _available_stages(ctx: ToolContext, job_id: Optional[int]) -> List[str]:
     if job_id is not None:
         rows = ctx.mcp.query(
             """
-            SELECT ps.name AS stage
+            SELECT ps.name AS stage,
+                   ps.`order` AS stage_order,
+                   ps.id AS stage_pk
               FROM pipeline_stages ps
               JOIN job_openings j ON j.pipeline_id = ps.pipeline_id
              WHERE j.id = :jid AND ps.name IS NOT NULL
@@ -332,15 +471,21 @@ def _available_stages(ctx: ToolContext, job_id: Optional[int]) -> List[str]:
         if rows:
             return [r["stage"] for r in rows if r.get("stage")]
         # Fallback when the job has no pipeline_id yet — surface stages
-        # that actually appear in the data for that job.
+        # that actually appear in the data for that job. Use GROUP BY so
+        # ORDER BY references aggregate columns, sidestepping MySQL
+        # ONLY_FULL_GROUP_BY mode which forbids DISTINCT + ORDER BY on a
+        # column not in the select list.
         rows = ctx.mcp.query(
             """
-            SELECT DISTINCT ps.name AS stage
+            SELECT ps.name AS stage,
+                   MIN(ps.`order`) AS stage_order,
+                   MIN(ps.id) AS stage_pk
               FROM candidate_pipeline_status cps
               JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
               JOIN candidate_jobs cj ON cj.id = cps.candidate_job_id
              WHERE cj.job_id = :jid AND cps.latest = 1
-             ORDER BY ps.`order`, ps.id
+             GROUP BY ps.name
+             ORDER BY stage_order, stage_pk
             """,
             {"jid": job_id},
         )
@@ -348,10 +493,13 @@ def _available_stages(ctx: ToolContext, job_id: Optional[int]) -> List[str]:
 
     rows = ctx.mcp.query(
         """
-        SELECT DISTINCT ps.name AS stage
+        SELECT ps.name AS stage,
+               MIN(ps.`order`) AS stage_order,
+               MIN(ps.id) AS stage_pk
           FROM pipeline_stages ps
          WHERE ps.name IS NOT NULL
-         ORDER BY ps.`order`, ps.id
+         GROUP BY ps.name
+         ORDER BY stage_order, stage_pk
         """,
         {},
     )
@@ -797,6 +945,499 @@ def _dashboard_data(ctx: ToolContext, args: DashboardArgs) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# v2 — broader query surface: pipelines, users, teams, companies
+# ---------------------------------------------------------------------------
+
+def _pipeline_stages_for_job(ctx: ToolContext, args: JobOnlyArgs) -> Dict[str, Any]:
+    """Every stage on a job's pipeline + the per-stage status options
+    with their tag (Sourcing / Screening / LineUps / TurnUps / Selected /
+    OfferReleased / OfferAccepted / etc.)."""
+    if not ctx.scope.has_job(args.job_id):
+        return {"access_denied": True, "type": "job", "id": args.job_id}
+    stages = ctx.mcp.query(
+        """
+        SELECT ps.id        AS stage_id,
+               ps.name      AS stage,
+               ps.`order`   AS stage_order,
+               ps.end_stage AS end_stage
+          FROM pipeline_stages ps
+          JOIN job_openings j ON j.pipeline_id = ps.pipeline_id
+         WHERE j.id = :jid
+         ORDER BY ps.`order`, ps.id
+        """,
+        {"jid": args.job_id},
+    )
+    options = ctx.mcp.query(
+        """
+        SELECT pss.pipeline_stage_id AS stage_id,
+               pss.option            AS option_label,
+               pss.tag               AS tag,
+               pss.`order`           AS option_order
+          FROM pipeline_stage_status pss
+          JOIN pipeline_stages ps ON ps.id = pss.pipeline_stage_id
+          JOIN job_openings j ON j.pipeline_id = ps.pipeline_id
+         WHERE j.id = :jid
+         ORDER BY pss.`order`, pss.id
+        """,
+        {"jid": args.job_id},
+    )
+    options_by_stage: Dict[int, List[Dict[str, Any]]] = {}
+    for o in options:
+        options_by_stage.setdefault(o["stage_id"], []).append({
+            "option": o.get("option_label"),
+            "tag": o.get("tag"),
+        })
+    items = [{
+        "stage_id": s["stage_id"],
+        "stage": s["stage"],
+        "order": s.get("stage_order"),
+        "end_stage": bool(s.get("end_stage")),
+        "options": options_by_stage.get(s["stage_id"], []),
+    } for s in stages]
+    ctx.add_output_ref({"type": "job", "id": args.job_id})
+    return {"job_id": args.job_id, "stages": items, "count": len(items)}
+
+
+def _pipeline_funnel(ctx: ToolContext, args: FunnelArgs) -> Dict[str, Any]:
+    """Tag-bucketed funnel: counts per `pipeline_stage_status.tag`
+    (Sourcing / Screening / LineUps / TurnUps / Selected / OfferReleased
+    / OfferAccepted) plus a sample of candidates per bucket. Scope can be
+    a single job, company, user (recruiter), team, or global.
+
+    Adds rejected (`candidate_job_status.type = 'rejected'`) and joined
+    counts on top so the model can answer "how many got rejected?" too.
+    """
+    where = ["1=1"]
+    params: Dict[str, Any] = {}
+    if args.date_from:
+        where.append("cj.applied_at >= :date_from")
+        params["date_from"] = args.date_from
+    if args.date_to:
+        where.append("cj.applied_at <= :date_to")
+        params["date_to"] = args.date_to
+
+    if args.scope == "job":
+        if args.scope_id is None:
+            return {"error": "scope=job requires scope_id"}
+        if not ctx.scope.has_job(args.scope_id):
+            return {"access_denied": True, "type": "job", "id": args.scope_id}
+        where.append("cj.job_id = :scope_id")
+        params["scope_id"] = args.scope_id
+        ctx.add_output_ref({"type": "job", "id": args.scope_id})
+    elif args.scope == "company":
+        if args.scope_id is None:
+            return {"error": "scope=company requires scope_id"}
+        if not ctx.scope.has_company(args.scope_id):
+            return {"access_denied": True, "type": "company", "id": args.scope_id}
+        where.append("j.company_id = :scope_id")
+        params["scope_id"] = args.scope_id
+        ctx.add_output_ref({"type": "company", "id": args.scope_id})
+    elif args.scope == "user":
+        if args.scope_id is None:
+            return {"error": "scope=user requires scope_id"}
+        if not ctx.scope.unscoped and args.scope_id != ctx.user_id:
+            return {"access_denied": True, "type": "user", "id": args.scope_id}
+        where.append("uja.user_id = :scope_id")
+        params["scope_id"] = args.scope_id
+        ctx.add_output_ref({"type": "user", "id": args.scope_id})
+    elif args.scope == "team":
+        if args.scope_id is None:
+            return {"error": "scope=team requires scope_id"}
+        # Team scope: any candidate on a job assigned to a team member
+        where.append(
+            "uja.user_id IN (SELECT user_id FROM team_members WHERE team_id = :scope_id)"
+        )
+        params["scope_id"] = args.scope_id
+        ctx.add_output_ref({"type": "team", "id": args.scope_id})
+    else:  # global
+        if not ctx.scope.unscoped:
+            # Recruiters: scope to their own assignments.
+            scope_clause, scope_params = _scope_job_filter(ctx, alias="j")
+            params.update(scope_params)
+            if scope_clause:
+                where.append(scope_clause.lstrip(" AND "))
+
+    join_uja = (
+        "JOIN user_jobs_assigned uja ON uja.job_id = cj.job_id"
+        if args.scope in ("user", "team")
+        else "LEFT JOIN user_jobs_assigned uja ON uja.job_id = cj.job_id"
+    )
+
+    # Tag buckets via pipeline_stage_status.tag
+    by_tag_rows = ctx.mcp.query(
+        f"""
+        SELECT pss.tag AS tag, COUNT(DISTINCT cj.id) AS cnt
+          FROM candidate_jobs cj
+          JOIN job_openings j ON j.id = cj.job_id
+          {join_uja}
+          JOIN candidate_pipeline_status cps
+                ON cps.candidate_job_id = cj.id AND cps.latest = 1
+          JOIN pipeline_stage_status pss
+                ON pss.pipeline_stage_id = cps.pipeline_stage_id
+               AND UPPER(pss.option) = UPPER(cps.status)
+         WHERE {' AND '.join(where)}
+         GROUP BY pss.tag
+         ORDER BY cnt DESC
+        """,
+        params,
+    )
+    by_tag = [{"tag": r.get("tag") or "Unknown", "count": int(r.get("cnt") or 0)}
+              for r in by_tag_rows]
+
+    # Stage breakdown via pipeline_stages.name (ordered by pipeline `order`).
+    by_stage_rows = ctx.mcp.query(
+        f"""
+        SELECT ps.id AS stage_id, ps.name AS stage,
+               ps.`order` AS stage_order,
+               COUNT(DISTINCT cj.id) AS cnt
+          FROM candidate_jobs cj
+          JOIN job_openings j ON j.id = cj.job_id
+          {join_uja}
+          JOIN candidate_pipeline_status cps
+                ON cps.candidate_job_id = cj.id AND cps.latest = 1
+          JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
+         WHERE {' AND '.join(where)}
+         GROUP BY ps.id, ps.name, ps.`order`
+         ORDER BY ps.`order`, ps.id
+        """,
+        params,
+    )
+    by_stage = [{"stage_id": r.get("stage_id"), "stage": r.get("stage"),
+                 "count": int(r.get("cnt") or 0)} for r in by_stage_rows]
+
+    # Rejected / joined counts via candidate_job_status (separate signal
+    # from pipeline_stage tags).
+    rj_rows = ctx.mcp.query(
+        f"""
+        SELECT LOWER(cjs.type) AS type, COUNT(DISTINCT cj.id) AS cnt
+          FROM candidate_jobs cj
+          JOIN job_openings j ON j.id = cj.job_id
+          {join_uja}
+          JOIN candidate_job_status cjs ON cjs.candidate_job_id = cj.id
+         WHERE {' AND '.join(where)}
+         GROUP BY cjs.type
+        """,
+        params,
+    )
+    by_type = {r.get("type"): int(r.get("cnt") or 0) for r in rj_rows if r.get("type")}
+
+    # Sample candidates per tag — top N for the model to cite.
+    sample_rows = ctx.mcp.query(
+        f"""
+        SELECT pss.tag AS tag,
+               c.candidate_id AS id,
+               c.candidate_name AS name,
+               c.candidate_email AS email,
+               cj.applied_at,
+               j.id AS job_id, j.title AS job_title
+          FROM candidate_jobs cj
+          JOIN job_openings j ON j.id = cj.job_id
+          {join_uja}
+          JOIN candidates c ON c.candidate_id = cj.candidate_id
+          JOIN candidate_pipeline_status cps
+                ON cps.candidate_job_id = cj.id AND cps.latest = 1
+          JOIN pipeline_stage_status pss
+                ON pss.pipeline_stage_id = cps.pipeline_stage_id
+               AND UPPER(pss.option) = UPPER(cps.status)
+         WHERE {' AND '.join(where)}
+         ORDER BY cj.applied_at DESC
+         LIMIT 80
+        """,
+        params,
+    )
+    samples_by_tag: Dict[str, List[Dict[str, Any]]] = {}
+    for r in sample_rows:
+        tag = r.get("tag") or "Unknown"
+        bucket = samples_by_tag.setdefault(tag, [])
+        if len(bucket) >= args.limit_per_tag:
+            continue
+        bucket.append({
+            "candidate_id": r.get("id"),
+            "name": r.get("name"),
+            "email": r.get("email"),
+            "job_id": r.get("job_id"),
+            "job_title": r.get("job_title"),
+            "applied_at": str(r.get("applied_at")) if r.get("applied_at") else None,
+        })
+
+    return {
+        "scope": args.scope,
+        "scope_id": args.scope_id,
+        "by_tag": by_tag,
+        "by_stage": by_stage,
+        "by_type": {
+            "rejected": by_type.get("rejected", 0),
+            "joined": by_type.get("joined", 0),
+            "dropped": by_type.get("dropped", 0),
+        },
+        "samples_by_tag": samples_by_tag,
+        "total_candidates": sum(s["count"] for s in by_stage),
+    }
+
+
+def _users_for_job(ctx: ToolContext, args: JobOnlyArgs) -> Dict[str, Any]:
+    """Recruiters / users assigned to a job via `user_jobs_assigned`."""
+    if not ctx.scope.has_job(args.job_id):
+        return {"access_denied": True, "type": "job", "id": args.job_id}
+    rows = ctx.mcp.query(
+        """
+        SELECT u.id, u.name, u.username, u.email,
+               COALESCE(r.name, '') AS role_name
+          FROM user_jobs_assigned uja
+          JOIN users u ON u.id = uja.user_id
+     LEFT JOIN roles r ON r.id = u.role_id
+         WHERE uja.job_id = :jid
+         ORDER BY u.name
+        """,
+        {"jid": args.job_id},
+    )
+    items = []
+    for r in rows:
+        items.append({
+            "id": r["id"], "name": r.get("name"),
+            "username": r.get("username"), "email": r.get("email"),
+            "role": r.get("role_name") or None,
+        })
+        ctx.add_output_ref({"type": "user", "id": r["id"]})
+    ctx.add_output_ref({"type": "job", "id": args.job_id})
+    return {"job_id": args.job_id, "items": items, "count": len(items)}
+
+
+def _team_detail(ctx: ToolContext, args: TeamArgs) -> Dict[str, Any]:
+    """Team header + member roster (joined to `team_members`, `users`,
+    `roles`). Mirrors what RBAC exposes on its team detail endpoint."""
+    team_rows = ctx.mcp.query(
+        "SELECT id, name FROM teams WHERE id = :tid LIMIT 1",
+        {"tid": args.team_id},
+    )
+    if not team_rows:
+        return {"not_found": True, "type": "team", "id": args.team_id}
+    member_rows = ctx.mcp.query(
+        """
+        SELECT u.id, u.name, u.username, u.email,
+               COALESCE(r.name, '') AS role_name,
+               tm.role_in_team
+          FROM team_members tm
+          JOIN users u ON u.id = tm.user_id
+     LEFT JOIN roles r ON r.id = u.role_id
+         WHERE tm.team_id = :tid
+         ORDER BY tm.role_in_team DESC, u.name
+        """,
+        {"tid": args.team_id},
+    )
+    members = []
+    for r in member_rows:
+        members.append({
+            "id": r["id"], "name": r.get("name"),
+            "username": r.get("username"), "email": r.get("email"),
+            "role": r.get("role_name") or None,
+            "role_in_team": r.get("role_in_team"),
+        })
+        ctx.add_output_ref({"type": "user", "id": r["id"]})
+    ctx.add_output_ref({"type": "team", "id": args.team_id})
+    return {
+        "id": team_rows[0]["id"],
+        "name": team_rows[0].get("name"),
+        "members": members,
+        "member_count": len(members),
+    }
+
+
+def _team_performance(ctx: ToolContext, args: TeamArgs) -> Dict[str, Any]:
+    """Per-team aggregate funnel: union of every team member's assigned
+    jobs' candidates, bucketed by tag + stage."""
+    return _pipeline_funnel(
+        ctx,
+        FunnelArgs(scope="team", scope_id=args.team_id, limit_per_tag=5),
+    )
+
+
+def _company_detail(ctx: ToolContext, args: CompanyOnlyArgs) -> Dict[str, Any]:
+    """Company header + jobs/applicant counts."""
+    if not ctx.scope.has_company(args.company_id):
+        return {"access_denied": True, "type": "company", "id": args.company_id}
+    rows = ctx.mcp.query(
+        """
+        SELECT co.id, co.company_name,
+               (SELECT COUNT(*) FROM job_openings j WHERE j.company_id = co.id) AS jobs,
+               (SELECT COUNT(*) FROM job_openings j
+                 WHERE j.company_id = co.id AND UPPER(j.status) = 'ACTIVE') AS active_jobs,
+               (SELECT COUNT(*) FROM candidate_jobs cj
+                  JOIN job_openings j ON j.id = cj.job_id
+                 WHERE j.company_id = co.id) AS applicants
+          FROM companies co
+         WHERE co.id = :cid
+         LIMIT 1
+        """,
+        {"cid": args.company_id},
+    )
+    if not rows:
+        return {"not_found": True, "type": "company", "id": args.company_id}
+    r = rows[0]
+    ctx.add_output_ref({"type": "company", "id": r["id"]})
+    return {
+        "id": r["id"], "name": r.get("company_name"),
+        "jobs": int(r.get("jobs") or 0),
+        "active_jobs": int(r.get("active_jobs") or 0),
+        "applicants": int(r.get("applicants") or 0),
+    }
+
+
+def _company_jobs(ctx: ToolContext, args: ListJobsArgs) -> Dict[str, Any]:
+    """Convenience wrapper around list_jobs with company_id required.
+    The plain `list_jobs` already supports company filtering; this exists
+    so the model has a clearly-named tool for the common pattern."""
+    if args.company_id is None:
+        return {"error": "company_id is required"}
+    return _list_jobs(ctx, args)
+
+
+def _company_performance(ctx: ToolContext, args: CompanyOnlyArgs) -> Dict[str, Any]:
+    return _pipeline_funnel(
+        ctx,
+        FunnelArgs(scope="company", scope_id=args.company_id, limit_per_tag=5),
+    )
+
+
+def _user_detail(ctx: ToolContext, args: UserArgs) -> Dict[str, Any]:
+    """User profile (id / name / username / email / role) + their
+    assigned jobs + their team memberships."""
+    target_uid = args.user_id
+    if not ctx.scope.unscoped and target_uid != ctx.user_id:
+        return {"access_denied": True, "type": "user", "id": target_uid}
+    rows = ctx.mcp.query(
+        """
+        SELECT u.id, u.name, u.username, u.email,
+               COALESCE(r.name, '') AS role_name
+          FROM users u
+     LEFT JOIN roles r ON r.id = u.role_id
+         WHERE u.id = :uid
+         LIMIT 1
+        """,
+        {"uid": target_uid},
+    )
+    if not rows:
+        return {"not_found": True, "type": "user", "id": target_uid}
+    profile = rows[0]
+    jobs = ctx.mcp.query(
+        """
+        SELECT j.id, j.title, j.status, j.openings,
+               co.company_name AS company_name
+          FROM user_jobs_assigned uja
+          JOIN job_openings j ON j.id = uja.job_id
+     LEFT JOIN companies co ON co.id = j.company_id
+         WHERE uja.user_id = :uid
+         ORDER BY j.created_at DESC
+         LIMIT 25
+        """,
+        {"uid": target_uid},
+    )
+    teams = ctx.mcp.query(
+        """
+        SELECT t.id, t.name, tm.role_in_team
+          FROM team_members tm
+          JOIN teams t ON t.id = tm.team_id
+         WHERE tm.user_id = :uid
+         ORDER BY t.name
+        """,
+        {"uid": target_uid},
+    )
+    ctx.add_output_ref({"type": "user", "id": target_uid})
+    return {
+        "id": profile["id"], "name": profile.get("name"),
+        "username": profile.get("username"), "email": profile.get("email"),
+        "role": profile.get("role_name") or None,
+        "jobs": [{"id": j["id"], "title": j.get("title"),
+                  "status": (j.get("status") or "").upper() or None,
+                  "openings": j.get("openings"),
+                  "company_name": j.get("company_name")} for j in jobs],
+        "teams": [{"id": t["id"], "name": t.get("name"),
+                   "role_in_team": t.get("role_in_team")} for t in teams],
+        "job_count": len(jobs),
+        "team_count": len(teams),
+    }
+
+
+def _compare_users(ctx: ToolContext, args: UserCompareArgs) -> Dict[str, Any]:
+    """Per-user funnel side-by-side. Each user gets a `_pipeline_funnel`
+    pass under user-scope; the response is a table-friendly array."""
+    if not ctx.scope.unscoped:
+        return {"access_denied": True, "type": "user_compare"}
+    out_users = []
+    for uid in args.user_ids:
+        funnel = _pipeline_funnel(
+            ctx,
+            FunnelArgs(scope="user", scope_id=uid,
+                       date_from=args.date_from, date_to=args.date_to,
+                       limit_per_tag=3),
+        )
+        if funnel.get("access_denied"):
+            continue
+        # Pull display name once for nicer output.
+        u_rows = ctx.mcp.query(
+            "SELECT id, name, username FROM users WHERE id = :uid LIMIT 1",
+            {"uid": uid},
+        )
+        u = u_rows[0] if u_rows else {"id": uid, "name": None, "username": None}
+        out_users.append({
+            "user": {"id": u["id"], "name": u.get("name"),
+                     "username": u.get("username")},
+            "by_tag": funnel.get("by_tag", []),
+            "by_stage": funnel.get("by_stage", []),
+            "by_type": funnel.get("by_type", {}),
+            "total_candidates": funnel.get("total_candidates", 0),
+        })
+    return {"users": out_users, "count": len(out_users)}
+
+
+def _user_sourcing(ctx: ToolContext, args: UserSourcingArgs) -> Dict[str, Any]:
+    """Candidates the user (recruiter) sourced — i.e. distinct candidates
+    on jobs the user is assigned to within the date range. We approximate
+    "sourced by" via `cj.applied_at` + the user's job assignments.
+    """
+    if not ctx.scope.unscoped and args.user_id != ctx.user_id:
+        return {"access_denied": True, "type": "user", "id": args.user_id}
+    where = ["uja.user_id = :uid"]
+    params: Dict[str, Any] = {"uid": args.user_id, "_limit": args.limit}
+    if args.date_from:
+        where.append("cj.applied_at >= :date_from")
+        params["date_from"] = args.date_from
+    if args.date_to:
+        where.append("cj.applied_at <= :date_to")
+        params["date_to"] = args.date_to
+    rows = ctx.mcp.query(
+        f"""
+        SELECT DISTINCT
+               c.candidate_id AS id,
+               c.candidate_name AS name,
+               c.candidate_email AS email,
+               cj.applied_at,
+               j.id AS job_id,
+               j.title AS job_title
+          FROM candidate_jobs cj
+          JOIN user_jobs_assigned uja ON uja.job_id = cj.job_id
+          JOIN candidates c ON c.candidate_id = cj.candidate_id
+          JOIN job_openings j ON j.id = cj.job_id
+         WHERE {' AND '.join(where)}
+         ORDER BY cj.applied_at DESC
+         LIMIT :_limit
+        """,
+        params,
+    )
+    items = []
+    for r in rows:
+        items.append({
+            "candidate_id": r["id"], "name": r.get("name"),
+            "email": r.get("email"),
+            "applied_at": str(r.get("applied_at")) if r.get("applied_at") else None,
+            "job_id": r.get("job_id"), "job_title": r.get("job_title"),
+        })
+        ctx.add_output_ref({"type": "candidate", "id": r["id"]})
+    ctx.add_output_ref({"type": "user", "id": args.user_id})
+    return {"user_id": args.user_id, "items": items, "count": len(items)}
+
+
+# ---------------------------------------------------------------------------
 # LangChain StructuredTool builder
 # ---------------------------------------------------------------------------
 
@@ -827,6 +1468,15 @@ def build_tools(ctx: ToolContext) -> List[Any]:
               "List jobs the caller can see. Filter by status, company, date range."),
         _wrap("job_detail", JobOnlyArgs, _job_detail,
               "Detailed metadata for a single job by integer id, including applicant + recruiter counts."),
+        _wrap("candidate_detail", CandidateOnlyArgs, _candidate_detail,
+              ("Full profile for ONE candidate by candidate_id (string). "
+               "Returns name / email / experience / current company / "
+               "current location / job profile / latest free-form status, "
+               "plus every (candidate_jobs) link they have with the "
+               "current pipeline stage + outcome tag and the job's "
+               "title/status/company. Call this whenever the user tags "
+               "a candidate or asks for details / profile / experience / "
+               "where-they-are about a specific candidate.")),
         _wrap("list_candidates", ListCandidatesArgs, _list_candidates,
               "List candidates, optionally filtered by job_id, stage, or applied date range."),
         _wrap("pipeline_status_for_job", JobOnlyArgs, _pipeline_status_for_job,
@@ -846,4 +1496,58 @@ def build_tools(ctx: ToolContext) -> List[Any]:
                "inline by chart_id (e.g. pipeline-funnel, daily-trend, "
                "hiring-funnel). Prefer render_chart; this is kept only so the "
                "model can use either name and still produce a chart.")),
+
+        # ── v2: pipelines / users / teams / companies ─────────────────
+        _wrap("pipeline_stages_for_job", JobOnlyArgs, _pipeline_stages_for_job,
+              ("Every pipeline stage configured on a job, including the "
+               "stage `order`, `end_stage` flag, and the per-stage status "
+               "options with their tag (Sourcing / Screening / LineUps / "
+               "TurnUps / Selected / OfferReleased / OfferAccepted). Use "
+               "this when the user asks about the pipeline structure of a "
+               "job.")),
+        _wrap("pipeline_funnel", FunnelArgs, _pipeline_funnel,
+              ("Tag-bucketed pipeline funnel scoped by job / company / "
+               "user / team / global. Returns counts per outcome tag "
+               "(Sourcing, Screening, LineUps, TurnUps, Selected, "
+               "OfferReleased, OfferAccepted), counts per stage in pipeline "
+               "`order`, separate rejected / joined / dropped counts via "
+               "candidate_job_status, plus a sample of up to "
+               "`limit_per_tag` candidates per tag for citation. Use this "
+               "for ANY question about how candidates flow through the "
+               "pipeline at any scope.")),
+        _wrap("users_for_job", JobOnlyArgs, _users_for_job,
+              ("List the recruiters / users assigned to a job (rows from "
+               "user_jobs_assigned joined to users + roles). Returns "
+               "name / username / email / role for each.")),
+        _wrap("team_detail", TeamArgs, _team_detail,
+              ("Team header + complete member roster. Pulls from teams + "
+               "team_members + users + roles. Each member's role_in_team "
+               "is included so you can identify managers vs members.")),
+        _wrap("team_performance", TeamArgs, _team_performance,
+              ("Aggregate pipeline funnel for a team — i.e. every "
+               "candidate on every job assigned to any team member. Same "
+               "shape as pipeline_funnel(scope=team).")),
+        _wrap("company_detail", CompanyOnlyArgs, _company_detail,
+              ("Company header — name + total jobs + active jobs + total "
+               "applicants. For per-job lists call `company_jobs`; for "
+               "the funnel call `company_performance`.")),
+        _wrap("company_jobs", ListJobsArgs, _company_jobs,
+              ("List a company's jobs (requires company_id). Same fields "
+               "as list_jobs, just clearly named for the common use case.")),
+        _wrap("company_performance", CompanyOnlyArgs, _company_performance,
+              ("Aggregate pipeline funnel for one company across all its "
+               "jobs. Same shape as pipeline_funnel(scope=company).")),
+        _wrap("user_detail", UserArgs, _user_detail,
+              ("Profile for one user — name, username, email, role, plus "
+               "their assigned jobs (up to 25 most recent) and team "
+               "memberships. Non-admins can only target themselves.")),
+        _wrap("compare_users", UserCompareArgs, _compare_users,
+              ("Side-by-side performance table for 2-8 users. Each entry "
+               "has the user's funnel by_tag / by_stage / rejected-joined "
+               "counts within the date range. Admin / SuperAdmin only.")),
+        _wrap("user_sourcing", UserSourcingArgs, _user_sourcing,
+              ("Distinct candidates the user (recruiter) brought into the "
+               "pipeline within the date range — i.e. candidates on any "
+               "job they are assigned to. Returns candidate name / email "
+               "/ applied_at / job_title.")),
     ]
