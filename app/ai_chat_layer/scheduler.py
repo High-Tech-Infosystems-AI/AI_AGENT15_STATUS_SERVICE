@@ -106,19 +106,31 @@ def run_due_scheduled_queries() -> int:
 # ----- anomaly evaluators -----
 
 def _evaluate_stuck_candidates(db, user, params: Dict[str, Any]) -> Optional[str]:
-    """Check whether any candidate has been in same stage > N days within scope."""
+    """Find candidates whose CURRENT pipeline stage was set > N days ago.
+
+    Per-(candidate, job) stage lives in `candidate_pipeline_status` —
+    `latest = 1` is the active row, `created_at` is when that stage was
+    entered, `pipeline_stage_id` joins to `pipeline_stages.name`. So
+    "days in current stage" = NOW() − cps.created_at on the latest row.
+    """
     threshold_days = int(params.get("threshold_days", 10))
     cutoff = datetime.utcnow() - timedelta(days=threshold_days)
     rows = db.execute(
         text("""
-        SELECT cj.candidate_id, cj.job_id, cj.stage,
-               TIMESTAMPDIFF(DAY, cj.applied_at, NOW()) AS days_in_stage,
+        SELECT cj.candidate_id,
+               cj.job_id,
+               ps.name AS stage,
+               TIMESTAMPDIFF(DAY, cps.created_at, NOW()) AS days_in_stage,
                j.title AS job_title
-          FROM candidate_jobs cj
-          JOIN job_openings j ON j.id = cj.job_id
+          FROM candidate_pipeline_status cps
+          JOIN candidate_jobs cj ON cj.id = cps.candidate_job_id
+          JOIN job_openings   j  ON j.id  = cj.job_id
           JOIN user_jobs_assigned uja ON uja.job_id = cj.job_id
+          JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
          WHERE uja.user_id = :uid
-           AND cj.applied_at <= :cutoff
+           AND cps.latest = 1
+           AND cps.created_at <= :cutoff
+         ORDER BY cps.created_at ASC
          LIMIT 25
         """),
         {"uid": user["user_id"], "cutoff": cutoff},
