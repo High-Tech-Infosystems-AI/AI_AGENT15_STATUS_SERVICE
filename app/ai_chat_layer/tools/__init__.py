@@ -21,6 +21,7 @@ from app.ai_chat_layer.tools import (
     data_tools,
     pdf_tools,
     simulation_tools,
+    suggest_tools,
 )
 from app.ai_chat_layer.tools.context import ToolContext  # noqa: F401
 
@@ -38,4 +39,5 @@ def get_registry(ctx) -> List[Any]:
     tools.extend(chart_tools.build_tools(ctx))
     tools.extend(pdf_tools.build_tools(ctx))
     tools.extend(simulation_tools.build_tools(ctx))
+    tools.extend(suggest_tools.build_tools(ctx))
     return tools

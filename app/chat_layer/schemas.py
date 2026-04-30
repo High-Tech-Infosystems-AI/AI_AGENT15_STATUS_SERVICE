@@ -12,7 +12,7 @@ MessageType = Literal["text", "image", "voice", "file", "system"]
 # tuple that drives the picker.
 EntityType = Literal[
     "job", "candidate", "company", "pipeline", "user", "team", "report",
-    "ai_artifact", "ai_elicitation",
+    "ai_artifact", "ai_elicitation", "ai_suggestions",
 ]
 
 
