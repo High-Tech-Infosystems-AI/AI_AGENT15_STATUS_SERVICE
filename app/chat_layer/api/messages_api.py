@@ -58,12 +58,40 @@ def _attachment_out(att) -> Optional[AttachmentOut]:
 def _resolve_refs_for(msg, db) -> list[dict]:
     """Resolve any structured `(type, id)` refs persisted on the message
     into full cards for the response. Cheap when the message has no refs.
+
+    Synthetic AI ref types (`ai_artifact`, `ai_elicitation`) bypass the
+    standard entity resolver — they carry their renderable metadata under
+    `params` and have dedicated FE components. We pass them through
+    unmolested so they reach the FE; otherwise the chart PNGs and the
+    elicitation forms produced by the AI agent get silently dropped.
     """
     raw = getattr(msg, "refs", None) or []
     if not raw:
         return []
     cards = entity_resolver.resolve(db, raw)
-    return [c for c in cards if c]
+    out: list[dict] = []
+    for original, card in zip(raw, cards):
+        if card:
+            out.append(card)
+            continue
+        if not isinstance(original, dict):
+            continue
+        rtype = (original.get("type") or "")
+        if rtype.startswith("ai_"):
+            params = original.get("params") or {}
+            out.append({
+                "type": rtype,
+                "id": original.get("id"),
+                "title": (
+                    params.get("title")
+                    or original.get("title")
+                    or None
+                ),
+                "deep_link": original.get("deep_link") or None,
+                "fields": [],
+                "params": params,
+            })
+    return out
 
 
 def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
