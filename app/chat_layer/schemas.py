@@ -4,8 +4,15 @@ from typing import Any, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
 MessageType = Literal["text", "image", "voice", "file", "system"]
+# `ai_artifact` (chart PNG / PDF the bot generated) and `ai_elicitation`
+# (an inline form the bot asked the user to fill in) are emitted by the
+# AI chat layer and must round-trip through the standard chat refs list
+# so the FE can render them. They are NOT searchable / pickable like
+# the other entity types — see `entity_resolver.ENTITY_TYPES` for the
+# tuple that drives the picker.
 EntityType = Literal[
     "job", "candidate", "company", "pipeline", "user", "team", "report",
+    "ai_artifact", "ai_elicitation",
 ]
 
 
@@ -30,14 +37,20 @@ class EntityField(BaseModel):
 
 
 class EntityCard(BaseModel):
-    """Resolver output — the renderable preview the FE shows in chat."""
+    """Resolver output — the renderable preview the FE shows in chat.
+
+    `title` and `deep_link` are required for standard entity types but
+    Optional here so synthetic AI refs (ai_artifact, ai_elicitation) can
+    flow through the same schema — those refs carry their renderable
+    metadata under `params` and have a dedicated FE component.
+    """
     type: EntityType
     id: Union[int, str]
-    title: str
+    title: Optional[str] = None
     subtitle: Optional[str] = None
     status: Optional[str] = None
     status_color: Optional[str] = None
-    deep_link: str
+    deep_link: Optional[str] = None
     avatar_url: Optional[str] = None
     fields: List[EntityField] = []
     # Optional secondary identifier that the FE may need alongside the
