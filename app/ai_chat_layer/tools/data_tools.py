@@ -276,6 +276,37 @@ _AMBIGUOUS_STAGE_TERMS = {
 }
 
 
+def _available_outcome_tags(ctx: ToolContext, job_id: Optional[int]) -> List[str]:
+    """Distinct `pipeline_stage_status.tag` values reachable from the job's
+    pipeline (or every pipeline if `job_id` is None).
+
+    Tags are how the dashboard categorizes candidates across stages —
+    e.g. SELECTED, OFFER_ACCEPTED, OFFER_RELEASED — so a user asking for
+    "top candidates who are selected" really wants candidates whose
+    current `candidate_pipeline_status.status` matches an option whose
+    tag is one of these. We expose them in the elicitation form alongside
+    stage names so the user can pick either.
+    """
+    if job_id is not None:
+        rows = ctx.mcp.query(
+            """
+            SELECT DISTINCT pss.tag AS tag
+              FROM pipeline_stage_status pss
+              JOIN pipeline_stages ps ON ps.id = pss.pipeline_stage_id
+              JOIN job_openings j ON j.pipeline_id = ps.pipeline_id
+             WHERE j.id = :jid AND pss.tag IS NOT NULL
+             ORDER BY pss.tag
+            """,
+            {"jid": job_id},
+        )
+    else:
+        rows = ctx.mcp.query(
+            "SELECT DISTINCT tag FROM pipeline_stage_status WHERE tag IS NOT NULL ORDER BY tag",
+            {},
+        )
+    return [r["tag"] for r in rows if r.get("tag")]
+
+
 def _available_stages(ctx: ToolContext, job_id: Optional[int]) -> List[str]:
     """Distinct stage names defined on the job's pipeline (or anywhere
     if `job_id` is None).
@@ -327,28 +358,52 @@ def _available_stages(ctx: ToolContext, job_id: Optional[int]) -> List[str]:
     return [r["stage"] for r in rows if r.get("stage")]
 
 
-def _stage_elicitation(stages: List[str], note_extra: str = "") -> Dict[str, Any]:
-    """Build the standard 'pick a stage' form when the user's intent is unclear."""
-    options = [
-        ElicitationOption(value=s, label=s) for s in stages
-    ]
+def _stage_elicitation(
+    stages: List[str],
+    outcome_tags: Optional[List[str]] = None,
+    note_extra: str = "",
+) -> Dict[str, Any]:
+    """Build a 'pick a stage or outcome' form when the user's intent is unclear.
+
+    Stages come from `pipeline_stages.name` (the pipeline's columns).
+    Outcome tags come from `pipeline_stage_status.tag` (cross-stage
+    categories like SELECTED / OFFER_ACCEPTED / REJECTED). Both flow
+    through the same select; the value uses a `outcome:` prefix for tag
+    selections so `_list_candidates` can route the filter correctly.
+    """
+    options: List[ElicitationOption] = []
+    for s in stages:
+        options.append(ElicitationOption(
+            value=s,
+            label=s,
+            description="Filter by pipeline stage",
+        ))
+    for t in outcome_tags or []:
+        # Pretty-print the tag enum (e.g. OFFER_ACCEPTED → "Offer Accepted")
+        pretty = t.replace("_", " ").title()
+        options.append(ElicitationOption(
+            value=f"outcome:{t}",
+            label=f"{pretty} (any stage)",
+            description="Filter by candidate outcome status",
+        ))
     spec = ElicitationSpec(
-        title="Which pipeline stage do you mean?",
+        title="Which pipeline stage or outcome do you mean?",
         intro=(
-            "I couldn't map your wording to one of the actual stages on this "
-            "pipeline. Pick the one you meant and I'll continue."
+            "I couldn't map your wording to a specific stage. Pick a stage "
+            "name (filters by pipeline column) or an outcome tag (filters "
+            "by accepted / rejected / offer-accepted across all stages)."
             + (f" {note_extra}" if note_extra else "")
         ),
         fields=[
             ElicitationField(
                 name="stage",
-                label="Stage",
+                label="Stage or outcome",
                 kind="select" if len(options) > 4 else "buttons",
                 options=options,
                 required=True,
             ),
         ],
-        submit_label="Use this stage",
+        submit_label="Use this filter",
     )
     return make_elicitation(spec)
 
@@ -362,25 +417,40 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
         where.append("cj.job_id = :job_id")
         params["job_id"] = args.job_id
 
-    # Server-side stage disambiguation. Stages live in `pipeline_stages`
-    # joined through `candidate_pipeline_status (latest=1)` — see the
-    # join below. If the user's wording doesn't exactly match a known
-    # stage we surface an elicitation form with the real options.
+    # Server-side stage / outcome disambiguation. Stages live in
+    # `pipeline_stages.name`; outcome tags live in
+    # `pipeline_stage_status.tag` and matter when the user asks
+    # "selected / accepted / rejected / offered" — those are
+    # cross-stage categories, not stages.
+    #   - Plain stage match → JOIN `pipeline_stages.name`
+    #   - "outcome:<TAG>"   → JOIN `pipeline_stage_status` and filter
+    #                          by `pss.tag = <TAG>` AND
+    #                          UPPER(cps.status) = UPPER(pss.option)
+    #   - Ambiguous wording → return elicitation form with both
+    #                          stages AND outcome tags as options
     if args.stage:
         stage_input = args.stage.strip()
-        actual = _available_stages(ctx, args.job_id)
-        actual_upper = {s.upper(): s for s in actual}
-        if stage_input.upper() in actual_upper:
-            params["stage"] = stage_input.upper()
-            where.append("UPPER(ps.name) = :stage")
-        elif (stage_input.lower() in _AMBIGUOUS_STAGE_TERMS) or actual:
-            return _stage_elicitation(
-                actual,
-                note_extra=f"You wrote: '{stage_input}'.",
-            )
+        if stage_input.lower().startswith("outcome:"):
+            tag_value = stage_input.split(":", 1)[1].strip()
+            where.append("pss.tag = :outcome_tag")
+            where.append("UPPER(cps.status) = UPPER(pss.option)")
+            params["outcome_tag"] = tag_value
         else:
-            where.append("UPPER(ps.name) = :stage")
-            params["stage"] = stage_input.upper()
+            actual = _available_stages(ctx, args.job_id)
+            actual_upper = {s.upper(): s for s in actual}
+            if stage_input.upper() in actual_upper:
+                params["stage"] = stage_input.upper()
+                where.append("UPPER(ps.name) = :stage")
+            elif (stage_input.lower() in _AMBIGUOUS_STAGE_TERMS) or actual:
+                outcome_tags = _available_outcome_tags(ctx, args.job_id)
+                return _stage_elicitation(
+                    actual,
+                    outcome_tags=outcome_tags,
+                    note_extra=f"You wrote: '{stage_input}'.",
+                )
+            else:
+                where.append("UPPER(ps.name) = :stage")
+                params["stage"] = stage_input.upper()
     if args.date_from:
         where.append("cj.applied_at >= :date_from")
         params["date_from"] = args.date_from
@@ -392,11 +462,18 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
     params.update(scope_params)
     expanding = ["scope_cands"] if "scope_cands" in scope_params else None
 
+    # When the filter is by outcome tag we need pipeline_stage_status in
+    # the join chain. INNER joins on these tables would hide candidates
+    # without a current status row, so we keep them LEFT joins for the
+    # plain "no filter" / stage-name path and tighten with a WHERE NOT
+    # NULL on cps.id only for outcome filtering.
     sql = f"""
         SELECT c.candidate_id AS id,
                c.candidate_name AS name,
                c.candidate_email AS email,
                ps.name AS stage,
+               cps.status AS status_option,
+               pss.tag AS outcome_tag,
                cj.applied_at, cj.job_id,
                j.title AS job_title, j.job_id AS job_external_id
           FROM candidates c
@@ -405,6 +482,9 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
           LEFT JOIN candidate_pipeline_status cps
                  ON cps.candidate_job_id = cj.id AND cps.latest = 1
           LEFT JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
+          LEFT JOIN pipeline_stage_status pss
+                 ON pss.pipeline_stage_id = cps.pipeline_stage_id
+                AND UPPER(pss.option) = UPPER(cps.status)
          WHERE {' AND '.join(where)} {scope_clause}
          ORDER BY cj.applied_at DESC
          LIMIT :_limit
@@ -418,6 +498,8 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
             "name": (r.get("name") or r.get("email") or f"Candidate {r['id']}"),
             "email": r.get("email"),
             "stage": r.get("stage"),
+            "status": r.get("status_option"),
+            "outcome": r.get("outcome_tag"),
             "applied_at": str(r.get("applied_at")) if r.get("applied_at") else None,
             "job_id": r.get("job_id"),
             "job_title": r.get("job_title"),
