@@ -32,7 +32,11 @@ logger = logging.getLogger("app_logger")
 class CsvExportArgs(BaseModel):
     title: str = Field(..., max_length=160)
     columns: List[str] = Field(..., min_length=1, max_length=40)
-    rows: List[List[Any]] = Field(default_factory=list, max_length=5000)
+    # Nested arrays must declare an inner element type for Gemini's
+    # tool-schema validator (it rejects `items.items: missing field`).
+    # Strings are universal — the model can stringify any scalar before
+    # passing rows in, and we already stringify on write below.
+    rows: List[List[str]] = Field(default_factory=list, max_length=5000)
 
 
 def _export_csv(ctx: ToolContext, args: CsvExportArgs) -> Dict[str, Any]:
