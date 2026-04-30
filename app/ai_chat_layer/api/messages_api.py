@@ -47,9 +47,36 @@ def _publish_event(user_id: int, type_: str, data: Dict[str, Any]) -> None:
 def _run_in_background(*, prompt: str, refs: List[Dict[str, Any]],
                        conversation_id: int, user: Dict[str, Any],
                        task_id: str, ip_address: str | None) -> None:
-    """Run a single agent turn end-to-end in a worker thread."""
+    """Run a single agent turn end-to-end in a worker thread.
+
+    Token streaming: the agent calls our `stream_cb` for every text
+    fragment it receives from Gemini; we forward each fragment as an
+    `ai.token` event so the FE bubble grows live. Mid-stream entity /
+    chart refs flow through `refs_cb` as `ai.refs` events so cards
+    appear next to the running text instead of all at the end.
+    """
     user_id = int(user.get("user_id"))
     db: Session = SessionLocal()
+
+    def _on_delta(fragment: str) -> None:
+        if not fragment:
+            return
+        _publish_event(user_id, "ai.token", {
+            "task_id": task_id,
+            "conversation_id": conversation_id,
+            "delta": fragment,
+            "final": False,
+        })
+
+    def _on_refs(new_refs: List[Dict[str, Any]]) -> None:
+        if not new_refs:
+            return
+        _publish_event(user_id, "ai.refs", {
+            "task_id": task_id,
+            "conversation_id": conversation_id,
+            "refs": new_refs,
+        })
+
     try:
         _publish_event(user_id, "ai.start", {
             "task_id": task_id, "conversation_id": conversation_id,
@@ -57,10 +84,12 @@ def _run_in_background(*, prompt: str, refs: List[Dict[str, Any]],
         result = ai_agent.run_turn(
             db=db, user=user, prompt=prompt, refs=refs,
             conversation_id=conversation_id, ip_address=ip_address,
+            stream_cb=_on_delta,
+            refs_cb=_on_refs,
         )
         _publish_event(user_id, "ai.token", {
             "task_id": task_id, "conversation_id": conversation_id,
-            "delta": result.get("text") or "",
+            "delta": "",
             "final": True,
         })
         _publish_event(user_id, "ai.complete", {
