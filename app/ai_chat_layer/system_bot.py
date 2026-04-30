@@ -15,19 +15,26 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger("app_logger")
 
 AI_BOT_USERNAME = "ai_assistant"
-AI_BOT_DISPLAY_NAME = "AI Assistant"
+AI_BOT_DISPLAY_NAME = "HTI Chat"
 
 _BOT_USER_ID: Optional[int] = None
 _BOT_LOCK = Lock()
 
 
 def ensure_ai_bot_user(db: Session) -> int:
-    """Return the bot user_id, creating it if missing. Idempotent + cached."""
+    """Return the bot user_id, creating it if missing. Idempotent + cached.
+
+    Also reconciles the display name on every cold start: if the bot row
+    already exists with a different name (e.g. an older "AI Assistant"
+    deployment), we update it to the current `AI_BOT_DISPLAY_NAME` so the
+    chat sidebar shows the right brand without manual intervention.
+    """
     global _BOT_USER_ID
     with _BOT_LOCK:
         if _BOT_USER_ID is not None:
             return _BOT_USER_ID
 
+        from sqlalchemy import text
         from app.chat_layer._synthetic_user import provision_synthetic_user
 
         try:
@@ -40,7 +47,29 @@ def ensure_ai_bot_user(db: Session) -> int:
         except Exception:
             db.rollback()
             raise
-        logger.info("AI Assistant user provisioned id=%s", _BOT_USER_ID)
+
+        # Keep the display name in sync after a rebrand. Quick guarded UPDATE
+        # — runs only when the live row's `name` column differs.
+        try:
+            row = db.execute(
+                text("SELECT name FROM users WHERE id = :uid LIMIT 1"),
+                {"uid": _BOT_USER_ID},
+            ).first()
+            if row and (row[0] or "") != AI_BOT_DISPLAY_NAME:
+                db.execute(
+                    text("UPDATE users SET name = :n WHERE id = :uid"),
+                    {"n": AI_BOT_DISPLAY_NAME, "uid": _BOT_USER_ID},
+                )
+                db.commit()
+                logger.info("AI bot display name updated to %r", AI_BOT_DISPLAY_NAME)
+        except Exception as exc:
+            logger.warning("AI bot name reconcile skipped: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        logger.info("HTI Chat bot user provisioned id=%s", _BOT_USER_ID)
         return _BOT_USER_ID
 
 
