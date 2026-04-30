@@ -108,6 +108,24 @@ def _collect_message_refs(refs_for_output: List[Dict[str, Any]]) -> List[Dict[st
     return out
 
 
+TOOL_LABELS: Dict[str, str] = {
+    "list_jobs": "Listing jobs",
+    "job_detail": "Fetching job details",
+    "list_candidates": "Looking up candidates",
+    "pipeline_status_for_job": "Reading pipeline status",
+    "count_candidates_by_stage": "Counting candidates by stage",
+    "recruiter_metrics": "Computing recruiter metrics",
+    "top_recruiters": "Building recruiter leaderboard",
+    "company_jobs_summary": "Summarizing companies",
+    "search_entities": "Searching",
+    "dashboard_data": "Preparing chart",
+    "render_chart": "Preparing chart",
+    "render_adhoc_chart": "Drawing chart",
+    "generate_pdf_report": "Generating PDF report",
+    "whatif_throughput": "Running what-if simulation",
+}
+
+
 def run_turn(
     *,
     db: Session,
@@ -118,6 +136,7 @@ def run_turn(
     ip_address: Optional[str] = None,
     stream_cb: Optional[Callable[[str], None]] = None,
     refs_cb: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    status_cb: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Execute one turn. Returns the persisted message + metadata."""
     user_id = int(user.get("user_id"))
@@ -286,6 +305,15 @@ def run_turn(
                 name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
                 args = call.get("args") if isinstance(call, dict) else getattr(call, "args", {})
                 call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+                # Surface a human-friendly status to the UI so the user
+                # sees "Fetching job details…" instead of a static
+                # "Thinking…" while we hit the data layer.
+                if status_cb:
+                    label = TOOL_LABELS.get(name or "", "Working") + "…"
+                    try:
+                        status_cb(label)
+                    except Exception:
+                        logger.exception("status_cb failed")
                 tool = tool_lookup.get(name)
                 if tool is None:
                     out_payload = {"error": f"unknown tool: {name}"}
@@ -298,6 +326,13 @@ def run_turn(
                     content=str(out_payload),
                     tool_call_id=call_id or name or "tool",
                 ))
+            # After the tool round, hint that we're composing the answer
+            # — this is the bridge state between data fetch and streaming.
+            if calls and status_cb:
+                try:
+                    status_cb("Composing reply…")
+                except Exception:
+                    pass
             # After each tool round, surface any newly added refs so the
             # FE can render entity / chart cards mid-stream — the user
             # sees the cards appear as soon as their tool produces them.
