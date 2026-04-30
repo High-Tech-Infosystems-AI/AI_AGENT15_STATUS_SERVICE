@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 
+from app.ai_chat_layer.mcp_client import SchemaUnavailableError
 from app.ai_chat_layer.mcp_server.elicitation import (
     ElicitationField, ElicitationOption, ElicitationRequired,
     ElicitationSpec, make_elicitation,
@@ -90,6 +91,29 @@ def _timed(ctx: ToolContext, name: str, args: Dict[str, Any], fn):
         out = _handle_elicitation(ctx, payload)
         ctx.add_trace(name, args, int((time.monotonic() - start) * 1000), True)
         return out
+    except SchemaUnavailableError as exc:
+        # The query referenced a column / table that doesn't exist in the
+        # deployed schema. Surface a structured "data unavailable" payload
+        # so the model summarizes what it CAN answer instead of refusing.
+        ctx.add_trace(
+            name, args, int((time.monotonic() - start) * 1000), False,
+            f"schema_unavailable: {exc.missing or 'unknown'}",
+        )
+        logger.warning("tool %s schema unavailable: %s", name, exc.missing)
+        return {
+            "data_unavailable": True,
+            "reason": "schema_mismatch",
+            "missing": exc.missing,
+            "items": [],
+            "note": (
+                f"The field/table '{exc.missing}' isn't tracked in this "
+                "workspace. Continue the answer with whatever other data "
+                "you have — do not refuse the request."
+                if exc.missing else
+                "This deployment's schema doesn't include the data the tool "
+                "needed. Continue with a partial answer; do not refuse."
+            ),
+        }
     except Exception as exc:
         ctx.add_trace(name, args, int((time.monotonic() - start) * 1000), False, str(exc))
         logger.exception("tool %s failed", name)
@@ -253,19 +277,53 @@ _AMBIGUOUS_STAGE_TERMS = {
 
 
 def _available_stages(ctx: ToolContext, job_id: Optional[int]) -> List[str]:
-    """Distinct stages currently on `candidate_jobs` (optionally for one job)."""
+    """Distinct stage names defined on the job's pipeline (or anywhere
+    if `job_id` is None).
+
+    The deployed schema tracks per-(candidate, job) stage in
+    `candidate_pipeline_status (candidate_job_id, pipeline_stage_id,
+    latest)` linked to `pipeline_stages (name, `order`, pipeline_id)` —
+    NOT a `stage` column on `candidate_jobs`. We pull stages defined on
+    the job's pipeline so the elicitation form can offer every legitimate
+    option, including stages that don't have candidates yet.
+    """
     if job_id is not None:
         rows = ctx.mcp.query(
-            "SELECT DISTINCT stage FROM candidate_jobs "
-            "WHERE job_id = :jid AND stage IS NOT NULL ORDER BY stage",
+            """
+            SELECT ps.name AS stage
+              FROM pipeline_stages ps
+              JOIN job_openings j ON j.pipeline_id = ps.pipeline_id
+             WHERE j.id = :jid AND ps.name IS NOT NULL
+             ORDER BY ps.`order`, ps.id
+            """,
             {"jid": job_id},
         )
-    else:
+        if rows:
+            return [r["stage"] for r in rows if r.get("stage")]
+        # Fallback when the job has no pipeline_id yet — surface stages
+        # that actually appear in the data for that job.
         rows = ctx.mcp.query(
-            "SELECT DISTINCT stage FROM candidate_jobs "
-            "WHERE stage IS NOT NULL ORDER BY stage",
-            {},
+            """
+            SELECT DISTINCT ps.name AS stage
+              FROM candidate_pipeline_status cps
+              JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
+              JOIN candidate_jobs cj ON cj.id = cps.candidate_job_id
+             WHERE cj.job_id = :jid AND cps.latest = 1
+             ORDER BY ps.`order`, ps.id
+            """,
+            {"jid": job_id},
         )
+        return [r["stage"] for r in rows if r.get("stage")]
+
+    rows = ctx.mcp.query(
+        """
+        SELECT DISTINCT ps.name AS stage
+          FROM pipeline_stages ps
+         WHERE ps.name IS NOT NULL
+         ORDER BY ps.`order`, ps.id
+        """,
+        {},
+    )
     return [r["stage"] for r in rows if r.get("stage")]
 
 
@@ -304,27 +362,24 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
         where.append("cj.job_id = :job_id")
         params["job_id"] = args.job_id
 
-    # Server-side stage disambiguation. If the model passed a stage hint
-    # that doesn't match any real value in the data (or is one of the
-    # vague synonyms users commonly type), surface an elicitation form
-    # instead of returning an empty list silently.
+    # Server-side stage disambiguation. Stages live in `pipeline_stages`
+    # joined through `candidate_pipeline_status (latest=1)` — see the
+    # join below. If the user's wording doesn't exactly match a known
+    # stage we surface an elicitation form with the real options.
     if args.stage:
         stage_input = args.stage.strip()
         actual = _available_stages(ctx, args.job_id)
         actual_upper = {s.upper(): s for s in actual}
         if stage_input.upper() in actual_upper:
-            # Normalize to the canonical casing used in the DB.
             params["stage"] = stage_input.upper()
-            where.append("UPPER(cj.stage) = :stage")
+            where.append("UPPER(ps.name) = :stage")
         elif (stage_input.lower() in _AMBIGUOUS_STAGE_TERMS) or actual:
             return _stage_elicitation(
                 actual,
                 note_extra=f"You wrote: '{stage_input}'.",
             )
-        # If `actual` is empty (no candidates yet for this job) we just
-        # let the query run with the user's literal stage and return [].
         else:
-            where.append("UPPER(cj.stage) = :stage")
+            where.append("UPPER(ps.name) = :stage")
             params["stage"] = stage_input.upper()
     if args.date_from:
         where.append("cj.applied_at >= :date_from")
@@ -341,11 +396,15 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
         SELECT c.candidate_id AS id,
                c.candidate_name AS name,
                c.candidate_email AS email,
-               cj.stage, cj.applied_at, cj.job_id,
+               ps.name AS stage,
+               cj.applied_at, cj.job_id,
                j.title AS job_title, j.job_id AS job_external_id
           FROM candidates c
           JOIN candidate_jobs cj ON cj.candidate_id = c.candidate_id
           LEFT JOIN job_openings j ON j.id = cj.job_id
+          LEFT JOIN candidate_pipeline_status cps
+                 ON cps.candidate_job_id = cj.id AND cps.latest = 1
+          LEFT JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
          WHERE {' AND '.join(where)} {scope_clause}
          ORDER BY cj.applied_at DESC
          LIMIT :_limit
@@ -370,21 +429,48 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
 def _pipeline_status_for_job(ctx: ToolContext, args: JobOnlyArgs) -> Dict[str, Any]:
     if not ctx.scope.has_job(args.job_id):
         return {"access_denied": True, "type": "job", "id": args.job_id}
+    ctx.add_output_ref({"type": "job", "id": args.job_id})
+    # Per-stage counts via the proper join through candidate_pipeline_status
+    # (`latest=1` keeps only the candidate's current stage row). Stage
+    # display names come from pipeline_stages.name; ordering follows the
+    # pipeline's `order` column so the funnel reads top-to-bottom the
+    # same way the dashboard funnel does.
     rows = ctx.mcp.query(
         """
-        SELECT cj.stage AS stage, COUNT(*) AS cnt
-          FROM candidate_jobs cj
+        SELECT ps.id   AS stage_id,
+               ps.name AS stage,
+               ps.`order` AS stage_order,
+               COUNT(*) AS cnt
+          FROM candidate_pipeline_status cps
+          JOIN candidate_jobs cj ON cj.id = cps.candidate_job_id
+          JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
          WHERE cj.job_id = :jid
-         GROUP BY cj.stage
-         ORDER BY cnt DESC
+           AND cps.latest = 1
+         GROUP BY ps.id, ps.name, ps.`order`
+         ORDER BY ps.`order`, ps.id
         """,
         {"jid": args.job_id},
     )
-    by_stage = [{"stage": r.get("stage") or "Unknown", "count": int(r.get("cnt") or 0)}
-                for r in rows]
-    ctx.add_output_ref({"type": "job", "id": args.job_id})
-    return {"job_id": args.job_id, "by_stage": by_stage,
-            "total": sum(s["count"] for s in by_stage)}
+    by_stage = [
+        {"stage_id": r.get("stage_id"),
+         "stage": r.get("stage") or "Unknown",
+         "count": int(r.get("cnt") or 0)}
+        for r in rows
+    ]
+    # Always include the total applicant count as a sanity number — some
+    # rows may not yet have a candidate_pipeline_status (e.g. brand-new
+    # applications), so total >= sum(by_stage).
+    total_rows = ctx.mcp.query(
+        "SELECT COUNT(*) AS cnt FROM candidate_jobs WHERE job_id = :jid",
+        {"jid": args.job_id},
+    )
+    total_applicants = int(total_rows[0].get("cnt") or 0) if total_rows else 0
+    return {
+        "job_id": args.job_id,
+        "by_stage": by_stage,
+        "in_pipeline": sum(s["count"] for s in by_stage),
+        "total_applicants": total_applicants,
+    }
 
 
 def _count_candidates_by_stage(ctx: ToolContext, args: CountByStageArgs) -> Dict[str, Any]:
@@ -412,17 +498,25 @@ def _count_candidates_by_stage(ctx: ToolContext, args: CountByStageArgs) -> Dict
     expanding = ["scope_jobs"] if "scope_jobs" in scope_params else None
 
     sql = f"""
-        SELECT cj.stage AS stage, COUNT(*) AS cnt
-          FROM candidate_jobs cj
-          JOIN job_openings j ON j.id = cj.job_id
-         WHERE {' AND '.join(where)} {scope_clause}
-         GROUP BY cj.stage
-         ORDER BY cnt DESC
+        SELECT ps.id   AS stage_id,
+               ps.name AS stage,
+               ps.`order` AS stage_order,
+               COUNT(*) AS cnt
+          FROM candidate_pipeline_status cps
+          JOIN candidate_jobs cj ON cj.id = cps.candidate_job_id
+          JOIN job_openings   j  ON j.id  = cj.job_id
+          JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
+         WHERE cps.latest = 1
+           AND {' AND '.join(where)} {scope_clause}
+         GROUP BY ps.id, ps.name, ps.`order`
+         ORDER BY ps.`order`, ps.id
     """
     rows = ctx.mcp.query(sql, params, expanding_keys=expanding)
     return {
         "by_stage": [
-            {"stage": r.get("stage") or "Unknown", "count": int(r.get("cnt") or 0)}
+            {"stage_id": r.get("stage_id"),
+             "stage": r.get("stage") or "Unknown",
+             "count": int(r.get("cnt") or 0)}
             for r in rows
         ],
     }
@@ -442,21 +536,31 @@ def _recruiter_metrics(ctx: ToolContext, args: RecruiterMetricsArgs) -> Dict[str
     if args.date_to:
         where_dt += " AND cj.applied_at <= :date_to"
         params["date_to"] = args.date_to
+    ctx.add_output_ref({"type": "user", "id": target_uid})
     rows = ctx.mcp.query(
         f"""
-        SELECT cj.stage AS stage, COUNT(*) AS cnt
-          FROM candidate_jobs cj
+        SELECT ps.id   AS stage_id,
+               ps.name AS stage,
+               ps.`order` AS stage_order,
+               COUNT(*) AS cnt
+          FROM candidate_pipeline_status cps
+          JOIN candidate_jobs cj ON cj.id = cps.candidate_job_id
           JOIN user_jobs_assigned uja ON uja.job_id = cj.job_id
+          JOIN pipeline_stages ps ON ps.id = cps.pipeline_stage_id
          WHERE uja.user_id = :uid
+           AND cps.latest = 1
            {where_dt}
-         GROUP BY cj.stage
-         ORDER BY cnt DESC
+         GROUP BY ps.id, ps.name, ps.`order`
+         ORDER BY ps.`order`, ps.id
         """,
         params,
     )
-    by_stage = [{"stage": r.get("stage") or "Unknown", "count": int(r.get("cnt") or 0)}
-                for r in rows]
-    ctx.add_output_ref({"type": "user", "id": target_uid})
+    by_stage = [
+        {"stage_id": r.get("stage_id"),
+         "stage": r.get("stage") or "Unknown",
+         "count": int(r.get("cnt") or 0)}
+        for r in rows
+    ]
     return {"user_id": target_uid, "by_stage": by_stage,
             "total": sum(s["count"] for s in by_stage)}
 
@@ -594,21 +698,20 @@ def _dashboard_data(ctx: ToolContext, args: DashboardArgs) -> Dict[str, Any]:
     """Convenience alias for `render_chart` — emits the same report ref so
     the FE renders the matching interactive dashboard chart inline. Kept
     so the model can pick either name without producing a no-op."""
-    params = {
-        "date_from": args.date_from, "date_to": args.date_to,
-        "company_id": args.company_id, "job_id": args.job_id,
-        "user_id": args.user_id,
-    }
-    params = {k: v for k, v in params.items() if v is not None}
-    ref = {
-        "type": "report",
-        "id": args.chart_id,
-        "title": args.chart_id.replace("-", " ").title(),
-        "params": params,
-    }
-    ctx.add_output_ref(ref)
-    return {"rendered": True, "chart_id": args.chart_id, "params": params,
-            "ref": ref, "interactive": True}
+    # Delegate to the chart tool so name-resolution + ref shape stay in
+    # exactly one place.
+    from app.ai_chat_layer.tools.chart_tools import (
+        RenderChartArgs as _RCA, _render_chart,
+    )
+    return _render_chart(
+        ctx,
+        _RCA(
+            chart_id=args.chart_id,
+            date_from=args.date_from, date_to=args.date_to,
+            company_id=args.company_id, job_id=args.job_id,
+            user_id=args.user_id,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

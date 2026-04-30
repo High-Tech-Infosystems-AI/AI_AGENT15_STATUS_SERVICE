@@ -61,16 +61,61 @@ class AdhocChartArgs(BaseModel):
     y_label: Optional[str] = None
 
 
+def _resolve_filter_names(
+    ctx: ToolContext,
+    *,
+    job_id: Optional[int],
+    company_id: Optional[int],
+    user_id: Optional[int],
+) -> Dict[str, Optional[str]]:
+    """Look up display names for the chart's filter ids so the chip strip
+    shows e.g. "Job: Customer Service Associate" instead of "Job: #171".
+    Returns a dict with optional `job_name` / `company_name` / `user_name`
+    keys; missing rows simply omit their name entry."""
+    out: Dict[str, Optional[str]] = {}
+    try:
+        if job_id is not None:
+            rows = ctx.mcp.query(
+                "SELECT title FROM job_openings WHERE id = :id LIMIT 1",
+                {"id": int(job_id)},
+            )
+            if rows and rows[0].get("title"):
+                out["job_name"] = str(rows[0]["title"])
+        if company_id is not None:
+            rows = ctx.mcp.query(
+                "SELECT company_name FROM companies WHERE id = :id LIMIT 1",
+                {"id": int(company_id)},
+            )
+            if rows and rows[0].get("company_name"):
+                out["company_name"] = str(rows[0]["company_name"])
+        if user_id is not None:
+            rows = ctx.mcp.query(
+                "SELECT name, username FROM users WHERE id = :id LIMIT 1",
+                {"id": int(user_id)},
+            )
+            if rows:
+                m = rows[0]
+                out["user_name"] = str(m.get("name") or m.get("username") or "")
+    except Exception as exc:  # name lookup is best-effort
+        logger.warning("chart filter-name resolve failed: %s", exc)
+    return out
+
+
 def _render_chart(ctx: ToolContext, args: RenderChartArgs) -> Dict[str, Any]:
     if args.chart_id not in KNOWN_CHART_IDS:
         return {"error": f"unknown chart_id: {args.chart_id}",
                 "known": sorted(KNOWN_CHART_IDS)}
-    params = {
+    params: Dict[str, Any] = {
         "date_from": args.date_from, "date_to": args.date_to,
         "company_id": args.company_id, "job_id": args.job_id,
         "user_id": args.user_id,
     }
     params = {k: v for k, v in params.items() if v is not None}
+    # Resolve human-readable names for the chip strip.
+    params.update(_resolve_filter_names(
+        ctx,
+        job_id=args.job_id, company_id=args.company_id, user_id=args.user_id,
+    ))
     # Emit a structured report ref the FE renders via ReportSnapshot.
     ref = {
         "type": "report",
