@@ -19,6 +19,10 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 
+from app.ai_chat_layer.mcp_server.elicitation import (
+    ElicitationField, ElicitationOption, ElicitationRequired,
+    ElicitationSpec, make_elicitation,
+)
 from app.ai_chat_layer.tools.context import ToolContext
 
 logger = logging.getLogger("app_logger")
@@ -47,10 +51,43 @@ def _scope_candidate_filter(ctx: ToolContext, alias: str = "c") -> tuple[str, di
     return f" AND {alias}.candidate_id IN :scope_cands", {"scope_cands": list(ctx.scope.candidate_ids)}
 
 
+def _handle_elicitation(ctx: ToolContext, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """If a tool's return contains `elicitation_required`, attach the form
+    spec to the reply as an `ai_elicitation` ref and substitute a small
+    "pending" payload for the model so it acknowledges and waits."""
+    spec = payload.get("elicitation_required")
+    if not isinstance(spec, dict):
+        return payload
+    ctx.add_output_ref({
+        "type": "ai_elicitation",
+        "id": spec.get("id"),
+        "params": spec,
+    })
+    return {
+        "elicitation_pending": True,
+        "elicitation_id": spec.get("id"),
+        "title": spec.get("title"),
+        "note": payload.get("note") or (
+            "Awaiting user input. Reply with a brief one-line acknowledgment "
+            "and stop — the user will submit the form and your next turn "
+            "will receive their answer."
+        ),
+    }
+
+
 def _timed(ctx: ToolContext, name: str, args: Dict[str, Any], fn):
     start = time.monotonic()
     try:
         out = fn()
+        # Server-side elicitation: tools may either return the dict shape
+        # or raise ElicitationRequired — both convert to the same ref.
+        if isinstance(out, dict):
+            out = _handle_elicitation(ctx, out)
+        ctx.add_trace(name, args, int((time.monotonic() - start) * 1000), True)
+        return out
+    except ElicitationRequired as exc:
+        payload = make_elicitation(exc.spec, note=exc.note)
+        out = _handle_elicitation(ctx, payload)
         ctx.add_trace(name, args, int((time.monotonic() - start) * 1000), True)
         return out
     except Exception as exc:
@@ -209,6 +246,55 @@ def _job_detail(ctx: ToolContext, args: JobOnlyArgs) -> Dict[str, Any]:
     }
 
 
+_AMBIGUOUS_STAGE_TERMS = {
+    "selected", "shortlisted", "best", "top", "good",
+    "qualified", "approved", "final", "winning",
+}
+
+
+def _available_stages(ctx: ToolContext, job_id: Optional[int]) -> List[str]:
+    """Distinct stages currently on `candidate_jobs` (optionally for one job)."""
+    if job_id is not None:
+        rows = ctx.mcp.query(
+            "SELECT DISTINCT stage FROM candidate_jobs "
+            "WHERE job_id = :jid AND stage IS NOT NULL ORDER BY stage",
+            {"jid": job_id},
+        )
+    else:
+        rows = ctx.mcp.query(
+            "SELECT DISTINCT stage FROM candidate_jobs "
+            "WHERE stage IS NOT NULL ORDER BY stage",
+            {},
+        )
+    return [r["stage"] for r in rows if r.get("stage")]
+
+
+def _stage_elicitation(stages: List[str], note_extra: str = "") -> Dict[str, Any]:
+    """Build the standard 'pick a stage' form when the user's intent is unclear."""
+    options = [
+        ElicitationOption(value=s, label=s) for s in stages
+    ]
+    spec = ElicitationSpec(
+        title="Which pipeline stage do you mean?",
+        intro=(
+            "I couldn't map your wording to one of the actual stages on this "
+            "pipeline. Pick the one you meant and I'll continue."
+            + (f" {note_extra}" if note_extra else "")
+        ),
+        fields=[
+            ElicitationField(
+                name="stage",
+                label="Stage",
+                kind="select" if len(options) > 4 else "buttons",
+                options=options,
+                required=True,
+            ),
+        ],
+        submit_label="Use this stage",
+    )
+    return make_elicitation(spec)
+
+
 def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, Any]:
     where = ["1=1"]
     params: Dict[str, Any] = {}
@@ -217,9 +303,29 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
             return {"access_denied": True, "type": "job", "id": args.job_id}
         where.append("cj.job_id = :job_id")
         params["job_id"] = args.job_id
+
+    # Server-side stage disambiguation. If the model passed a stage hint
+    # that doesn't match any real value in the data (or is one of the
+    # vague synonyms users commonly type), surface an elicitation form
+    # instead of returning an empty list silently.
     if args.stage:
-        where.append("UPPER(cj.stage) = :stage")
-        params["stage"] = args.stage.upper()
+        stage_input = args.stage.strip()
+        actual = _available_stages(ctx, args.job_id)
+        actual_upper = {s.upper(): s for s in actual}
+        if stage_input.upper() in actual_upper:
+            # Normalize to the canonical casing used in the DB.
+            params["stage"] = stage_input.upper()
+            where.append("UPPER(cj.stage) = :stage")
+        elif (stage_input.lower() in _AMBIGUOUS_STAGE_TERMS) or actual:
+            return _stage_elicitation(
+                actual,
+                note_extra=f"You wrote: '{stage_input}'.",
+            )
+        # If `actual` is empty (no candidates yet for this job) we just
+        # let the query run with the user's literal stage and return [].
+        else:
+            where.append("UPPER(cj.stage) = :stage")
+            params["stage"] = stage_input.upper()
     if args.date_from:
         where.append("cj.applied_at >= :date_from")
         params["date_from"] = args.date_from

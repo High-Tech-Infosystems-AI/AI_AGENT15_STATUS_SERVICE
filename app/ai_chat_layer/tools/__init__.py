@@ -19,7 +19,6 @@ from typing import Any, List
 from app.ai_chat_layer.tools import (
     chart_tools,
     data_tools,
-    elicit_tools,
     pdf_tools,
     simulation_tools,
 )
@@ -27,11 +26,16 @@ from app.ai_chat_layer.tools.context import ToolContext  # noqa: F401
 
 
 def get_registry(ctx) -> List[Any]:
-    """Return all tool definitions bound to the request context."""
+    """Return all tool definitions bound to the request context.
+
+    Note — elicitation is NOT a model-callable tool. It originates from
+    inside data tools (the MCP server layer) when a tool detects an
+    ambiguous arg, and is forwarded to the chat as an `ai_elicitation`
+    ref by the tool wrapper in `data_tools._handle_elicitation`.
+    """
     tools: List[Any] = []
     tools.extend(data_tools.build_tools(ctx))
     tools.extend(chart_tools.build_tools(ctx))
     tools.extend(pdf_tools.build_tools(ctx))
     tools.extend(simulation_tools.build_tools(ctx))
-    tools.extend(elicit_tools.build_tools(ctx))
     return tools
