@@ -121,7 +121,9 @@ TABLES: Dict[str, TableMeta] = {
             ColumnMeta("id", "int", "Integer PK"),
             ColumnMeta("candidate_id", "string", "FK candidates.candidate_id"),
             ColumnMeta("job_id", "int", "FK job_openings.id"),
-            ColumnMeta("applied_at", "datetime", "Application timestamp"),
+            ColumnMeta("created_at", "datetime",
+                       "Application timestamp (when the candidate was added to the job)."),
+            ColumnMeta("created_by", "int", "FK users.id of the recruiter who added them."),
         ],
     ),
     "candidate_pipeline_status": TableMeta(
