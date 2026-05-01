@@ -58,7 +58,38 @@ def _run_in_background(*, prompt: str, refs: List[Dict[str, Any]],
     user_id = int(user.get("user_id"))
     db: Session = SessionLocal()
 
-    def _on_delta(fragment: str) -> None:
+    def _on_delta(fragment) -> None:
+        # The agent sends either a plain text fragment (per-chunk) or
+        # a control dict at iteration boundaries:
+        #   {"step_done": True, "step_index": int, "is_final": bool,
+        #    "elapsed_ms": int}
+        # Both flow through the same `ai.token` channel so the FE
+        # handler stays tight; the FE branches on the structured
+        # fields. `is_final=True` tells the FE the streamed text was
+        # the answer, not thinking — the thinking panel collapses
+        # and the body keeps the streamed markdown.
+        if isinstance(fragment, dict):
+            if fragment.get("step_done"):
+                _publish_event(user_id, "ai.token", {
+                    "task_id": task_id,
+                    "conversation_id": conversation_id,
+                    "delta": "",
+                    "step_done": True,
+                    "step_index": fragment.get("step_index"),
+                    "is_final": bool(fragment.get("is_final")),
+                    "elapsed_ms": fragment.get("elapsed_ms"),
+                    "final": False,
+                })
+            elif fragment.get("reset"):
+                # Legacy callers — keep working.
+                _publish_event(user_id, "ai.token", {
+                    "task_id": task_id,
+                    "conversation_id": conversation_id,
+                    "delta": "",
+                    "reset": True,
+                    "final": False,
+                })
+            return
         if not fragment:
             return
         _publish_event(user_id, "ai.token", {

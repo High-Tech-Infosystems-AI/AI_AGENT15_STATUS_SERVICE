@@ -158,7 +158,7 @@ def _evaluate_no_activity(db, user, params: Dict[str, Any]) -> Optional[str]:
            AND UPPER(j.status) = 'ACTIVE'
            AND NOT EXISTS (
                SELECT 1 FROM candidate_jobs cj
-                WHERE cj.job_id = j.id AND cj.applied_at >= :cutoff
+                WHERE cj.job_id = j.id AND cj.created_at >= :cutoff
            )
          LIMIT 10
         """),

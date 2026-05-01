@@ -45,7 +45,7 @@ def _today_iso() -> str:
     return datetime.utcnow().date().isoformat()
 
 
-def _coerce_text(content: Any) -> str:
+def _coerce_text(content: Any, *, strip: bool = True) -> str:
     """Normalize a LangChain message `content` into a plain string.
 
     Gemini can return the model output in three shapes:
@@ -54,13 +54,15 @@ def _coerce_text(content: Any) -> str:
             [{"type": "text", "text": "..."}, ...],
       - a list of strings (rare, from streaming concatenations).
 
-    We collapse all three to a stripped string so downstream code can
-    reliably index into it.
+    Pass ``strip=False`` for streaming fragments — otherwise the
+    boundary whitespace between adjacent chunks gets eaten and the
+    user sees "fewwords" instead of "few words" while the answer is
+    streaming in.
     """
     if content is None:
         return ""
     if isinstance(content, str):
-        return content.strip()
+        return content.strip() if strip else content
     if isinstance(content, list):
         parts: List[str] = []
         for block in content:
@@ -70,8 +72,9 @@ def _coerce_text(content: Any) -> str:
                 t = block.get("text") or block.get("content")
                 if isinstance(t, str):
                     parts.append(t)
-        return "\n".join(p for p in parts if p).strip()
-    return str(content).strip()
+        joined = "\n".join(p for p in parts if p)
+        return joined.strip() if strip else joined
+    return str(content).strip() if strip else str(content)
 
 
 def _resolve_ref_cards(db: Session, refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -329,7 +332,7 @@ def run_turn(
     refs: Optional[List[Dict[str, Any]]],
     conversation_id: int,
     ip_address: Optional[str] = None,
-    stream_cb: Optional[Callable[[str], None]] = None,
+    stream_cb: Optional[Callable[[Union[str, Dict[str, Any]]], None]] = None,
     refs_cb: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     status_cb: Optional[Callable[[Union[str, Dict[str, Any]]], None]] = None,
 ) -> Dict[str, Any]:
@@ -471,7 +474,9 @@ def run_turn(
                 # Provider doesn't support .stream() on bound tools — fall
                 # back to a single .invoke() call.
                 resp = client.invoke(messages_so_far)
-                content_text = _coerce_text(getattr(resp, "content", None))
+                content_text = _coerce_text(
+                    getattr(resp, "content", None), strip=False,
+                )
                 if stream_cb and content_text:
                     try:
                         stream_cb(content_text)
@@ -481,7 +486,11 @@ def run_turn(
             for chunk in stream_iter:
                 # AIMessageChunk supports `chunk + chunk` to accumulate.
                 assembled = chunk if assembled is None else assembled + chunk
-                fragment = _coerce_text(getattr(chunk, "content", None))
+                # Preserve boundary whitespace — `.strip()` here would
+                # eat the space between words across chunk boundaries.
+                fragment = _coerce_text(
+                    getattr(chunk, "content", None), strip=False,
+                )
                 if fragment:
                     text_so_far += fragment
                     if stream_cb:
@@ -491,13 +500,35 @@ def run_turn(
                             logger.exception("stream_cb failed")
             return assembled
 
+        step_index = 0
         for _ in range(max_iter):
+            step_started_at = time.monotonic()
             response = _stream_once(messages)
+            elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
             usage = llm.usage_metadata(response)
             tokens_in += usage.get("tokens_in", 0)
             tokens_out += usage.get("tokens_out", 0)
             messages.append(response)
             calls = getattr(response, "tool_calls", None) or []
+            # Tell the FE this iteration just finished. When the
+            # iteration produced tool_calls, its streamed text was
+            # reasoning preamble — the FE moves that text into a
+            # collapsible "Thinking" panel so the user sees how the
+            # bot worked through the problem (à la Claude). When the
+            # iteration produced NO tool_calls, the streamed text is
+            # the final answer; the FE collapses the thinking panel
+            # and keeps the answer as the message body.
+            if stream_cb:
+                try:
+                    stream_cb({
+                        "step_done": True,
+                        "step_index": step_index,
+                        "is_final": not calls,
+                        "elapsed_ms": elapsed_ms,
+                    })
+                except Exception:
+                    logger.exception("stream_cb step_done failed")
+            step_index += 1
             if not calls:
                 final_text = _coerce_text(getattr(response, "content", None))
                 break

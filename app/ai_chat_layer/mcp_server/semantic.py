@@ -78,7 +78,7 @@ class Filter:
 # constrain when no explicit date column is requested — applications
 # use applied_at, jobs use created_at.
 ANCHOR_DATE_COL: Dict[str, str] = {
-    "cj": "cj.applied_at",
+    "cj": "cj.created_at",
     "j":  "j.created_at",
     "co": "co.id",   # companies have no created_at; effectively disable date filter
     "pl": "pl.created_at",
@@ -272,7 +272,7 @@ MEASURES: Dict[str, Measure] = {
         sql=(
             "ROUND(AVG(CASE WHEN LOWER(cjs.type) = 'joined' "
             "AND cjs.joined_at IS NOT NULL "
-            "THEN DATEDIFF(cjs.joined_at, cj.applied_at) END), 1)"
+            "THEN DATEDIFF(cjs.joined_at, cj.created_at) END), 1)"
         ),
         requires_aliases=("cj", "cjs"),
     ),
@@ -498,21 +498,21 @@ DIMENSIONS: Dict[str, Dimension] = {
     "month": Dimension(
         name="month",
         description="Application month bucket (YYYY-MM).",
-        sql="DATE_FORMAT(cj.applied_at, '%Y-%m')",
+        sql="DATE_FORMAT(cj.created_at, '%Y-%m')",
         requires_aliases=("cj",),
-        order_sql="MIN(cj.applied_at)",
+        order_sql="MIN(cj.created_at)",
     ),
     "week": Dimension(
         name="week",
         description="Application ISO week bucket (YYYY-WW).",
-        sql="DATE_FORMAT(cj.applied_at, '%x-W%v')",
+        sql="DATE_FORMAT(cj.created_at, '%x-W%v')",
         requires_aliases=("cj",),
-        order_sql="MIN(cj.applied_at)",
+        order_sql="MIN(cj.created_at)",
     ),
     "day": Dimension(
         name="day",
         description="Application date (YYYY-MM-DD).",
-        sql="DATE(cj.applied_at)",
+        sql="DATE(cj.created_at)",
         requires_aliases=("cj",),
     ),
     "candidate": Dimension(
@@ -551,16 +551,16 @@ DIMENSIONS: Dict[str, Dimension] = {
     "year": Dimension(
         name="year",
         description="Application year bucket (YYYY).",
-        sql="DATE_FORMAT(cj.applied_at, '%Y')",
+        sql="DATE_FORMAT(cj.created_at, '%Y')",
         requires_aliases=("cj",),
-        order_sql="MIN(cj.applied_at)",
+        order_sql="MIN(cj.created_at)",
     ),
     "quarter": Dimension(
         name="quarter",
         description="Application calendar quarter bucket (YYYY-Q#).",
-        sql="CONCAT(YEAR(cj.applied_at), '-Q', QUARTER(cj.applied_at))",
+        sql="CONCAT(YEAR(cj.created_at), '-Q', QUARTER(cj.created_at))",
         requires_aliases=("cj",),
-        order_sql="MIN(cj.applied_at)",
+        order_sql="MIN(cj.created_at)",
     ),
     "location": Dimension(
         name="location",
