@@ -231,12 +231,19 @@ def send_message(conversation_id: int, req: SendMessageRequest,
 
         clean_body = sanitise_body(req.body) if req.body else None
         # Validate refs against allowed types and shape early so a bad payload
-        # never reaches the DB.
+        # never reaches the DB. Preserve `params` — for `report` refs that's
+        # the picker-confirmed filter set (date_from / date_to / company_id /
+        # …) the dashboard renderer reads to draw the right snapshot.
         refs_payload: list[dict] = []
         for r in (req.refs or []):
             r_dict = r.model_dump() if hasattr(r, "model_dump") else dict(r)
-            if r_dict.get("type") in entity_resolver.ENTITY_TYPES:
-                refs_payload.append({"type": r_dict["type"], "id": r_dict["id"]})
+            if r_dict.get("type") not in entity_resolver.ENTITY_TYPES:
+                continue
+            entry: dict = {"type": r_dict["type"], "id": r_dict["id"]}
+            params = r_dict.get("params")
+            if isinstance(params, dict) and params:
+                entry["params"] = params
+            refs_payload.append(entry)
 
         # DM rule: only Admin / SuperAdmin may attach entity references in
         # a direct message. Picker UI hides the affordance for non-admins,
@@ -608,11 +615,46 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
         # so chains of forwards always credit the first author, not the
         # intermediate hops.
         true_origin_sender_id = orig.forwarded_from_sender_id or orig.sender_id
+        # Image / voice / file forwards CLONE the attachment row instead of
+        # sharing the original's `attachment_id`. Cloning gives the
+        # forwarded message its own independent row (same underlying S3
+        # object — no copy, just one extra row pointing at the same
+        # `s3_key`). Benefits:
+        #   * `uploaded_by` reflects the forwarder, so any future
+        #     ownership / quota check works for the new message;
+        #   * deleting / soft-deleting the original message's attachment
+        #     never strands the forwarded copy;
+        #   * downstream code can safely add a UNIQUE constraint on
+        #     `chat_messages.attachment_id` without breaking forwards.
+        # The clone happens once per forward (not per destination) so
+        # multiple-target forwards still only cost one extra row per
+        # destination, not one round-trip to S3.
+        def _clone_attachment(att_id: Optional[int]) -> Optional[int]:
+            if att_id is None:
+                return None
+            src = db.get(ChatMessageAttachment, att_id)
+            if src is None:
+                return None
+            clone = ChatMessageAttachment(
+                s3_key=src.s3_key,
+                mime_type=src.mime_type,
+                file_name=src.file_name,
+                size_bytes=src.size_bytes,
+                duration_seconds=src.duration_seconds,
+                waveform_json=src.waveform_json,
+                thumbnail_s3_key=src.thumbnail_s3_key,
+                uploaded_by=user["user_id"],
+            )
+            db.add(clone)
+            db.flush()
+            return clone.id
+
         for cid in req.conversation_ids:
+            cloned_attachment_id = _clone_attachment(orig.attachment_id)
             new_msg = store.create_message(
                 db, conversation_id=cid, sender_id=user["user_id"],
                 message_type=orig.message_type, body=orig.body,
-                attachment_id=orig.attachment_id,
+                attachment_id=cloned_attachment_id,
                 forwarded_from_message_id=orig.id,
                 forwarded_from_sender_id=true_origin_sender_id,
             )
@@ -621,11 +663,34 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
             out_payloads.append(payload)
             delivered_at = datetime.utcnow().isoformat()
             delivered_to_now: List[int] = []
+            sender_info = user_info_cache.get_user_info(user["user_id"], db=db)
+            preview = {
+                "id": new_msg.id,
+                "sender_id": new_msg.sender_id,
+                "sender_username": sender_info.get("username"),
+                "sender_name": sender_info.get("name"),
+                "message_type": new_msg.message_type,
+                "body_preview": store._preview_for(
+                    new_msg.message_type, new_msg.body, new_msg.deleted_at,
+                ),
+                "created_at": new_msg.created_at.isoformat()
+                if new_msg.created_at
+                else None,
+                "deleted_at": None,
+            }
             for uid in store.member_user_ids(db, cid):
                 if uid == user["user_id"]:
                     continue
                 redis_chat.publish_message_new(user_id=uid, message=payload,
                                                conversation_id=cid)
+                # Bump the recipient's inbox preview so the destination
+                # conversation pops to the top + shows the forwarded
+                # body / "[image]" / "[file]" preview.
+                unread = store.unread_count_for_user(db, cid, uid)
+                redis_chat.publish_inbox_bump(
+                    user_id=uid, conversation_id=cid,
+                    latest_message=preview, unread_count=unread,
+                )
                 if chat_ws_manager.is_online(uid):
                     store.mark_delivered(db, message_id=new_msg.id, user_id=uid)
                     redis_chat.publish_message_delivered(
@@ -643,6 +708,15 @@ def forward_message(message_id: int, req: ForwardMessageRequest,
                 merged_d = sorted({*existing_d, *delivered_to_now})
                 payload["delivered_to"] = merged_d
                 payload["delivered_count"] = len(merged_d)
+            # Sender's own inbox cell update too — same pattern as the
+            # regular send path. Without this the destination chat
+            # doesn't bubble to the top of the forwarder's chat list,
+            # making the forward feel like it didn't happen even
+            # though the message landed correctly.
+            redis_chat.publish_inbox_bump(
+                user_id=user["user_id"], conversation_id=cid,
+                latest_message=preview, unread_count=0,
+            )
             recipients_for_notif = [u for u in store.member_user_ids(db, cid)
                                     if u != user["user_id"]]
             bridge.handle_message_forwarded(
