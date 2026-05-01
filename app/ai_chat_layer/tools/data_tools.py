@@ -698,7 +698,7 @@ def _candidate_detail(ctx: ToolContext, args: CandidateOnlyArgs) -> Dict[str, An
                j.title      AS job_title,
                j.status     AS job_status,
                co.company_name AS company_name,
-               cj.applied_at,
+               cj.created_at AS applied_at,
                ps.id        AS stage_id,
                ps.name      AS stage,
                ps.`order`   AS stage_order,
@@ -714,7 +714,7 @@ def _candidate_detail(ctx: ToolContext, args: CandidateOnlyArgs) -> Dict[str, An
                  ON pss.pipeline_stage_id = cps.pipeline_stage_id
                 AND UPPER(pss.option) = UPPER(cps.status)
          WHERE cj.candidate_id = :cid
-         ORDER BY cj.applied_at DESC
+         ORDER BY cj.created_at DESC
         """,
         {"cid": cand_id},
     )
@@ -997,10 +997,10 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
                 where.append("UPPER(ps.name) = :stage")
                 params["stage"] = stage_input.upper()
     if args.date_from:
-        where.append("cj.applied_at >= :date_from")
+        where.append("cj.created_at >= :date_from")
         params["date_from"] = args.date_from
     if args.date_to:
-        where.append("cj.applied_at <= :date_to")
+        where.append("cj.created_at <= :date_to")
         params["date_to"] = args.date_to
 
     scope_clause, scope_params = _scope_candidate_filter(ctx)
@@ -1019,7 +1019,7 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
                ps.name AS stage,
                cps.status AS status_option,
                pss.tag AS outcome_tag,
-               cj.applied_at, cj.job_id,
+               cj.created_at AS applied_at, cj.job_id,
                j.title AS job_title, j.job_id AS job_external_id
           FROM candidates c
           JOIN candidate_jobs cj ON cj.candidate_id = c.candidate_id
@@ -1031,7 +1031,7 @@ def _list_candidates(ctx: ToolContext, args: ListCandidatesArgs) -> Dict[str, An
                  ON pss.pipeline_stage_id = cps.pipeline_stage_id
                 AND UPPER(pss.option) = UPPER(cps.status)
          WHERE {' AND '.join(where)} {scope_clause}
-         ORDER BY cj.applied_at DESC
+         ORDER BY cj.created_at DESC
          LIMIT :_limit
     """
     params["_limit"] = args.limit
@@ -1114,10 +1114,10 @@ def _count_candidates_by_stage(ctx: ToolContext, args: CountByStageArgs) -> Dict
         where.append("j.company_id = :company_id")
         params["company_id"] = args.company_id
     if args.date_from:
-        where.append("cj.applied_at >= :date_from")
+        where.append("cj.created_at >= :date_from")
         params["date_from"] = args.date_from
     if args.date_to:
-        where.append("cj.applied_at <= :date_to")
+        where.append("cj.created_at <= :date_to")
         params["date_to"] = args.date_to
 
     scope_clause, scope_params = _scope_job_filter(ctx, alias="j")
@@ -1158,10 +1158,10 @@ def _recruiter_metrics(ctx: ToolContext, args: RecruiterMetricsArgs) -> Dict[str
     where_dt = ""
     params: Dict[str, Any] = {"uid": target_uid}
     if args.date_from:
-        where_dt += " AND cj.applied_at >= :date_from"
+        where_dt += " AND cj.created_at >= :date_from"
         params["date_from"] = args.date_from
     if args.date_to:
-        where_dt += " AND cj.applied_at <= :date_to"
+        where_dt += " AND cj.created_at <= :date_to"
         params["date_to"] = args.date_to
     ctx.add_output_ref({"type": "user", "id": target_uid})
     rows = ctx.mcp.query(
@@ -1199,10 +1199,10 @@ def _top_recruiters(ctx: ToolContext, args: TopRecruitersArgs) -> Dict[str, Any]
     where = ""
     params: Dict[str, Any] = {"_limit": args.limit}
     if args.date_from:
-        where += " AND cj.applied_at >= :date_from"
+        where += " AND cj.created_at >= :date_from"
         params["date_from"] = args.date_from
     if args.date_to:
-        where += " AND cj.applied_at <= :date_to"
+        where += " AND cj.created_at <= :date_to"
         params["date_to"] = args.date_to
     rows = ctx.mcp.query(
         f"""
@@ -1572,10 +1572,10 @@ def _pipeline_funnel(ctx: ToolContext, args: FunnelArgs) -> Dict[str, Any]:
     where = ["1=1"]
     params: Dict[str, Any] = {}
     if args.date_from:
-        where.append("cj.applied_at >= :date_from")
+        where.append("cj.created_at >= :date_from")
         params["date_from"] = args.date_from
     if args.date_to:
-        where.append("cj.applied_at <= :date_to")
+        where.append("cj.created_at <= :date_to")
         params["date_to"] = args.date_to
 
     if args.scope == "job":
@@ -1690,7 +1690,7 @@ def _pipeline_funnel(ctx: ToolContext, args: FunnelArgs) -> Dict[str, Any]:
                c.candidate_id AS id,
                c.candidate_name AS name,
                c.candidate_email AS email,
-               cj.applied_at,
+               cj.created_at AS applied_at,
                j.id AS job_id, j.title AS job_title
           FROM candidate_jobs cj
           JOIN job_openings j ON j.id = cj.job_id
@@ -1702,7 +1702,7 @@ def _pipeline_funnel(ctx: ToolContext, args: FunnelArgs) -> Dict[str, Any]:
                 ON pss.pipeline_stage_id = cps.pipeline_stage_id
                AND UPPER(pss.option) = UPPER(cps.status)
          WHERE {' AND '.join(where)}
-         ORDER BY cj.applied_at DESC
+         ORDER BY cj.created_at DESC
          LIMIT 80
         """,
         params,
@@ -2020,17 +2020,17 @@ def _compare_users(ctx: ToolContext, args: UserCompareArgs) -> Dict[str, Any]:
 def _user_sourcing(ctx: ToolContext, args: UserSourcingArgs) -> Dict[str, Any]:
     """Candidates the user (recruiter) sourced — i.e. distinct candidates
     on jobs the user is assigned to within the date range. We approximate
-    "sourced by" via `cj.applied_at` + the user's job assignments.
+    "sourced by" via `cj.created_at` + the user's job assignments.
     """
     if not ctx.scope.unscoped and args.user_id != ctx.user_id:
         return {"access_denied": True, "type": "user", "id": args.user_id}
     where = ["uja.user_id = :uid"]
     params: Dict[str, Any] = {"uid": args.user_id, "_limit": args.limit}
     if args.date_from:
-        where.append("cj.applied_at >= :date_from")
+        where.append("cj.created_at >= :date_from")
         params["date_from"] = args.date_from
     if args.date_to:
-        where.append("cj.applied_at <= :date_to")
+        where.append("cj.created_at <= :date_to")
         params["date_to"] = args.date_to
     rows = ctx.mcp.query(
         f"""
@@ -2038,7 +2038,7 @@ def _user_sourcing(ctx: ToolContext, args: UserSourcingArgs) -> Dict[str, Any]:
                c.candidate_id AS id,
                c.candidate_name AS name,
                c.candidate_email AS email,
-               cj.applied_at,
+               cj.created_at AS applied_at,
                j.id AS job_id,
                j.title AS job_title
           FROM candidate_jobs cj
@@ -2046,7 +2046,7 @@ def _user_sourcing(ctx: ToolContext, args: UserSourcingArgs) -> Dict[str, Any]:
           JOIN candidates c ON c.candidate_id = cj.candidate_id
           JOIN job_openings j ON j.id = cj.job_id
          WHERE {' AND '.join(where)}
-         ORDER BY cj.applied_at DESC
+         ORDER BY cj.created_at DESC
          LIMIT :_limit
         """,
         params,
