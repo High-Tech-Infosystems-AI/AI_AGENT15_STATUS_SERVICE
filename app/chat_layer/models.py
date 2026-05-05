@@ -190,3 +190,102 @@ class ChatPushSubscription(Base):
         UniqueConstraint("endpoint_hash", name="uq_chat_push_endpoint"),
         Index("idx_chat_push_user", "user_id"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Polls + Tasks (migration v20)
+# ---------------------------------------------------------------------------
+
+from sqlalchemy import Enum  # noqa: E402  (kept local — import once)
+
+
+class ChatPoll(Base):
+    """A poll attached 1:1 to a chat_messages row. The owning message
+    has message_type='poll'; voting / closing happens through the
+    auxiliary tables here."""
+    __tablename__ = "chat_polls"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    message_id = Column(BigInteger, ForeignKey("chat_messages.id"),
+                         nullable=False, unique=True)
+    question = Column(String(500), nullable=False)
+    allow_multiple = Column(TINYINT(1), nullable=False, server_default="0")
+    closed_at = Column(DateTime, nullable=True)
+    closed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class ChatPollOption(Base):
+    __tablename__ = "chat_poll_options"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    poll_id = Column(BigInteger, ForeignKey("chat_polls.id", ondelete="CASCADE"),
+                      nullable=False)
+    text = Column(String(255), nullable=False)
+    position = Column(Integer, nullable=False, server_default="0")
+
+    __table_args__ = (
+        Index("idx_option_poll", "poll_id", "position"),
+    )
+
+
+class ChatPollVote(Base):
+    __tablename__ = "chat_poll_votes"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    poll_id = Column(BigInteger, ForeignKey("chat_polls.id", ondelete="CASCADE"),
+                      nullable=False)
+    option_id = Column(BigInteger, ForeignKey("chat_poll_options.id",
+                                                ondelete="CASCADE"),
+                        nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    voted_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("poll_id", "option_id", "user_id",
+                         name="uq_poll_user_option"),
+        Index("idx_vote_poll_user", "poll_id", "user_id"),
+    )
+
+
+class ChatTask(Base):
+    """A task attached 1:1 to a chat_messages row. Group-scope work
+    item with a list of assignees and a per-assignee done flag."""
+    __tablename__ = "chat_tasks"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    message_id = Column(BigInteger, ForeignKey("chat_messages.id"),
+                         nullable=False, unique=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    due_at = Column(DateTime, nullable=True)
+    priority = Column(Enum("low", "medium", "high",
+                            name="chat_task_priority"),
+                       nullable=False, server_default="medium")
+    status = Column(Enum("open", "in_progress", "done", "cancelled",
+                          name="chat_task_status"),
+                     nullable=False, server_default="open")
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    completed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("idx_task_status", "status"),
+        Index("idx_task_due", "due_at"),
+    )
+
+
+class ChatTaskAssignee(Base):
+    __tablename__ = "chat_task_assignees"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    task_id = Column(BigInteger, ForeignKey("chat_tasks.id", ondelete="CASCADE"),
+                      nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    status = Column(Enum("open", "done", name="chat_task_assignee_status"),
+                     nullable=False, server_default="open")
+    assigned_at = Column(DateTime, nullable=False, server_default=func.now())
+    assigned_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "user_id", name="uq_task_user"),
+        Index("idx_assignee_user_status", "user_id", "status"),
+    )
