@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
-MessageType = Literal["text", "image", "voice", "file", "system"]
+MessageType = Literal["text", "image", "voice", "file", "system", "poll", "task"]
 # `ai_artifact` (chart PNG / PDF the bot generated) and `ai_elicitation`
 # (an inline form the bot asked the user to fill in) are emitted by the
 # AI chat layer and must round-trip through the standard chat refs list
@@ -13,6 +13,7 @@ MessageType = Literal["text", "image", "voice", "file", "system"]
 EntityType = Literal[
     "job", "candidate", "company", "pipeline", "user", "team", "report",
     "ai_artifact", "ai_elicitation", "ai_suggestions",
+    "poll", "task",
 ]
 
 
@@ -90,6 +91,15 @@ class SendMessageRequest(BaseModel):
                 raise ValueError(
                     "body or at least one ref required for text messages",
                 )
+        elif self.message_type in {"poll", "task"}:
+            # Poll / task messages are created via dedicated endpoints
+            # (/chat/conversations/{id}/polls, /tasks). The plain
+            # SendMessageRequest path doesn't accept them — anyone
+            # constructing one manually is bypassing the helper API.
+            raise ValueError(
+                f"{self.message_type} messages must be created via the "
+                f"/{self.message_type}s endpoint, not /messages",
+            )
         else:
             if self.attachment_id is None:
                 raise ValueError("attachment_id required for non-text messages")
