@@ -28,7 +28,7 @@ from app.chat_layer.models import (
 from app.chat_layer.schemas import (
     ErrorResponse, MessageOut, PollCreate, PollOut, PollVoteRequest,
 )
-from app.chat_layer.ws_manager import chat_ws_manager
+from app.chat_layer.ws_manager import ws_manager as chat_ws_manager
 from app.database_Layer.db_config import SessionLocal
 
 logger = logging.getLogger("app_logger")
