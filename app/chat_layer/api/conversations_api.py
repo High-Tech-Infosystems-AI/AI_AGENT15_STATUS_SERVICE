@@ -1,9 +1,10 @@
 """Conversation endpoints."""
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from pydantic import BaseModel, Field
+from sqlalchemy import bindparam, text
 
 from app.chat_layer import presence as presence_helper, store
 from app.chat_layer.auth import current_user
@@ -146,5 +147,50 @@ def get_conversation(conversation_id: int, user: dict = Depends(current_user)):
         # Fallback: caller is technically a member but the inbox query
         # didn't return a row (rare). Serve the basic shape.
         return _serialise(conv, store.member_user_ids(db, conv.id))
+    finally:
+        db.close()
+
+
+# ── User lookup (used by the task-assignee picker) ───────────────────
+
+class _UserLookupRequest(BaseModel):
+    user_ids: List[int] = Field(..., min_length=1, max_length=200)
+
+
+class _UserLookupOut(BaseModel):
+    id: int
+    name: Optional[str] = None
+    username: Optional[str] = None
+
+
+@router.post("/users/lookup", response_model=List[_UserLookupOut])
+def lookup_users(body: "_UserLookupRequest",
+                  user: dict = Depends(current_user)) -> List["_UserLookupOut"]:
+    """Resolve a batch of user_ids to {id, name, username}. Used by
+    the task composer's assignee picker (and any other place that
+    needs to render a user list from a member_id array). Caller must
+    be an authenticated user; visibility is intentionally lax — chat
+    members already see each other's names through every other
+    surface, and this endpoint never reveals emails / roles.
+    """
+    if not body.user_ids:
+        return []
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT id, name, username FROM users "
+                "WHERE id IN :ids AND deleted_at IS NULL",
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": list({int(i) for i in body.user_ids})},
+        ).all()
+        return [
+            _UserLookupOut(
+                id=int(r._mapping["id"]),
+                name=r._mapping.get("name"),
+                username=r._mapping.get("username"),
+            )
+            for r in rows
+        ]
     finally:
         db.close()

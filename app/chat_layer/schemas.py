@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
-MessageType = Literal["text", "image", "voice", "file", "system"]
+MessageType = Literal["text", "image", "voice", "file", "system", "poll", "task"]
 # `ai_artifact` (chart PNG / PDF the bot generated) and `ai_elicitation`
 # (an inline form the bot asked the user to fill in) are emitted by the
 # AI chat layer and must round-trip through the standard chat refs list
@@ -13,6 +13,7 @@ MessageType = Literal["text", "image", "voice", "file", "system"]
 EntityType = Literal[
     "job", "candidate", "company", "pipeline", "user", "team", "report",
     "ai_artifact", "ai_elicitation", "ai_suggestions",
+    "poll", "task",
 ]
 
 
@@ -90,6 +91,15 @@ class SendMessageRequest(BaseModel):
                 raise ValueError(
                     "body or at least one ref required for text messages",
                 )
+        elif self.message_type in {"poll", "task"}:
+            # Poll / task messages are created via dedicated endpoints
+            # (/chat/conversations/{id}/polls, /tasks). The plain
+            # SendMessageRequest path doesn't accept them — anyone
+            # constructing one manually is bypassing the helper API.
+            raise ValueError(
+                f"{self.message_type} messages must be created via the "
+                f"/{self.message_type}s endpoint, not /messages",
+            )
         else:
             if self.attachment_id is None:
                 raise ValueError("attachment_id required for non-text messages")
@@ -241,3 +251,84 @@ class PaginatedMessages(BaseModel):
 class ErrorResponse(BaseModel):
     error_code: str
     message: str
+
+
+# ---------------------------------------------------------------------------
+# Polls + Tasks
+# ---------------------------------------------------------------------------
+
+class PollOptionIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=255)
+
+
+class PollCreate(BaseModel):
+    question: str = Field(..., min_length=1, max_length=500)
+    options: List[PollOptionIn] = Field(..., min_length=2, max_length=10)
+    allow_multiple: bool = False
+
+
+class PollOptionOut(BaseModel):
+    id: int
+    text: str
+    position: int
+    vote_count: int
+    voted_user_ids: List[int] = []
+    voted_by_me: bool = False
+
+
+class PollOut(BaseModel):
+    id: int
+    message_id: int
+    question: str
+    allow_multiple: bool
+    closed_at: Optional[datetime] = None
+    closed_by: Optional[int] = None
+    created_by: int
+    created_at: datetime
+    options: List[PollOptionOut]
+    total_votes: int
+    total_voters: int
+
+
+class PollVoteRequest(BaseModel):
+    option_ids: List[int] = Field(..., min_length=1, max_length=10)
+
+
+class TaskCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    assignee_ids: List[int] = Field(default_factory=list, max_length=50)
+    due_at: Optional[datetime] = None
+    priority: Literal["low", "medium", "high"] = "medium"
+
+
+class TaskAssigneeOut(BaseModel):
+    user_id: int
+    name: Optional[str] = None
+    username: Optional[str] = None
+    status: Literal["open", "done"]
+    completed_at: Optional[datetime] = None
+
+
+class TaskOut(BaseModel):
+    id: int
+    message_id: int
+    title: str
+    description: Optional[str] = None
+    due_at: Optional[datetime] = None
+    priority: Literal["low", "medium", "high"]
+    status: Literal["open", "in_progress", "done", "cancelled"]
+    created_by: int
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    assignees: List[TaskAssigneeOut] = []
+    completed_count: int = 0
+    total_count: int = 0
+
+
+class TaskStatusUpdate(BaseModel):
+    status: Literal["open", "in_progress", "done", "cancelled"]
+
+
+class TaskAssigneesUpdate(BaseModel):
+    assignee_ids: List[int] = Field(..., max_length=50)
