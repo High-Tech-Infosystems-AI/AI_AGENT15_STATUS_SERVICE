@@ -57,6 +57,13 @@ def _publish(user_id: int, type_: str, data: dict) -> None:
         logger.error("chat publish failed user=%s type=%s err=%s", user_id, type_, e)
 
 
+def publish_event(user_id: int, event_type: str, data: dict) -> None:
+    """Public escape hatch for callers that need a custom event type
+    (e.g. `chat.poll_updated`, `chat.task_updated`). Mirrors the
+    private `_publish` shape so the FE handler is consistent."""
+    _publish(user_id, event_type, data)
+
+
 # ---------- Message events ----------
 
 def publish_message_new(user_id: int, message: dict, conversation_id: int) -> None:
