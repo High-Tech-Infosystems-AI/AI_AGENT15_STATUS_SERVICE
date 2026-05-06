@@ -251,3 +251,84 @@ class PaginatedMessages(BaseModel):
 class ErrorResponse(BaseModel):
     error_code: str
     message: str
+
+
+# ---------------------------------------------------------------------------
+# Polls + Tasks
+# ---------------------------------------------------------------------------
+
+class PollOptionIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=255)
+
+
+class PollCreate(BaseModel):
+    question: str = Field(..., min_length=1, max_length=500)
+    options: List[PollOptionIn] = Field(..., min_length=2, max_length=10)
+    allow_multiple: bool = False
+
+
+class PollOptionOut(BaseModel):
+    id: int
+    text: str
+    position: int
+    vote_count: int
+    voted_user_ids: List[int] = []
+    voted_by_me: bool = False
+
+
+class PollOut(BaseModel):
+    id: int
+    message_id: int
+    question: str
+    allow_multiple: bool
+    closed_at: Optional[datetime] = None
+    closed_by: Optional[int] = None
+    created_by: int
+    created_at: datetime
+    options: List[PollOptionOut]
+    total_votes: int
+    total_voters: int
+
+
+class PollVoteRequest(BaseModel):
+    option_ids: List[int] = Field(..., min_length=1, max_length=10)
+
+
+class TaskCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    assignee_ids: List[int] = Field(default_factory=list, max_length=50)
+    due_at: Optional[datetime] = None
+    priority: Literal["low", "medium", "high"] = "medium"
+
+
+class TaskAssigneeOut(BaseModel):
+    user_id: int
+    name: Optional[str] = None
+    username: Optional[str] = None
+    status: Literal["open", "done"]
+    completed_at: Optional[datetime] = None
+
+
+class TaskOut(BaseModel):
+    id: int
+    message_id: int
+    title: str
+    description: Optional[str] = None
+    due_at: Optional[datetime] = None
+    priority: Literal["low", "medium", "high"]
+    status: Literal["open", "in_progress", "done", "cancelled"]
+    created_by: int
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    assignees: List[TaskAssigneeOut] = []
+    completed_count: int = 0
+    total_count: int = 0
+
+
+class TaskStatusUpdate(BaseModel):
+    status: Literal["open", "in_progress", "done", "cancelled"]
+
+
+class TaskAssigneesUpdate(BaseModel):
+    assignee_ids: List[int] = Field(..., max_length=50)

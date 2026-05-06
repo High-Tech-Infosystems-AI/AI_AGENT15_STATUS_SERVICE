@@ -95,7 +95,8 @@ def _resolve_refs_for(msg, db) -> list[dict]:
 
 
 def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
-                    read_by=None, delivered_to=None, reactions=None) -> dict:
+                    read_by=None, delivered_to=None, reactions=None,
+                    caller_user_id: Optional[int] = None) -> dict:
     body_out = msg.body
     if msg.deleted_at is not None:
         body_out = "[message deleted]"
@@ -112,7 +113,13 @@ def _to_message_out(msg, attachment=None, mention_ids=None, db=None,
         fwd_info = user_info_cache.get_user_info(fwd_sender_id, db=db)
         fwd_sender_username = fwd_info.get("username")
         fwd_sender_name = fwd_info.get("name")
+    # Tell the resolver who's asking — poll cards need this to compute
+    # `voted_by_me`. Reset to None afterwards so a stale value can't
+    # bleed across requests.
+    if caller_user_id is not None:
+        entity_resolver.set_caller(caller_user_id)
     refs_out = _resolve_refs_for(msg, db) if msg.deleted_at is None else []
+    entity_resolver.set_caller(None)
     return MessageOut(
         id=msg.id, conversation_id=msg.conversation_id, sender_id=msg.sender_id,
         sender_username=sender_info.get("username"),
