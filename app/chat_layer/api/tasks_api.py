@@ -22,7 +22,7 @@ from app.chat_layer import (
 from app.chat_layer.auth import current_user
 from app.chat_layer.chat_acl import is_admin as _is_admin_role
 from app.chat_layer.models import (
-    ChatMessage, ChatTask, ChatTaskAssignee,
+    ChatConversation, ChatMessage, ChatTask, ChatTaskAssignee,
 )
 from app.chat_layer.schemas import (
     ErrorResponse, MessageOut, TaskAssigneesUpdate, TaskCreate, TaskOut,
@@ -133,7 +133,7 @@ def create_task(conversation_id: int, body: TaskCreate,
                 user: dict = Depends(current_user)):
     db: Session = SessionLocal()
     try:
-        conv = store.get_conversation(db, conversation_id)
+        conv = db.get(ChatConversation, conversation_id)
         if not conv:
             return _err("CHAT_NOT_FOUND", "Conversation not found", 404)
         if not store.is_member(db, conversation_id, user["user_id"]):
