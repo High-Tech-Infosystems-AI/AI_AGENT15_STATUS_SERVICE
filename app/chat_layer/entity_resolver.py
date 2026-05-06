@@ -487,15 +487,24 @@ def _resolve_reports(_db: Session, refs: list) -> List[Optional[dict]]:
 # ---------------------------------------------------------------------------
 
 def _resolve_polls(db: Session, refs: list) -> List[Optional[dict]]:
-    """Polls resolver. Each ref is `{type:'poll', id:<poll_id>}`. We
-    fetch the poll header + options + per-option vote counts +
-    voted-by-me flag (reader is the request's caller — passed via
-    `_caller_user_id` thread-local set by the messages_api layer).
-    The card carries the structured state under `params` so the
-    PollCard FE component can render without a follow-up fetch."""
+    """Polls resolver. The dispatcher in `resolve()` passes us a list
+    of integer ids for non-report types, but we tolerate full-ref
+    dicts too so callers can invoke the resolver directly (e.g.
+    `_publish_poll_state`) without reshaping. We fetch the poll
+    header + options + per-option vote counts + voter names + the
+    caller's voted-by-me flag (reader id is set via `set_caller()`
+    by the messages_api layer). The card carries the structured
+    state under `params` so the PollCard FE component can render
+    without a follow-up fetch."""
     out: List[Optional[dict]] = []
     caller = getattr(_caller, "user_id", None)
-    ids = [int(r.get("id")) for r in refs if isinstance(r, dict) and r.get("id") is not None]
+
+    def _ref_id(r):
+        if isinstance(r, dict):
+            return r.get("id")
+        return r
+
+    ids = [int(rid) for rid in (_ref_id(r) for r in refs) if rid is not None]
     if not ids:
         return [None] * len(refs)
     rows = db.execute(
@@ -540,21 +549,45 @@ def _resolve_polls(db: Session, refs: list) -> List[Optional[dict]]:
         votes_by_option.setdefault(int(m["option_id"]), []).append(int(m["user_id"]))
         voters_by_poll.setdefault(int(m["poll_id"]), set()).add(int(m["user_id"]))
 
+    # Single round-trip for every voter's display name so the PollCard
+    # can render a "Alice, Bob, +3" chip without a follow-up FE fetch.
+    all_voter_ids: set[int] = set()
+    for s in voters_by_poll.values():
+        all_voter_ids.update(s)
+    voter_info: dict[int, dict] = {}
+    if all_voter_ids:
+        u_rows = db.execute(
+            text(
+                "SELECT id, name, username FROM users "
+                "WHERE id IN :ids",
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": list(all_voter_ids)},
+        ).all()
+        for r in u_rows:
+            m = dict(r._mapping)
+            voter_info[int(m["id"])] = {
+                "user_id": int(m["id"]),
+                "name": m.get("name"),
+                "username": m.get("username"),
+            }
+
     for ref in refs:
-        if not isinstance(ref, dict):
+        rid_raw = _ref_id(ref)
+        if rid_raw is None:
             out.append(None)
             continue
-        rid = ref.get("id")
-        if rid is None:
+        try:
+            rid = int(rid_raw)
+        except (TypeError, ValueError):
             out.append(None)
             continue
-        poll = polls_by_id.get(int(rid))
+        poll = polls_by_id.get(rid)
         if not poll:
             out.append(None)
             continue
         opts_payload = []
         total_votes = 0
-        for opt in options_by_poll.get(int(rid), []):
+        for opt in options_by_poll.get(rid, []):
             voters = votes_by_option.get(int(opt["id"]), [])
             total_votes += len(voters)
             opts_payload.append({
@@ -563,6 +596,10 @@ def _resolve_polls(db: Session, refs: list) -> List[Optional[dict]]:
                 "position": int(opt["position"] or 0),
                 "vote_count": len(voters),
                 "voted_user_ids": voters,
+                "voted_users": [
+                    voter_info.get(uid, {"user_id": uid, "name": None, "username": None})
+                    for uid in voters
+                ],
                 "voted_by_me": bool(caller and caller in voters),
             })
         params = {
@@ -598,9 +635,16 @@ def _resolve_polls(db: Session, refs: list) -> List[Optional[dict]]:
 def _resolve_tasks(db: Session, refs: list) -> List[Optional[dict]]:
     """Tasks resolver. Returns the task header + assignee list + per-
     assignee status + counts so TaskCard can render without an extra
-    round-trip. Same caller-aware shape as polls."""
+    round-trip. Tolerates both id-only lists (the standard dispatch
+    shape) and full-ref dicts (direct callers)."""
     out: List[Optional[dict]] = []
-    ids = [int(r.get("id")) for r in refs if isinstance(r, dict) and r.get("id") is not None]
+
+    def _ref_id(r):
+        if isinstance(r, dict):
+            return r.get("id")
+        return r
+
+    ids = [int(rid) for rid in (_ref_id(r) for r in refs) if rid is not None]
     if not ids:
         return [None] * len(refs)
     rows = db.execute(
@@ -632,20 +676,22 @@ def _resolve_tasks(db: Session, refs: list) -> List[Optional[dict]]:
         assignees_by_task.setdefault(int(m["task_id"]), []).append(m)
 
     for ref in refs:
-        if not isinstance(ref, dict):
+        rid_raw = _ref_id(ref)
+        if rid_raw is None:
             out.append(None)
             continue
-        rid = ref.get("id")
-        if rid is None:
+        try:
+            rid = int(rid_raw)
+        except (TypeError, ValueError):
             out.append(None)
             continue
-        t = tasks_by_id.get(int(rid))
+        t = tasks_by_id.get(rid)
         if not t:
             out.append(None)
             continue
         assignees_payload = []
         completed_count = 0
-        for a in assignees_by_task.get(int(rid), []):
+        for a in assignees_by_task.get(rid, []):
             done = (a.get("status") or "").lower() == "done"
             if done:
                 completed_count += 1
