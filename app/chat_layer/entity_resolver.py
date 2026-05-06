@@ -486,6 +486,223 @@ def _resolve_reports(_db: Session, refs: list) -> List[Optional[dict]]:
 # Public dispatch
 # ---------------------------------------------------------------------------
 
+def _resolve_polls(db: Session, refs: list) -> List[Optional[dict]]:
+    """Polls resolver. Each ref is `{type:'poll', id:<poll_id>}`. We
+    fetch the poll header + options + per-option vote counts +
+    voted-by-me flag (reader is the request's caller — passed via
+    `_caller_user_id` thread-local set by the messages_api layer).
+    The card carries the structured state under `params` so the
+    PollCard FE component can render without a follow-up fetch."""
+    out: List[Optional[dict]] = []
+    caller = getattr(_caller, "user_id", None)
+    ids = [int(r.get("id")) for r in refs if isinstance(r, dict) and r.get("id") is not None]
+    if not ids:
+        return [None] * len(refs)
+    rows = db.execute(
+        text("""
+        SELECT p.id, p.message_id, p.question, p.allow_multiple,
+               p.closed_at, p.closed_by, p.created_by, p.created_at,
+               m.conversation_id
+          FROM chat_polls p
+          JOIN chat_messages m ON m.id = p.message_id
+         WHERE p.id IN :ids
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    polls_by_id = {int(r._mapping["id"]): dict(r._mapping) for r in rows}
+
+    opt_rows = db.execute(
+        text("""
+        SELECT id, poll_id, text, position
+          FROM chat_poll_options
+         WHERE poll_id IN :ids
+         ORDER BY poll_id, position, id
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    options_by_poll: dict[int, list[dict]] = {}
+    for r in opt_rows:
+        m = dict(r._mapping)
+        options_by_poll.setdefault(int(m["poll_id"]), []).append(m)
+
+    vote_rows = db.execute(
+        text("""
+        SELECT poll_id, option_id, user_id
+          FROM chat_poll_votes
+         WHERE poll_id IN :ids
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    votes_by_option: dict[int, list[int]] = {}
+    voters_by_poll: dict[int, set[int]] = {}
+    for r in vote_rows:
+        m = dict(r._mapping)
+        votes_by_option.setdefault(int(m["option_id"]), []).append(int(m["user_id"]))
+        voters_by_poll.setdefault(int(m["poll_id"]), set()).add(int(m["user_id"]))
+
+    for ref in refs:
+        if not isinstance(ref, dict):
+            out.append(None)
+            continue
+        rid = ref.get("id")
+        if rid is None:
+            out.append(None)
+            continue
+        poll = polls_by_id.get(int(rid))
+        if not poll:
+            out.append(None)
+            continue
+        opts_payload = []
+        total_votes = 0
+        for opt in options_by_poll.get(int(rid), []):
+            voters = votes_by_option.get(int(opt["id"]), [])
+            total_votes += len(voters)
+            opts_payload.append({
+                "id": int(opt["id"]),
+                "text": opt["text"],
+                "position": int(opt["position"] or 0),
+                "vote_count": len(voters),
+                "voted_user_ids": voters,
+                "voted_by_me": bool(caller and caller in voters),
+            })
+        params = {
+            "poll_id": int(poll["id"]),
+            "message_id": int(poll["message_id"]),
+            "question": poll["question"],
+            "allow_multiple": bool(poll["allow_multiple"]),
+            "closed_at": poll["closed_at"].isoformat() if poll.get("closed_at") else None,
+            "closed_by": poll.get("closed_by"),
+            "created_by": int(poll["created_by"]),
+            "created_at": poll["created_at"].isoformat() if poll.get("created_at") else None,
+            "options": opts_payload,
+            "total_votes": total_votes,
+            "total_voters": len(voters_by_poll.get(int(rid), set())),
+        }
+        out.append({
+            "type": "poll",
+            "id": int(rid),
+            "title": poll["question"][:120],
+            "subtitle": (
+                f"{params['total_voters']} voter"
+                f"{'' if params['total_voters'] == 1 else 's'}"
+                f" · {params['total_votes']} vote"
+                f"{'' if params['total_votes'] == 1 else 's'}"
+            ),
+            "deep_link": None,
+            "fields": [],
+            "params": params,
+        })
+    return out
+
+
+def _resolve_tasks(db: Session, refs: list) -> List[Optional[dict]]:
+    """Tasks resolver. Returns the task header + assignee list + per-
+    assignee status + counts so TaskCard can render without an extra
+    round-trip. Same caller-aware shape as polls."""
+    out: List[Optional[dict]] = []
+    ids = [int(r.get("id")) for r in refs if isinstance(r, dict) and r.get("id") is not None]
+    if not ids:
+        return [None] * len(refs)
+    rows = db.execute(
+        text("""
+        SELECT t.id, t.message_id, t.title, t.description, t.due_at,
+               t.priority, t.status, t.created_by, t.created_at,
+               t.completed_at
+          FROM chat_tasks t
+         WHERE t.id IN :ids
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    tasks_by_id = {int(r._mapping["id"]): dict(r._mapping) for r in rows}
+
+    a_rows = db.execute(
+        text("""
+        SELECT a.task_id, a.user_id, a.status, a.completed_at,
+               u.name AS user_name, u.username AS username
+          FROM chat_task_assignees a
+     LEFT JOIN users u ON u.id = a.user_id
+         WHERE a.task_id IN :ids
+         ORDER BY a.task_id, a.assigned_at
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    assignees_by_task: dict[int, list[dict]] = {}
+    for r in a_rows:
+        m = dict(r._mapping)
+        assignees_by_task.setdefault(int(m["task_id"]), []).append(m)
+
+    for ref in refs:
+        if not isinstance(ref, dict):
+            out.append(None)
+            continue
+        rid = ref.get("id")
+        if rid is None:
+            out.append(None)
+            continue
+        t = tasks_by_id.get(int(rid))
+        if not t:
+            out.append(None)
+            continue
+        assignees_payload = []
+        completed_count = 0
+        for a in assignees_by_task.get(int(rid), []):
+            done = (a.get("status") or "").lower() == "done"
+            if done:
+                completed_count += 1
+            assignees_payload.append({
+                "user_id": int(a["user_id"]),
+                "name": a.get("user_name"),
+                "username": a.get("username"),
+                "status": a.get("status") or "open",
+                "completed_at": a["completed_at"].isoformat() if a.get("completed_at") else None,
+            })
+        total_count = len(assignees_payload)
+        params = {
+            "task_id": int(t["id"]),
+            "message_id": int(t["message_id"]),
+            "title": t["title"],
+            "description": t.get("description"),
+            "due_at": t["due_at"].isoformat() if t.get("due_at") else None,
+            "priority": t.get("priority") or "medium",
+            "status": t.get("status") or "open",
+            "created_by": int(t["created_by"]),
+            "created_at": t["created_at"].isoformat() if t.get("created_at") else None,
+            "completed_at": t["completed_at"].isoformat() if t.get("completed_at") else None,
+            "assignees": assignees_payload,
+            "completed_count": completed_count,
+            "total_count": total_count,
+        }
+        out.append({
+            "type": "task",
+            "id": int(rid),
+            "title": t["title"][:120],
+            "subtitle": (
+                f"{params['priority']} · "
+                f"{completed_count}/{total_count} done"
+                if total_count else
+                f"{params['priority']} · unassigned"
+            ),
+            "status": params["status"],
+            "deep_link": None,
+            "fields": [],
+            "params": params,
+        })
+    return out
+
+
+# Per-request caller context — set by the messages_api layer before
+# dispatching `resolve()` so the poll resolver can flag `voted_by_me`.
+class _CallerContext:
+    user_id: Optional[int] = None
+
+
+_caller = _CallerContext()
+
+
+def set_caller(user_id: Optional[int]) -> None:
+    _caller.user_id = int(user_id) if user_id is not None else None
+
+
 _RESOLVERS = {
     "job":       _resolve_jobs,
     "candidate": _resolve_candidates,
@@ -494,6 +711,8 @@ _RESOLVERS = {
     "user":      _resolve_users,
     "team":      _resolve_teams,
     "report":    _resolve_reports,
+    "poll":      _resolve_polls,
+    "task":      _resolve_tasks,
 }
 
 
