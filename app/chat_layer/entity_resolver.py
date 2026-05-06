@@ -556,9 +556,10 @@ def _resolve_polls(db: Session, refs: list) -> List[Optional[dict]]:
         all_voter_ids.update(s)
     voter_info: dict[int, dict] = {}
     if all_voter_ids:
+        from app.chat_layer.s3_chat_service import presign_profile_image
         u_rows = db.execute(
             text(
-                "SELECT id, name, username FROM users "
+                "SELECT id, name, username, profile_image_key FROM users "
                 "WHERE id IN :ids",
             ).bindparams(bindparam("ids", expanding=True)),
             {"ids": list(all_voter_ids)},
@@ -569,6 +570,9 @@ def _resolve_polls(db: Session, refs: list) -> List[Optional[dict]]:
                 "user_id": int(m["id"]),
                 "name": m.get("name"),
                 "username": m.get("username"),
+                "profile_image_url": presign_profile_image(
+                    m.get("profile_image_key"),
+                ),
             }
 
     for ref in refs:
