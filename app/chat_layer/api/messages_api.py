@@ -91,6 +91,21 @@ def _resolve_refs_for(msg, db) -> list[dict]:
                 "fields": [],
                 "params": params,
             })
+            continue
+        # Non-AI type whose resolver returned None — pass the raw
+        # ref through so the FE still has (type, id) to work with
+        # (e.g. PollCard / TaskCard can lazy-fetch via GET).
+        # Without this, polls / tasks where the resolver hiccups
+        # would render as plain text bubbles.
+        if rtype in {"poll", "task"} and original.get("id") is not None:
+            out.append({
+                "type": rtype,
+                "id": original.get("id"),
+                "title": original.get("title") or None,
+                "deep_link": None,
+                "fields": [],
+                "params": original.get("params") or None,
+            })
     return out
 
 
