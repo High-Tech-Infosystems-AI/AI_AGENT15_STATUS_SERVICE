@@ -247,12 +247,16 @@ class ChatPollVote(Base):
 
 
 class ChatTask(Base):
-    """A task attached 1:1 to a chat_messages row. Group-scope work
-    item with a list of assignees and a per-assignee done flag."""
+    """A task attached to a chat_messages row. ONE message can carry
+    MANY tasks (the multi-task / "task list" composer creates a single
+    message with several chat_tasks rows). Each row has its own
+    assignees / due / priority. Migration v21 dropped the original
+    UNIQUE on message_id.
+    """
     __tablename__ = "chat_tasks"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     message_id = Column(BigInteger, ForeignKey("chat_messages.id"),
-                         nullable=False, unique=True)
+                         nullable=False)
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=True)
     due_at = Column(DateTime, nullable=True)
@@ -270,6 +274,7 @@ class ChatTask(Base):
     __table_args__ = (
         Index("idx_task_status", "status"),
         Index("idx_task_due", "due_at"),
+        Index("idx_task_message", "message_id"),
     )
 
 

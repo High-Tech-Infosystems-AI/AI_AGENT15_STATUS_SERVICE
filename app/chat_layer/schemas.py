@@ -332,3 +332,32 @@ class TaskStatusUpdate(BaseModel):
 
 class TaskAssigneesUpdate(BaseModel):
     assignee_ids: List[int] = Field(..., max_length=50)
+
+
+class TaskListItem(BaseModel):
+    """One task inside a multi-task ("task list") submission. Mirrors
+    `TaskCreate` minus the description field — list items are usually
+    short, the chat conversation around the message captures details."""
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    assignee_ids: List[int] = Field(default_factory=list, max_length=50)
+    due_at: Optional[datetime] = None
+    priority: Literal["low", "medium", "high"] = "medium"
+
+
+class TaskListCreate(BaseModel):
+    """Body for POST /chat/conversations/{id}/task-lists.
+
+    A single chat_messages row spawns one chat_tasks row per item.
+    `title` is shown as the message's preview / list header; tasks
+    have their own per-row titles."""
+    title: Optional[str] = Field(default=None, max_length=200)
+    tasks: List[TaskListItem] = Field(..., min_length=1, max_length=20)
+
+
+class TaskListOut(BaseModel):
+    """Response shape for the bulk-create endpoint. The companion
+    `MessageOut` already carries the rendered card refs; this is a
+    pure JSON-friendly summary for callers that want the ids back."""
+    message_id: int
+    task_ids: List[int]

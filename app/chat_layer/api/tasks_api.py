@@ -25,8 +25,8 @@ from app.chat_layer.models import (
     ChatConversation, ChatMessage, ChatTask, ChatTaskAssignee,
 )
 from app.chat_layer.schemas import (
-    ErrorResponse, MessageOut, TaskAssigneesUpdate, TaskCreate, TaskOut,
-    TaskStatusUpdate,
+    ErrorResponse, MessageOut, TaskAssigneesUpdate, TaskCreate,
+    TaskListCreate, TaskOut, TaskStatusUpdate,
 )
 from app.chat_layer.ws_manager import ws_manager as chat_ws_manager
 from app.database_Layer.db_config import SessionLocal
@@ -167,6 +167,77 @@ def create_task(conversation_id: int, body: TaskCreate,
                 assigned_by=user["user_id"],
             ))
         msg.refs = [{"type": "task", "id": task.id}]
+        db.commit()
+        db.refresh(msg)
+        return _broadcast_task(
+            db, conv_id=conversation_id, msg=msg,
+            sender_id=user["user_id"], sender_user=user,
+        )
+    finally:
+        db.close()
+
+
+@router.post("/conversations/{conversation_id}/task-lists",
+             response_model=MessageOut,
+             responses={403: {"model": ErrorResponse},
+                        404: {"model": ErrorResponse}})
+def create_task_list(conversation_id: int, body: TaskListCreate,
+                      user: dict = Depends(current_user)):
+    """Create N tasks in a single chat message. Each item gets its
+    own chat_tasks row (unique title / assignees / due / priority)
+    and the parent chat_messages.refs lists every task id, so the
+    FE renders a "Task list" card that stacks every row."""
+    db: Session = SessionLocal()
+    try:
+        conv = db.get(ChatConversation, conversation_id)
+        if not conv:
+            return _err("CHAT_NOT_FOUND", "Conversation not found", 404)
+        if not store.is_member(db, conversation_id, user["user_id"]):
+            return _err("CHAT_NOT_MEMBER",
+                        "Not a member of this conversation", 403)
+        members = set(store.member_user_ids(db, conversation_id))
+        # Validate every assignee in every row is a conversation member.
+        for idx, item in enumerate(body.tasks):
+            bad = [uid for uid in item.assignee_ids if uid not in members]
+            if bad:
+                return _err(
+                    "CHAT_TASK_BAD_ASSIGNEE",
+                    f"Task #{idx + 1}: assignees not in conversation: {bad}",
+                    400,
+                )
+        # Use the list-level title for the message body if provided,
+        # otherwise fall back to a comma-joined preview of task titles.
+        body_text = (
+            body.title.strip()
+            if body.title
+            else ", ".join(t.title for t in body.tasks[:3])
+            + (f" + {len(body.tasks) - 3} more" if len(body.tasks) > 3 else "")
+        )
+        msg = store.create_message(
+            db, conversation_id=conversation_id,
+            sender_id=user["user_id"],
+            message_type="task", body=body_text or "Task list",
+            refs=None,
+        )
+        task_ids: List[int] = []
+        for item in body.tasks:
+            task = ChatTask(
+                message_id=msg.id, title=item.title,
+                description=item.description,
+                due_at=item.due_at, priority=item.priority,
+                status="open", created_by=user["user_id"],
+            )
+            db.add(task)
+            db.flush()
+            task_ids.append(task.id)
+            for uid in item.assignee_ids:
+                db.add(ChatTaskAssignee(
+                    task_id=task.id, user_id=uid,
+                    assigned_by=user["user_id"],
+                ))
+        # Stamp every task ref onto the message so the resolver
+        # enriches all of them and the FE renders a list card.
+        msg.refs = [{"type": "task", "id": tid} for tid in task_ids]
         db.commit()
         db.refresh(msg)
         return _broadcast_task(
