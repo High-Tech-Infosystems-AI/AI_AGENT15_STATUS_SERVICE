@@ -86,14 +86,6 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
             timeoutSeconds: 10
-          volumeMounts:
-            - name: hrmis-logs
-              mountPath: /var/log/hrmis
-
-      volumes:
-        - name: hrmis-logs
-          persistentVolumeClaim:
-            claimName: __LOGS_PVC__
 ---
 # ClusterIP for the main Status/Notification API (internal traffic)
 apiVersion: v1

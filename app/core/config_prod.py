@@ -25,88 +25,26 @@ def _parse_port(value: str, default: int) -> int:
 
 class Settings(BaseSettings):
     """
-    Settings class to manage application configuration
+    Settings class to manage application configuration.
     Uses Pydantic's BaseSettings to handle environment and default values.
     Values mirrored from .env as of 2024-06.
     """
 
     # Application
     APP_NAME: str = "Status service"
-    DEBUG: bool = False  # Not exposed in .env, but can be referenced
-
-    # Logging configuration
-    STATUS_AGENT_LOG: str = Field("./logs", env="LOG_FILE_PATH")
-    LOG_LEVEL: str = Field("INFO", env="LOG_LEVEL")
-    LOG_TO_CONSOLE: bool = Field(True, env="LOG_TO_CONSOLE")
-
-    # Auth Service
-    AUTH_SERVICE_URL: str = Field(default_factory=lambda: os.getenv("AUTH_SERVICE_URL", "http://localhost:8085/ats/verify-token"), env="AUTH_SERVICE_URL")
-
-    # JWT
-    ACCESS_TOKEN_EXPIRE_HOURS: int = Field(default_factory=lambda: int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "24")), env="ACCESS_TOKEN_EXPIRE_HOURS")
-    JWT_SECRET_KEY: str = Field(default_factory=lambda: os.getenv("JWT_SECRET_KEY", "h7ahasye8172#as819adh1COD797mTdAAA"), env="JWT_SECRET_KEY")
-    JWT_ALGORITHM: str = Field(default_factory=lambda: os.getenv("JWT_ALGORITHM", "HS256"), env="JWT_ALGORITHM")
-
-    # Database
-    DB_HOST: str = Field(default_factory=lambda: os.getenv("DB_HOST", "localhost"), env="DB_HOST")
-    DB_PORT: str = Field(default_factory=lambda: os.getenv("DB_PORT", "3306"), env="DB_PORT")
-    DB_NAME: str = Field(default_factory=lambda: os.getenv("DB_NAME", "ats_main"), env="DB_NAME")
-    DB_USER: str = Field(default_factory=lambda: os.getenv("DB_USER", "root"), env="DB_USER")
-    DB_PASSWORD: str = Field(default_factory=lambda: os.getenv("DB_PASSWORD", "hti@123"), env="DB_PASSWORD")
-
-    # Redis
-    REDIS_HOST: str = Field(default_factory=lambda: os.getenv("REDIS_HOST", "localhost"), env="REDIS_HOST")
-    REDIS_PORT: int = Field(default_factory=lambda: int(os.getenv("REDIS_PORT", "6380")), env="REDIS_PORT")
-    REDIS_DB: int = Field(default_factory=lambda: int(os.getenv("REDIS_DB", "0")), env="REDIS_DB")
-    REDIS_PASSWORD: str = Field(default_factory=lambda: os.getenv("REDIS_PASSWORD", ""), env="REDIS_PASSWORD")
-
-    # File Storage (not present in prod .env, left as blank default)
-    FILE_STORING_PATH: str = Field(default_factory=lambda: os.getenv("FILE_STORING_PATH", ""), env="FILE_STORING_PATH")
-
-    # Base URL
-    BASE_URL: str = Field(default_factory=lambda: os.getenv("BASE_URL", "http://localhost:8515"), env="BASE_URL")
-
-    # AWS / S3 — chat attachments
-    AWS_ACCESS_KEY_ID: str = Field(default_factory=lambda: os.getenv("AWS_ACCESS_KEY_ID", ""), env="AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY: str = Field(default_factory=lambda: os.getenv("AWS_SECRET_ACCESS_KEY", ""), env="AWS_SECRET_ACCESS_KEY")
-    AWS_REGION: str = Field(default_factory=lambda: os.getenv("AWS_REGION", "us-east-1"), env="AWS_REGION")
-    AWS_S3_ENDPOINT_URL: str = Field(default_factory=lambda: os.getenv("AWS_S3_ENDPOINT_URL", ""), env="AWS_S3_ENDPOINT_URL")
-    AWS_S3_BUCKET_CHAT: str = Field(default_factory=lambda: os.getenv("AWS_S3_BUCKET_CHAT", ""), env="AWS_S3_BUCKET_CHAT")
-    AWS_S3_BUCKET_PROFILES: str = Field(default_factory=lambda: os.getenv("AWS_S3_BUCKET_PROFILES", ""), env="AWS_S3_BUCKET_PROFILES")
-    AWS_S3_PRESIGNED_TTL_SECONDS: int = Field(default_factory=lambda: int(os.getenv("AWS_S3_PRESIGNED_TTL_SECONDS", "3600")), env="AWS_S3_PRESIGNED_TTL_SECONDS")
-
-    # Web Push (VAPID) — see config_dev.py for behavior notes.
-    VAPID_PUBLIC_KEY: str = Field(default_factory=lambda: os.getenv("VAPID_PUBLIC_KEY", ""), env="VAPID_PUBLIC_KEY")
-    VAPID_PRIVATE_KEY: str = Field(default_factory=lambda: os.getenv("VAPID_PRIVATE_KEY", ""), env="VAPID_PRIVATE_KEY")
-    VAPID_SUBJECT: str = Field(default_factory=lambda: os.getenv("VAPID_SUBJECT", "mailto:admin@hrmis.local"), env="VAPID_SUBJECT")
-    VAPID_KEYS_FILE: str = Field(default_factory=lambda: os.getenv("VAPID_KEYS_FILE", "./vapid_keys.json"), env="VAPID_KEYS_FILE")
-    WEB_PUSH_FRONTEND_BASE_URL: str = Field(default_factory=lambda: os.getenv("WEB_PUSH_FRONTEND_BASE_URL", ""), env="WEB_PUSH_FRONTEND_BASE_URL")
-
-    # AI Chatbot (Gemini, MCP, quotas)
-    GEMINI_API_KEY: str = Field(default_factory=lambda: os.getenv("GOOGLE_API_KEY", ""), env="GOOGLE_API_KEY")
-    GEMINI_PRO_MODEL: str = Field(default_factory=lambda: os.getenv("GEMINI_PRO_MODEL", "gemini-2.5-pro"), env="GEMINI_PRO_MODEL")
-    GEMINI_FLASH_MODEL: str = Field(default_factory=lambda: os.getenv("GEMINI_FLASH_MODEL", "gemini-2.5-flash"), env="GEMINI_FLASH_MODEL")
-    AI_DEFAULT_DAILY_LIMIT: int = Field(default_factory=lambda: int(os.getenv("AI_DEFAULT_DAILY_LIMIT", "50000")), env="AI_DEFAULT_DAILY_LIMIT")
-    AI_DEFAULT_MONTHLY_LIMIT: int = Field(default_factory=lambda: int(os.getenv("AI_DEFAULT_MONTHLY_LIMIT", "1000000")), env="AI_DEFAULT_MONTHLY_LIMIT")
-    AI_REDIS_DB: int = Field(default_factory=lambda: int(os.getenv("AI_REDIS_DB", "6")), env="AI_REDIS_DB")
-    AI_SESSION_TTL_SECONDS: int = Field(default_factory=lambda: int(os.getenv("AI_SESSION_TTL_SECONDS", "86400")), env="AI_SESSION_TTL_SECONDS")
-    AI_MAX_TOOL_ITER: int = Field(default_factory=lambda: int(os.getenv("AI_MAX_TOOL_ITER", "5")), env="AI_MAX_TOOL_ITER")
-    AI_TOOL_TIMEOUT_SECONDS: int = Field(default_factory=lambda: int(os.getenv("AI_TOOL_TIMEOUT_SECONDS", "8")), env="AI_TOOL_TIMEOUT_SECONDS")
-    AI_QUERY_CACHE_TTL: int = Field(default_factory=lambda: int(os.getenv("AI_QUERY_CACHE_TTL", "300")), env="AI_QUERY_CACHE_TTL")
-    MCP_MYSQL_COMMAND: str = Field(default_factory=lambda: os.getenv("MCP_MYSQL_COMMAND", ""), env="MCP_MYSQL_COMMAND")
-    MCP_MYSQL_ARGS: str = Field(default_factory=lambda: os.getenv("MCP_MYSQL_ARGS", ""), env="MCP_MYSQL_ARGS")
+    DEBUG: bool = False
 
     # Consul service discovery (optional)
-    CONSUL_HOST: str = Field(default_factory=lambda: os.getenv("CONSUL_HOST", "localhost"), env="CONSUL_HOST")
-    CONSUL_PORT: int = Field(default_factory=lambda: int(os.getenv("CONSUL_PORT", "8500")), env="CONSUL_PORT")
-    CONSUL_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes"), env="CONSUL_ENABLED")
-    CONSUL_HEALTH_CHECK_ENABLED: bool = Field(default_factory=lambda: os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes"), env="CONSUL_HEALTH_CHECK_ENABLED")
-    CONSUL_SERVICE_NAME: str = Field(default_factory=lambda: os.getenv("STATUS_SERVICE_NAME", "HRMIS_STATUS_SERVICE"), env="STATUS_SERVICE_NAME")
-    CONSUL_SERVICE_PORT: int = Field(default_factory=lambda: _parse_port(os.getenv("STATUS_SERVICE_PORT", "8115"), 8115), env="STATUS_SERVICE_PORT")
+    CONSUL_HOST: str = os.getenv("CONSUL_HOST", "localhost")
+    CONSUL_PORT: int = int(os.getenv("CONSUL_PORT", "8500"))
+    CONSUL_ENABLED: bool = os.getenv("CONSUL_ENABLED", "true").lower() in ("true", "1", "yes")
+    CONSUL_HEALTH_CHECK_ENABLED: bool = os.getenv("CONSUL_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes")
+    CONSUL_SERVICE_NAME: str = os.getenv("STATUS_SERVICE_NAME", "HRMIS_STATUS_SERVICE")
+    CONSUL_SERVICE_PORT: int = _parse_port(os.getenv("STATUS_SERVICE_PORT", "8515"), 8515)
     CONSUL_SERVICE_EXTERNAL_PORT: Optional[int] = None
-    CONSUL_SERVICE_EXTERNAL_IP: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_EXTERNAL_IP", ""), env="CONSUL_SERVICE_EXTERNAL_IP")
-    CONSUL_SERVICE_PATH: str = Field(default_factory=lambda: os.getenv("STATUS_SERVICE_PATH", "/status"), env="STATUS_SERVICE_PATH")
-    CONSUL_SERVICE_AUTH: str = Field(default_factory=lambda: os.getenv("CONSUL_SERVICE_AUTH", "mixed"), env="CONSUL_SERVICE_AUTH")
+    CONSUL_SERVICE_EXTERNAL_IP: str = os.getenv("CONSUL_SERVICE_EXTERNAL_IP", "")
+    CONSUL_SERVICE_PATH: str = os.getenv("STATUS_SERVICE_PATH", "/status")
+    CONSUL_SERVICE_AUTH: str = os.getenv("CONSUL_SERVICE_AUTH", "mixed")
 
     @field_validator("CONSUL_SERVICE_EXTERNAL_PORT", mode="before")
     @classmethod
@@ -114,6 +52,59 @@ class Settings(BaseSettings):
         if v in (None, ""):
             return None
         return int(v)
+
+    # Logging configuration
+    STATUS_AGENT_LOG: str = os.getenv("LOG_FILE_PATH", "./logs")
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_TO_CONSOLE: bool = os.getenv("LOG_TO_CONSOLE", "true").lower() in ("true", "1", "yes")
+    AUTH_SERVICE_URL: str = os.getenv("AUTH_SERVICE_URL")
+    ACCESS_TOKEN_EXPIRE_HOURS: int = os.getenv("ACCESS_TOKEN_EXPIRE_HOURS")
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM")
+    DB_HOST: str = os.getenv("DB_HOST")
+    DB_PORT: str = os.getenv("DB_PORT")
+    DB_NAME: str = os.getenv("DB_NAME")
+    DB_USER: str = os.getenv("DB_USER")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD")
+    REDIS_HOST: str = os.getenv("REDIS_HOST")
+    REDIS_PORT: int = os.getenv("REDIS_PORT")
+    REDIS_DB: int = int(os.getenv("REDIS_DB"))
+    REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD")
+
+    BASE_URL: str = os.getenv("BASE_URL")
+
+    # AWS / S3 — chat attachments
+    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
+    AWS_S3_ENDPOINT_URL: str = os.getenv("AWS_S3_ENDPOINT_URL", "")
+    AWS_S3_BUCKET_CHAT: str = os.getenv("AWS_S3_BUCKET_CHAT", "")
+    AWS_S3_BUCKET_PROFILES: str = os.getenv("AWS_S3_BUCKET_PROFILES", "")
+    AWS_S3_PRESIGNED_TTL_SECONDS: int = int(os.getenv("AWS_S3_PRESIGNED_TTL_SECONDS", "3600"))
+
+    # Web Push (VAPID) — used by chat to deliver browser push notifications.
+    # If both keys are empty, the service auto-generates a keypair on first
+    # access and persists it to VAPID_KEYS_FILE so subsequent restarts reuse
+    # the same identity (avoids invalidating user subscriptions).
+    VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "")
+    VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "")
+    VAPID_SUBJECT: str = os.getenv("VAPID_SUBJECT", "mailto:admin@hrmis.local")
+    VAPID_KEYS_FILE: str = os.getenv("VAPID_KEYS_FILE", "./vapid_keys.json")
+    WEB_PUSH_FRONTEND_BASE_URL: str = os.getenv("WEB_PUSH_FRONTEND_BASE_URL", "http://localhost:5173")
+
+    # AI Chatbot (Gemini, MCP, quotas)
+    GEMINI_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+    GEMINI_PRO_MODEL: str = os.getenv("GEMINI_PRO_MODEL", "gemini-2.5-pro")
+    GEMINI_FLASH_MODEL: str = os.getenv("GEMINI_FLASH_MODEL", "gemini-2.5-flash")
+    AI_DEFAULT_DAILY_LIMIT: int = int(os.getenv("AI_DEFAULT_DAILY_LIMIT", "50000"))
+    AI_DEFAULT_MONTHLY_LIMIT: int = int(os.getenv("AI_DEFAULT_MONTHLY_LIMIT", "1000000"))
+    AI_REDIS_DB: int = int(os.getenv("AI_REDIS_DB", "6"))
+    AI_SESSION_TTL_SECONDS: int = int(os.getenv("AI_SESSION_TTL_SECONDS", "86400"))
+    AI_MAX_TOOL_ITER: int = int(os.getenv("AI_MAX_TOOL_ITER", "5"))
+    AI_TOOL_TIMEOUT_SECONDS: int = int(os.getenv("AI_TOOL_TIMEOUT_SECONDS", "8"))
+    AI_QUERY_CACHE_TTL: int = int(os.getenv("AI_QUERY_CACHE_TTL", "300"))
+    MCP_MYSQL_COMMAND: str = os.getenv("MCP_MYSQL_COMMAND", "")
+    MCP_MYSQL_ARGS: str = os.getenv("MCP_MYSQL_ARGS", "")
 
     @property
     def DB_URI(self) -> str:

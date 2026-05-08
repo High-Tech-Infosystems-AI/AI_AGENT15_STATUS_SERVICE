@@ -10,17 +10,10 @@ handlers:
         class: logging.StreamHandler
         formatter: standard
         level: DEBUG
-    
-    file:
-        class: logging.FileHandler
-        formatter: standard
-        level: DEBUG
-        filename: status_service.log
-        encoding: utf8
 
 loggers:
     app_logger:
-        handlers: [console, file]
+        handlers: [console]
         level: INFO
         propagate: False
     # Silence noisy HTTP client debug logs on hot paths
