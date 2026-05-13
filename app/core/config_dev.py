@@ -73,6 +73,39 @@ class Settings(BaseSettings):
 
     BASE_URL: str = os.getenv("BASE_URL")
 
+    # AWS / S3 — chat attachments
+    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
+    AWS_S3_ENDPOINT_URL: str = os.getenv("AWS_S3_ENDPOINT_URL", "")
+    AWS_S3_BUCKET_CHAT: str = os.getenv("AWS_S3_BUCKET_CHAT", "")
+    AWS_S3_BUCKET_PROFILES: str = os.getenv("AWS_S3_BUCKET_PROFILES", "")
+    AWS_S3_PRESIGNED_TTL_SECONDS: int = int(os.getenv("AWS_S3_PRESIGNED_TTL_SECONDS", "3600"))
+
+    # Web Push (VAPID) — used by chat to deliver browser push notifications.
+    # If both keys are empty, the service auto-generates a keypair on first
+    # access and persists it to VAPID_KEYS_FILE so subsequent restarts reuse
+    # the same identity (avoids invalidating user subscriptions).
+    VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "")
+    VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "")
+    VAPID_SUBJECT: str = os.getenv("VAPID_SUBJECT", "mailto:admin@hrmis.local")
+    VAPID_KEYS_FILE: str = os.getenv("VAPID_KEYS_FILE", "./vapid_keys.json")
+    WEB_PUSH_FRONTEND_BASE_URL: str = os.getenv("WEB_PUSH_FRONTEND_BASE_URL", "http://localhost:5173")
+
+    # AI Chatbot (Gemini, MCP, quotas)
+    GEMINI_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+    GEMINI_PRO_MODEL: str = os.getenv("GEMINI_PRO_MODEL", "gemini-2.5-pro")
+    GEMINI_FLASH_MODEL: str = os.getenv("GEMINI_FLASH_MODEL", "gemini-2.5-flash")
+    AI_DEFAULT_DAILY_LIMIT: int = int(os.getenv("AI_DEFAULT_DAILY_LIMIT", "50000"))
+    AI_DEFAULT_MONTHLY_LIMIT: int = int(os.getenv("AI_DEFAULT_MONTHLY_LIMIT", "1000000"))
+    AI_REDIS_DB: int = int(os.getenv("AI_REDIS_DB", "6"))
+    AI_SESSION_TTL_SECONDS: int = int(os.getenv("AI_SESSION_TTL_SECONDS", "86400"))
+    AI_MAX_TOOL_ITER: int = int(os.getenv("AI_MAX_TOOL_ITER", "5"))
+    AI_TOOL_TIMEOUT_SECONDS: int = int(os.getenv("AI_TOOL_TIMEOUT_SECONDS", "8"))
+    AI_QUERY_CACHE_TTL: int = int(os.getenv("AI_QUERY_CACHE_TTL", "300"))
+    MCP_MYSQL_COMMAND: str = os.getenv("MCP_MYSQL_COMMAND", "")
+    MCP_MYSQL_ARGS: str = os.getenv("MCP_MYSQL_ARGS", "")
+
     @property
     def DB_URI(self) -> str:
         # Use mysql+mysqlconnector as ORM dialect and driver
