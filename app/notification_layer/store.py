@@ -446,8 +446,24 @@ def get_admin_notification_logs(
     """
     Admin view — returns all notifications with recipient stats.
     `user_id`, `job_id`, `company_id`, `created_by` accept comma-separated values.
+
+    Expired banners are intentionally included: a banner is set is_active=0 once
+    its expires_at passes, but for the History view it should remain visible with
+    status="expired". Explicitly deleted rows (deleted_at set) stay hidden, as do
+    soft-deleted notifications that aren't expired banners.
     """
-    query = db.query(Notification).filter(Notification.is_active == 1)
+    now = datetime.utcnow()
+    query = db.query(Notification).filter(
+        Notification.deleted_at.is_(None),
+        or_(
+            Notification.is_active == 1,
+            and_(
+                Notification.delivery_mode == "banner",
+                Notification.expires_at.isnot(None),
+                Notification.expires_at <= now,
+            ),
+        ),
+    )
 
     if domain_type:
         types = [t.strip() for t in domain_type.split(",")]
@@ -589,11 +605,21 @@ def get_admin_notification_logs(
             except (json.JSONDecodeError, TypeError):
                 meta = notif.extra_metadata
 
+        # Lifecycle status for the History view. Only banners expire; everything
+        # else is active (soft-deleted rows are filtered out before we get here).
+        is_expired = (
+            notif.delivery_mode == "banner"
+            and notif.expires_at is not None
+            and notif.expires_at <= now
+        )
+        status = "expired" if is_expired else ("active" if notif.is_active else "inactive")
+
         results.append({
             "id": notif.id,
             "title": notif.title,
             "message": notif.message,
             "delivery_mode": notif.delivery_mode,
+            "status": status,
             "domain_type": notif.domain_type,
             "visibility": notif.visibility,
             "priority": notif.priority,
@@ -1209,11 +1235,14 @@ def get_notification_recipient_ids(db: Session, notification_id: int) -> List[in
 
 
 def soft_delete_notification(db: Session, notification_id: int) -> Optional[Notification]:
-    """Soft-delete a notification (sets is_active=0). Returns the notification or None."""
+    """Soft-delete a notification. Sets is_active=0 AND stamps deleted_at so the
+    row is hidden everywhere — including the History view, which otherwise re-includes
+    expired (is_active=0) banners. Returns the notification or None."""
     notif = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notif:
         return None
     notif.is_active = 0
+    notif.deleted_at = datetime.utcnow()
     db.commit()
     db.refresh(notif)
     return notif
