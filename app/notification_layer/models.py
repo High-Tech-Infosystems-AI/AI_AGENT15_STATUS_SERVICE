@@ -60,8 +60,13 @@ class Notification(Base):
     # Banner expiration
     expires_at = Column(DateTime, nullable=True)
 
-    # Soft-delete
+    # Soft-delete.
+    # is_active=0 means "not currently shown" — set both when a banner EXPIRES
+    # and when a row is explicitly deleted. deleted_at disambiguates: it is only
+    # stamped on explicit deletion, so expired-but-not-deleted banners (is_active=0,
+    # deleted_at IS NULL) can still surface in the History view while deleted rows stay hidden.
     is_active = Column(TINYINT(1), nullable=False, server_default="1")
+    deleted_at = Column(DateTime, nullable=True)
 
     # Relationships
     recipients = relationship("NotificationRecipient", back_populates="notification", lazy="dynamic")
@@ -76,6 +81,7 @@ class Notification(Base):
         Index("idx_event_type", "event_type"),
         Index("idx_created_at", "created_at"),
         Index("idx_is_active", "is_active"),
+        Index("idx_deleted_at", "deleted_at"),
         Index("idx_target_type", "target_type"),
         Index("idx_filter_combo", "domain_type", "visibility", "created_at", "is_active"),
     )
