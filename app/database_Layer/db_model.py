@@ -47,6 +47,7 @@ class User(Base):
     name = Column(String(100), nullable=False)
     username = Column(String(50), unique=True, nullable=False, index=True)
     email = Column(String(100), unique=True, nullable=False, index=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     password_hash = Column(String(255), nullable=False)
     created_at = Column(TIMESTAMP)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
@@ -115,6 +116,7 @@ class Company(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     company_id = Column(String(64), nullable=False, unique=True)
     company_name = Column(String(255), nullable=False)
+    organization_id = Column(Integer, nullable=True, index=True)
     location = Column(String(255), nullable=False)
     city = Column(String(100))
     state = Column(String(100))
@@ -182,6 +184,9 @@ class JobOpenings(Base):
 
     # External/public identifier
     job_id = Column(String(100), unique=True, nullable=False, index=True)
+
+    # Tenant scope
+    organization_id = Column(Integer, nullable=True, index=True)
 
     # Foreign keys
     company_id = Column(Integer, ForeignKey('companies.id'), nullable=False, index=True)
