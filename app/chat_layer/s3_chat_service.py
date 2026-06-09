@@ -1,5 +1,6 @@
 """S3 service for chat attachments. Modeled on AI_AGENT11_RBAC_Service/app/utils_layer/s3_service.py."""
 import logging
+import os
 import threading
 import time
 import uuid
@@ -25,11 +26,51 @@ ALLOWED_FILE_MIMES = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "application/zip",
     "text/plain",
+    "text/csv",
+    "application/csv",
 } | ALLOWED_IMAGE_MIMES
+
+# Extension → canonical MIME. Used when the browser reports a generic/unknown
+# content-type (commonly "application/octet-stream" for .xlsx/.csv on machines
+# where Office isn't registered to those extensions), so valid files aren't
+# wrongly rejected. Also normalizes the stored mime_type so the UI can pick the
+# right viewer.
+_EXT_TO_MIME = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".zip": "application/zip",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+_GENERIC_MIMES = {"", "application/octet-stream", "binary/octet-stream"}
+_ALL_ALLOWED_MIMES = ALLOWED_FILE_MIMES | ALLOWED_VOICE_MIMES
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_VOICE_BYTES = 10 * 1024 * 1024
 MAX_FILE_BYTES = 50 * 1024 * 1024
+
+
+def resolve_mime(mime: str, file_name: str) -> str:
+    """Return a trustworthy MIME. If the reported type is generic/unknown or not
+    in our allow-list, fall back to the file extension when that maps to a known
+    type. Keeps an already-valid MIME as-is."""
+    m = (mime or "").lower()
+    if m in _ALL_ALLOWED_MIMES:
+        return m
+    ext = os.path.splitext(file_name or "")[1].lower()
+    if (m in _GENERIC_MIMES or m not in _ALL_ALLOWED_MIMES) and ext in _EXT_TO_MIME:
+        return _EXT_TO_MIME[ext]
+    return m
 
 
 def _category_for(mime: str) -> str:
@@ -65,6 +106,9 @@ def _client():
 def upload_attachment(*, data: bytes, mime_type: str, file_name: str,
                       uploaded_by: int, conversation_id: int,
                       duration_seconds: Optional[int] = None) -> dict:
+    # Normalize first so generic/unknown browser MIMEs (e.g. octet-stream for
+    # .xlsx/.csv) are recognized by extension instead of being rejected.
+    mime_type = resolve_mime(mime_type, file_name)
     category = _category_for(mime_type)
     if len(data) > _max_bytes_for(category):
         raise ValueError(f"Attachment size {len(data)} exceeds limit for {category}")
