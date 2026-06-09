@@ -96,28 +96,82 @@ def get_or_create_team_conversation(db: Session, team_id: int,
     return conv, list(member_user_ids)
 
 
-def get_general_conversation(db: Session) -> ChatConversation:
+def _resolve_user_org(db: Session, user_id: int) -> Optional[int]:
+    """Look up the user's organisation_id from the shared users table.
+    Returns None if the user has no org (rare: super_admin platform-only)."""
+    from sqlalchemy import text
+    try:
+        row = db.execute(
+            text("SELECT organization_id FROM users WHERE id = :uid"),
+            {"uid": user_id},
+        ).first()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
+def get_general_conversation(
+    db: Session, organization_id: Optional[int] = None
+) -> ChatConversation:
+    """Return (or create) the org-scoped #general conversation.
+
+    Each organisation has its OWN #general / "all group" — members of org A
+    must never see traffic from org B. The original implementation used a
+    single platform-wide conversation (id=1); that's now reserved for
+    super_admins / users with no org.
+    """
     conv = db.execute(
-        select(ChatConversation).where(ChatConversation.type == "general")
+        select(ChatConversation).where(
+            and_(
+                ChatConversation.type == "general",
+                ChatConversation.organization_id.is_(None)
+                if organization_id is None
+                else ChatConversation.organization_id == organization_id,
+            )
+        )
     ).scalar_one_or_none()
-    if not conv:
-        conv = ChatConversation(id=1, type="general", title="#general")
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
+    if conv:
+        return conv
+
+    title = (
+        "#general"
+        if organization_id is None
+        else f"#general (org {organization_id})"
+    )
+    conv = ChatConversation(
+        type="general",
+        title=title,
+        organization_id=organization_id,
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
     return conv
 
 
 def ensure_general_member(db: Session, user_id: int) -> None:
+    """Make sure the caller is a member of THEIR org's #general."""
+    org_id = _resolve_user_org(db, user_id)
+
     exists_q = db.execute(
         select(ChatConversationMember.id)
-        .join(ChatConversation, ChatConversation.id == ChatConversationMember.conversation_id)
-        .where(and_(ChatConversation.type == "general",
-                    ChatConversationMember.user_id == user_id))
+        .join(
+            ChatConversation,
+            ChatConversation.id == ChatConversationMember.conversation_id,
+        )
+        .where(
+            and_(
+                ChatConversation.type == "general",
+                ChatConversation.organization_id.is_(None)
+                if org_id is None
+                else ChatConversation.organization_id == org_id,
+                ChatConversationMember.user_id == user_id,
+            )
+        )
     ).first()
     if exists_q:
         return
-    conv = get_general_conversation(db)
+    conv = get_general_conversation(db, organization_id=org_id)
     db.add(ChatConversationMember(conversation_id=conv.id, user_id=user_id))
     db.commit()
 
