@@ -24,6 +24,7 @@ class Notification(Base):
     __tablename__ = "notifications"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     title = Column(String(255), nullable=False)
     message = Column(Text, nullable=False)
 
@@ -113,6 +114,7 @@ class NotificationSchedule(Base):
     __tablename__ = "notification_schedules"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     title = Column(String(255), nullable=False)
     message = Column(Text, nullable=False)
     delivery_mode = Column(String(20), nullable=False)

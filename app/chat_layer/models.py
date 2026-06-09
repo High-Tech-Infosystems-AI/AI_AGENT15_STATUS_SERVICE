@@ -19,6 +19,7 @@ logger = logging.getLogger("app_logger")
 class ChatConversation(Base):
     __tablename__ = "chat_conversations"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     type = Column(String(10), nullable=False)  # dm | team | general
     team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
     title = Column(String(255), nullable=True)
@@ -74,6 +75,7 @@ class ChatMessageAttachment(Base):
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     conversation_id = Column(Integer, ForeignKey("chat_conversations.id"), nullable=False)
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     message_type = Column(String(10), nullable=False, server_default="text")

@@ -44,13 +44,28 @@ def _fetch_team_member_ids(db, team_id: int) -> List[int]:
     return [r[0] for r in rows]
 
 
+from app.dependencies.tenant_auth import AuthCtx, get_auth_ctx
+
+
 @router.post("/conversations/dm", response_model=ConversationOut,
              responses={403: {"model": ErrorResponse}})
-def create_dm(req: CreateDMRequest, user: dict = Depends(current_user)):
+def create_dm(req: CreateDMRequest,
+              ctx: AuthCtx = Depends(get_auth_ctx),
+              user: dict = Depends(current_user)):
+    # Chat is default-access — no permission key. Tenant scope still applies:
+    # the peer must belong to the same org as the caller (or super_admin path).
+    # The store.get_or_create_dm helper should stamp organization_id on new
+    # rows; this endpoint just enforces the cross-org block.
     db = SessionLocal()
     try:
         if not _is_user_active(db, req.peer_user_id):
             return _err("CHAT_USER_INACTIVE", "Peer user is not active", 403)
+        # Cross-tenant DM block: a tenant user cannot DM a user in another org.
+        if not ctx.is_super_admin and ctx.organization_id is not None:
+            from app.database_Layer.db_store import User as _UModel  # local import to avoid cycles
+            peer = db.query(_UModel).filter(_UModel.id == req.peer_user_id).first()
+            if peer and getattr(peer, "organization_id", None) not in (None, ctx.organization_id):
+                return _err("CHAT_CROSS_TENANT_DM", "Cannot DM a user in another organisation", 403)
         if not can_post_dm(peer_active=True):
             return _err("CHAT_USER_INACTIVE", "Cannot DM inactive user", 403)
         conv, newly_added = store.get_or_create_dm(db, user["user_id"], req.peer_user_id)
@@ -82,10 +97,17 @@ def list_conversations(user: dict = Depends(current_user)):
 
 @router.get("/conversations/general", response_model=ConversationOut)
 def get_general(user: dict = Depends(current_user)):
+    """Return the caller's ORG-SCOPED #general conversation.
+
+    Each tenant has its own "all group". Members of org A never see
+    traffic from org B. Users without an org (super_admin platform-only)
+    land on the legacy platform-wide row (organization_id IS NULL).
+    """
     db = SessionLocal()
     try:
         store.ensure_general_member(db, user["user_id"])
-        conv = store.get_general_conversation(db)
+        org_id = store._resolve_user_org(db, user["user_id"])
+        conv = store.get_general_conversation(db, organization_id=org_id)
         return _serialise(conv, store.member_user_ids(db, conv.id))
     finally:
         db.close()
