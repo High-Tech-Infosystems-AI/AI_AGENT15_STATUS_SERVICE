@@ -427,6 +427,128 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
     return out
 
 
+def inbox_for_org(db: Session, organization_id: int) -> List[dict]:
+    """Return the inbox view for ALL conversations in an organisation.
+
+    Intended only for super_admin scoping (`?organization_id=X`) so they
+    can audit another tenant's chat surface without being a member of
+    every conversation.
+
+    Same shape as `inbox_for_user` (peer, team, latest_message, members)
+    EXCEPT `unread_count` is always 0 — super_admin isn't really a
+    member, so the per-user-unread-count maths doesn't apply.
+    """
+    from sqlalchemy import text as _text
+
+    headers = db.execute(_text("""
+        SELECT c.id, c.type, c.team_id, c.title, c.last_message_at,
+               (SELECT MAX(cm2.id) FROM chat_messages cm2
+                 WHERE cm2.conversation_id = c.id) AS latest_msg_id
+          FROM chat_conversations c
+         WHERE c.organization_id = :org_id
+           AND c.deleted_at IS NULL
+         ORDER BY (c.last_message_at IS NULL), c.last_message_at DESC, c.id DESC
+    """), {"org_id": organization_id}).all()
+
+    if not headers:
+        return []
+
+    conv_ids = [r._mapping["id"] for r in headers]
+    latest_msg_ids = [r._mapping["latest_msg_id"] for r in headers
+                      if r._mapping["latest_msg_id"] is not None]
+
+    # Members (same as inbox_for_user)
+    member_rows = db.execute(_text("""
+        SELECT conversation_id, user_id
+          FROM chat_conversation_members
+         WHERE conversation_id IN :ids
+    """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
+        {"ids": conv_ids},
+    ).all()
+    members_by_conv: dict = {}
+    for r in member_rows:
+        members_by_conv.setdefault(r._mapping["conversation_id"], []).append(
+            r._mapping["user_id"]
+        )
+
+    # Latest messages
+    latest_by_id: dict = {}
+    if latest_msg_ids:
+        msg_rows = db.execute(_text("""
+            SELECT id, conversation_id, sender_id, message_type, body,
+                   created_at, deleted_at
+              FROM chat_messages
+             WHERE id IN :ids
+        """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
+            {"ids": latest_msg_ids},
+        ).all()
+        for r in msg_rows:
+            m = r._mapping
+            preview = _preview_for(m["message_type"], m["body"], m["deleted_at"])
+            latest_by_id[m["id"]] = {
+                "id": m["id"],
+                "sender_id": m["sender_id"],
+                "message_type": m["message_type"],
+                "body_preview": preview,
+                "created_at": m["created_at"],
+                "deleted_at": m["deleted_at"],
+            }
+
+    # Team metadata for team conversations
+    team_ids = [r._mapping["team_id"] for r in headers
+                if r._mapping["type"] == "team" and r._mapping["team_id"]]
+    team_by_id: dict = {}
+    if team_ids:
+        team_rows = db.execute(_text("""
+            SELECT id, name FROM teams WHERE id IN :ids
+        """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
+            {"ids": team_ids},
+        ).all()
+        for r in team_rows:
+            team_by_id[r._mapping["id"]] = {
+                "id": r._mapping["id"],
+                "name": r._mapping["name"],
+            }
+
+    # No DM peer resolution: super_admin is not "the other side" of the
+    # DM, so we leave peer=None for DMs (they still show member ids).
+    out = []
+    for r in headers:
+        h = r._mapping
+        team = team_by_id.get(h["team_id"]) if h["type"] == "team" else None
+        out.append({
+            "id": h["id"],
+            "type": h["type"],
+            "team_id": h["team_id"],
+            "title": h["title"],
+            "last_message_at": h["last_message_at"],
+            "unread_count": 0,
+            "members": members_by_conv.get(h["id"], []),
+            "latest_message": latest_by_id.get(h["latest_msg_id"]),
+            "peer": None,
+            "team": team,
+        })
+    return out
+
+
+def conversation_belongs_to_org(
+    db: Session, conversation_id: int, organization_id: int
+) -> bool:
+    """True if the conversation's owning organisation matches.
+    Used by super_admin code paths to authorise access without
+    requiring membership.
+    """
+    from sqlalchemy import text as _text
+    row = db.execute(
+        _text(
+            "SELECT 1 FROM chat_conversations "
+            "WHERE id = :cid AND organization_id = :oid AND deleted_at IS NULL"
+        ),
+        {"cid": conversation_id, "oid": organization_id},
+    ).first()
+    return row is not None
+
+
 def _preview_for(message_type: str, body, deleted_at) -> str:
     if deleted_at is not None:
         return "[message deleted]"
