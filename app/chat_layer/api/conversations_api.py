@@ -1,7 +1,7 @@
 """Conversation endpoints."""
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
@@ -17,6 +17,14 @@ from app.database_Layer.db_config import SessionLocal
 from app.database_Layer.db_model import User
 
 router = APIRouter()
+
+
+def _is_super_admin(user: dict) -> bool:
+    """Role-name based check. `role_name` is set by the auth service and
+    cached on the chat-side token validation. Falls back to False if the
+    field is missing (treats the caller as a tier user — safest default).
+    """
+    return (user.get("role_name") or "").lower() == "super_admin"
 
 
 def _err(code: str, msg: str, status: int) -> JSONResponse:
@@ -83,12 +91,32 @@ def create_dm(req: CreateDMRequest,
 
 
 @router.get("/conversations", response_model=List[ConversationOut])
-def list_conversations(user: dict = Depends(current_user)):
-    """WhatsApp-style inbox: all conversations the caller belongs to,
-    enriched with latest message preview, unread count, and peer/team info.
-    Sorted by last_message_at DESC NULLS LAST."""
+def list_conversations(
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) view ALL conversations of the named org "
+            "instead of the caller's personal inbox. Ignored for "
+            "admin / tier users — they always see their own membership-"
+            "based inbox, implicitly scoped to their JWT org."
+        ),
+    ),
+    user: dict = Depends(current_user),
+):
+    """Inbox view, org-aware.
+
+    - Tier / admin caller: personal inbox (membership-based). Already
+      org-scoped because they're only members of their own org's chats.
+    - super_admin without `organization_id`: personal inbox (membership).
+      They typically see only the platform-wide #general.
+    - super_admin with `organization_id=X`: ALL conversations of org X,
+      regardless of membership — audit/inspection view.
+    """
     db = SessionLocal()
     try:
+        if _is_super_admin(user) and organization_id is not None:
+            return store.inbox_for_org(db, organization_id)
+
         store.ensure_general_member(db, user["user_id"])
         return store.inbox_for_user(db, user["user_id"])
     finally:
@@ -96,15 +124,34 @@ def list_conversations(user: dict = Depends(current_user)):
 
 
 @router.get("/conversations/general", response_model=ConversationOut)
-def get_general(user: dict = Depends(current_user)):
+def get_general(
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) view a specific org's #general / 'all "
+            "group'. Ignored for tier / admin users — they always get "
+            "their own org's #general."
+        ),
+    ),
+    user: dict = Depends(current_user),
+):
     """Return the caller's ORG-SCOPED #general conversation.
 
     Each tenant has its own "all group". Members of org A never see
     traffic from org B. Users without an org (super_admin platform-only)
     land on the legacy platform-wide row (organization_id IS NULL).
+
+    super_admin can pass `?organization_id=X` to view org X's #general
+    (audit / inspection view, no membership required).
     """
     db = SessionLocal()
     try:
+        if _is_super_admin(user) and organization_id is not None:
+            conv = store.get_general_conversation(
+                db, organization_id=organization_id
+            )
+            return _serialise(conv, store.member_user_ids(db, conv.id))
+
         store.ensure_general_member(db, user["user_id"])
         org_id = store._resolve_user_org(db, user["user_id"])
         conv = store.get_general_conversation(db, organization_id=org_id)
@@ -153,8 +200,12 @@ def get_team_conversation(team_id: int, user: dict = Depends(current_user)):
 def get_conversation(conversation_id: int, user: dict = Depends(current_user)):
     db = SessionLocal()
     try:
-        if not store.is_member(db, conversation_id, user["user_id"]):
-            return _err("CHAT_NOT_MEMBER", "Not a conversation member", 403)
+        # super_admin: bypass the membership check so they can audit any
+        # tenant's conversation without first joining it. tier / admin
+        # callers MUST be a member — that's their normal scope guarantee.
+        if not _is_super_admin(user):
+            if not store.is_member(db, conversation_id, user["user_id"]):
+                return _err("CHAT_NOT_MEMBER", "Not a conversation member", 403)
         conv = db.get(ChatConversation, conversation_id)
         if not conv or conv.deleted_at is not None:
             return _err("CHAT_NOT_FOUND", "Conversation not found", 404)

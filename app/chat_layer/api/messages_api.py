@@ -16,7 +16,16 @@ from app.chat_layer.auth import current_user
 from app.chat_layer.ws_manager import ws_manager as chat_ws_manager
 from app.chat_layer.chat_acl import (
     can_delete_message, can_edit_message, can_post_dm, can_post_general, can_post_team,
+    is_admin as _is_admin_role,
 )
+
+
+def _is_super_admin(user: dict) -> bool:
+    """super_admin bypasses membership checks for READ paths so they can
+    audit any tenant's chat. WRITE paths still enforce membership /
+    post-rules (we don't want super_admin's audit views to also be a
+    write channel into other tenants' chats)."""
+    return (user.get("role_name") or "").lower() == "super_admin"
 from app.chat_layer.formatting import sanitise_body
 from app.chat_layer.mentions import extract_usernames
 from app.chat_layer.models import (
@@ -440,8 +449,11 @@ def list_messages(conversation_id: int, cursor: Optional[str] = None,
     from sqlalchemy import select as _select
     db = SessionLocal()
     try:
-        if not store.is_member(db, conversation_id, user["user_id"]):
-            return _err("CHAT_NOT_MEMBER", "Not a conversation member", 403)
+        # super_admin: bypass membership for read access (audit view).
+        # Tier / admin: must be a member of the conversation.
+        if not _is_super_admin(user):
+            if not store.is_member(db, conversation_id, user["user_id"]):
+                return _err("CHAT_NOT_MEMBER", "Not a conversation member", 403)
         rows, has_more, next_cursor = store.list_messages(
             db, conversation_id=conversation_id, cursor=cursor,
             limit=min(max(limit, 1), 100),
