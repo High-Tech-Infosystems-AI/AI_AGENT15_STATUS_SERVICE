@@ -181,12 +181,6 @@ class ConversationOut(BaseModel):
     members: List[int] = []
     latest_message: Optional[LatestMessagePreview] = None
     peer: Optional[PeerInfo] = None
-    # Audit-only: full participant info for DMs when super_admin views
-    # another tenant's inbox. They're not a member of the DM, so there's
-    # no canonical "other side" — we return BOTH participants and let
-    # the UI render "User A ↔ User B". Unset (None) for normal inboxes
-    # where `peer` already represents the caller's counterpart.
-    participants: Optional[List[PeerInfo]] = None
     team: Optional[TeamInfo] = None
 
     model_config = {"from_attributes": True}
