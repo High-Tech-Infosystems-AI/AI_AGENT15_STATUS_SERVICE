@@ -31,6 +31,33 @@ logger = logging.getLogger("app_logger")
 
 ENTITY_TYPES = ("job", "candidate", "company", "pipeline", "user", "team", "report")
 
+# RBAC read keys — must stay in sync with the frontend permission registry
+# (AI_AGENT4_UI_FrontEnd/src/constants/permissions.ts) and RBAC seed data.
+ENTITY_READ_PERMISSIONS: dict[str, str] = {
+    "job": "jobs.read",
+    "candidate": "candidates.read",
+    "company": "companies.read",
+    "pipeline": "pipelines.read",
+    "user": "users.read",
+    "team": "teams.read",
+    "report": "reports.read",
+}
+
+
+def can_read_entity_type(
+    type_: str,
+    *,
+    permissions: Optional[set] = None,
+    is_admin_tier: bool = False,
+) -> bool:
+    """Whether the caller may search for / insert cards of this entity type."""
+    if is_admin_tier:
+        return True
+    key = ENTITY_READ_PERMISSIONS.get(type_)
+    if not key:
+        return False
+    return key in (permissions or set())
+
 
 def _status_color_for(s: Optional[str]) -> Optional[str]:
     """Map any free-form status to a 4-color palette the FE can render."""
@@ -824,23 +851,27 @@ def get_user_role_name(db: Session, user_id: int) -> Optional[str]:
 
 def has_access(db: Session, *, user_id: Optional[int],
                role_name: Optional[str], type_: str,
-               entity_id) -> bool:
+               entity_id,
+               permissions: Optional[set] = None,
+               is_admin_tier: bool = False) -> bool:
     """Whether `user_id` can open the entity behind a chat card.
 
-    Admins (Admin / SuperAdmin) bypass all checks. For everyone else:
+    Admin / SuperAdmin tiers bypass all checks. For everyone else the
+    caller must hold the module read permission for `type_` AND pass the
+    assignment-scope rules below:
       - job: must be in `user_jobs_assigned` for that job.
       - candidate: must be linked through `candidate_jobs` to a job
         in the caller's `user_jobs_assigned` set.
       - company: must own at least one job in the caller's
         `user_jobs_assigned` set.
-      - pipeline / user / team / report: always allowed (these are
-        non-sensitive references — pipeline templates, identities, and
-        chart catalogs).
+      - pipeline / user / team / report: allowed once the read perm passes.
     Unknown types default to False so a future entity type doesn't
     accidentally leak through.
     """
-    if is_admin_role(role_name):
+    if is_admin_tier or is_admin_role(role_name):
         return True
+    if not can_read_entity_type(type_, permissions=permissions, is_admin_tier=False):
+        return False
     if user_id is None:
         return False
     if type_ in ("pipeline", "user", "team", "report"):
