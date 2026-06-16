@@ -152,7 +152,27 @@ def get_general_conversation(
 def ensure_general_member(db: Session, user_id: int) -> None:
     """Make sure the caller is a member of THEIR org's #general."""
     org_id = _resolve_user_org(db, user_id)
+    _ensure_member_of_general(db, user_id, org_id)
 
+
+def ensure_general_member_for_org(
+    db: Session, user_id: int, organization_id: int,
+) -> None:
+    """Ensure the user is a member of the given org's #general.
+
+    Used to lazily wire super_admins into every tenant's #general the
+    first time they pick that org in the navbar — they get chat access
+    without anyone having to add them manually, and the membership row
+    means all the existing posting / unread / WS logic keeps working
+    untouched.
+    """
+    _ensure_member_of_general(db, user_id, organization_id)
+
+
+def _ensure_member_of_general(
+    db: Session, user_id: int, org_id: Optional[int],
+) -> None:
+    """Shared core: idempotently add user_id to (org_id)'s #general."""
     exists_q = db.execute(
         select(ChatConversationMember.id)
         .join(
@@ -259,10 +279,20 @@ def _ensure_ai_assistant_dm(db: Session, user_id: int) -> None:
             pass
 
 
-def inbox_for_user(db: Session, user_id: int) -> List[dict]:
+def inbox_for_user(
+    db: Session, user_id: int, organization_id: Optional[int] = None,
+) -> List[dict]:
     """
     Return the WhatsApp-style inbox: every conversation the user belongs to,
     enriched with the latest message preview, unread count, and peer/team info.
+
+    organization_id:
+        Optional org filter. When set, only conversations whose owning
+        org matches are returned. Used by super_admin to narrow their
+        OWN inbox (which spans multiple tenants, since they can be a
+        member of conversations in different orgs) to a single picked
+        org. Membership is still required — super_admin never sees
+        conversations they don't belong to.
 
     Output rows have shape:
       {
@@ -291,8 +321,15 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
 
     from sqlalchemy import text as _text
 
-    # 1. Conversation headers + unread count + latest message id
-    headers = db.execute(_text("""
+    # 1. Conversation headers + unread count + latest message id.
+    # Org filter is a no-op when organization_id is None — we keep the
+    # SQL identical so MySQL can reuse its plan cache.
+    org_clause = "AND c.organization_id = :org_id" if organization_id is not None else ""
+    params = {"uid": user_id}
+    if organization_id is not None:
+        params["org_id"] = organization_id
+
+    headers = db.execute(_text(f"""
         SELECT c.id, c.type, c.team_id, c.title, c.last_message_at,
                m.last_read_message_id,
                (SELECT COUNT(*)
@@ -309,8 +346,9 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
           JOIN chat_conversation_members m ON m.conversation_id = c.id
          WHERE m.user_id = :uid
            AND c.deleted_at IS NULL
+           {org_clause}
          ORDER BY (c.last_message_at IS NULL), c.last_message_at DESC, c.id DESC
-    """), {"uid": user_id}).all()
+    """), params).all()
 
     if not headers:
         return []
