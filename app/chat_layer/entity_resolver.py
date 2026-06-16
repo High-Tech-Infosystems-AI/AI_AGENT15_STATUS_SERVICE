@@ -40,7 +40,7 @@ ENTITY_READ_PERMISSIONS: dict[str, str] = {
     "pipeline": "pipelines.read",
     "user": "users.read",
     "team": "teams.read",
-    "report": "reports.read",
+    "report": "dashboard.view",
 }
 
 
