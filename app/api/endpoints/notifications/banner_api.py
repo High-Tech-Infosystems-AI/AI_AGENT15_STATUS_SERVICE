@@ -6,11 +6,13 @@ GET  /notifications/banners/active — list active banners
 
 import logging
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
-from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
+from app.api.endpoints.dependencies.auth_utils import (
+    validate_token, check_admin_access, resolve_effective_org_id,
+)
 from app.database_Layer.db_config import get_db
 from app.notification_layer import store, redis_manager
 from app.notification_layer.store import TargetValidationError
@@ -54,6 +56,14 @@ def _resolve_banner_expiry(requested: Optional[datetime]) -> datetime:
 @router.post("/banner", response_model=SendNotificationResponse)
 async def create_banner(
     request: CreateBannerRequest,
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) scope the banner to a specific org. "
+            "Ignored for admin / tier users — they're always pinned to their "
+            "own JWT organization_id."
+        ),
+    ),
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
@@ -63,6 +73,7 @@ async def create_banner(
         raise HTTPException(status_code=403, detail="Only admin/super_admin can create banners")
 
     user_id = user_info.get("user_id")
+    effective_org_id = resolve_effective_org_id(user_info, organization_id)
 
     # Validate + default expires_at (rejects past times, defaults to tomorrow 00:00)
     expires_at = _resolve_banner_expiry(request.expires_at)
@@ -82,6 +93,7 @@ async def create_banner(
             metadata=request.metadata,
             created_by=user_id,
             expires_at=expires_at,
+            organization_id=effective_org_id,
         )
     except TargetValidationError as e:
         db.rollback()
@@ -120,15 +132,34 @@ async def create_banner(
 
 @router.get("/banners/active", response_model=List[BannerResponse])
 async def get_active_banners(
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) view active banners for a specific org. "
+            "Ignored for admin / tier users — they always see only their "
+            "own org's banners on the management page."
+        ),
+    ),
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
-    """Get all active banner notifications for the dashboard scrolling ticker."""
-    # Try cache first
-    cached = redis_manager.get_cached_banners()
-    if cached is not None:
-        return cached
+    """Get all active banner notifications for the dashboard scrolling ticker.
 
-    banners = store.get_active_banners(db)
-    redis_manager.set_cached_banners(banners)
-    return banners
+    Org-scoped: tier admins see only their tenant's banners. The cache
+    is bypassed when an explicit org filter is in play (each org gets
+    its own slice; caching the global view would leak across tenants).
+    """
+    effective_org_id = resolve_effective_org_id(user_info, organization_id)
+
+    # Only the platform-wide super_admin view (no scope) hits the cache.
+    # Org-scoped requests bypass — separate cache keys per org would be
+    # nicer but the page-level call volume doesn't justify the bookkeeping.
+    if effective_org_id is None:
+        cached = redis_manager.get_cached_banners()
+        if cached is not None:
+            return cached
+        banners = store.get_active_banners(db)
+        redis_manager.set_cached_banners(banners)
+        return banners
+
+    return store.get_active_banners(db, organization_id=effective_org_id)

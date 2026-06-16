@@ -78,6 +78,7 @@ def _fire_scheduled_notifications(db, now: datetime):
                 target_type=sched.target_type, target_id=sched.target_id,
                 source_service="system", event_type="scheduled_notification",
                 metadata=metadata, created_by=sched.created_by,
+                organization_id=sched.organization_id,
             )
 
             pub_payload = {

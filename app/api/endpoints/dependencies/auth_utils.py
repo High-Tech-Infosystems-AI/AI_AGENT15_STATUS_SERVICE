@@ -11,6 +11,7 @@ adding ~200-500ms latency per call. Now we:
 import json
 import logging
 import hashlib
+from typing import Optional
 
 import httpx
 from fastapi import HTTPException, Depends
@@ -28,9 +29,15 @@ TOKEN_CACHE_TTL_SECONDS = 60
 
 
 def _token_cache_key(token: str) -> str:
-    """Use sha256 of the token as cache key (don't store raw tokens in Redis)."""
+    """Use sha256 of the token as cache key (don't store raw tokens in Redis).
+
+    The `v2:` prefix is a schema version. Bumped when the cached payload
+    gains a new required field (most recently: `organization_id`). Old
+    `auth:token:*` entries silently fall back to a re-fetch instead of
+    returning a stale shape that downstream code can't handle.
+    """
     h = hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
-    return f"auth:token:{h}"
+    return f"auth:token:v2:{h}"
 
 
 def _get_redis():
@@ -81,6 +88,10 @@ async def validate_token(credentials: HTTPAuthorizationCredentials = Depends(sec
         "user_id": user_id,
         "role_id": role_id,
         "role_name": role_name,
+        # Tenant context — NULL for super_admin (platform-wide), set for
+        # everyone else. Used by tenant-scoped endpoints (e.g. notifications)
+        # to derive the caller's org without an extra DB hit.
+        "organization_id": token_info.get("organization_id"),
     }
 
     # 3. Cache for future requests
@@ -96,6 +107,24 @@ async def validate_token(credentials: HTTPAuthorizationCredentials = Depends(sec
 
 def check_admin_access(role_name: str) -> bool:
     return role_name.lower() in ["admin", "super_admin"]
+
+
+def resolve_effective_org_id(
+    user_info: dict, requested_org_id: Optional[int],
+) -> Optional[int]:
+    """Tenant-scoping rule shared by every admin write endpoint.
+
+    - super_admin: caller chooses via `?organization_id=N` query param
+      (None → platform-wide, used only when they want a literal global
+      broadcast). Their JWT org is NULL so we trust the query value.
+    - tier / admin: caller's JWT org is the source of truth — any
+      query / body value is silently ignored. This is the cross-tenant
+      escape guard.
+    """
+    role_name = (user_info.get("role_name") or "").lower()
+    if role_name == "super_admin":
+        return requested_org_id
+    return user_info.get("organization_id")
 
 
 def check_user_candidate_access(user_id: int, candidate_created_by: int,
