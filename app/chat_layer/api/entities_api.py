@@ -35,6 +35,7 @@ from app.chat_layer import entity_resolver, store
 from app.chat_layer.auth import current_user
 from app.chat_layer.models import ChatConversation
 from app.database_Layer.db_config import SessionLocal
+from app.dependencies.tenant_auth import AuthCtx, get_auth_ctx
 
 router = APIRouter()
 
@@ -117,14 +118,34 @@ def _scope_for_search(db, *, caller_id: int, caller_role: Optional[str],
     return (peer_id, None)
 
 
+def _require_entity_read(ctx: AuthCtx, type_: str) -> Optional[JSONResponse]:
+    """403 when a tier user lacks the module read perm for this entity type."""
+    if entity_resolver.can_read_entity_type(
+        type_,
+        permissions=ctx.permissions,
+        is_admin_tier=ctx.is_admin_tier,
+    ):
+        return None
+    key = entity_resolver.ENTITY_READ_PERMISSIONS.get(type_, type_)
+    return _err(
+        "ENTITY_FORBIDDEN",
+        f"Missing permission: {key}",
+        403,
+    )
+
+
 @router.get("/entities/search")
 def search_entities(type: str, q: str = "", limit: int = 12,
                     offset: int = 0,
                     conversation_id: Optional[int] = None,
-                    user: dict = Depends(current_user)):
+                    user: dict = Depends(current_user),
+                    ctx: AuthCtx = Depends(get_auth_ctx)):
     if type not in entity_resolver.ENTITY_TYPES:
         return _err("ENTITY_BAD_TYPE",
                     f"Unknown entity type. Allowed: {entity_resolver.ENTITY_TYPES}", 400)
+    perm_err = _require_entity_read(ctx, type)
+    if perm_err:
+        return perm_err
     db = SessionLocal()
     try:
         scope_user_id, err = _scope_for_search(
@@ -155,13 +176,17 @@ def search_entities(type: str, q: str = "", limit: int = 12,
 
 @router.get("/entities/{type}/{entity_id}/access")
 def check_entity_access(type: str, entity_id: str,
-                        user: dict = Depends(current_user)):
+                        user: dict = Depends(current_user),
+                        ctx: AuthCtx = Depends(get_auth_ctx)):
     """Pre-navigation access check for a chat entity card. The FE
     calls this on click to decide whether to route to the entity's
     page or surface a "you don't have access" toast. Lighter than
     the full resolve since we only return a flag."""
     if type not in entity_resolver.ENTITY_TYPES:
         return _err("ENTITY_BAD_TYPE", "Unknown entity type", 400)
+    perm_err = _require_entity_read(ctx, type)
+    if perm_err:
+        return perm_err
     rid: str | int = entity_id
     if type not in ("report", "candidate"):
         try:
@@ -176,6 +201,8 @@ def check_entity_access(type: str, entity_id: str,
             role_name=user.get("role_name"),
             type_=type,
             entity_id=rid,
+            permissions=ctx.permissions,
+            is_admin_tier=ctx.is_admin_tier,
         )
         if not ok:
             return _err(
@@ -189,19 +216,26 @@ def check_entity_access(type: str, entity_id: str,
 
 
 @router.get("/entities/reports/catalog")
-def reports_catalog(_user: dict = Depends(current_user)):
+def reports_catalog(ctx: AuthCtx = Depends(get_auth_ctx)):
     """List of shareable reports/graphs the user can drop into a chat.
     Each entry carries `chart_type` (drives the snapshot template the FE
     renders) and `filters` (which inputs the picker should prompt for
     before committing the ref)."""
+    perm_err = _require_entity_read(ctx, "report")
+    if perm_err:
+        return perm_err
     return {"items": entity_resolver.REPORTS_CATALOG}
 
 
 @router.get("/entities/{type}/{entity_id}")
 def get_entity(type: str, entity_id: str,
-               _user: dict = Depends(current_user)):
+               _user: dict = Depends(current_user),
+               ctx: AuthCtx = Depends(get_auth_ctx)):
     if type not in entity_resolver.ENTITY_TYPES:
         return _err("ENTITY_BAD_TYPE", "Unknown entity type", 400)
+    perm_err = _require_entity_read(ctx, type)
+    if perm_err:
+        return perm_err
     # Most entity types have integer PKs, but candidates use a string
     # `candidate_id` and reports use slug ids. Coerce to int when possible
     # and fall through to string otherwise.
@@ -222,9 +256,17 @@ def get_entity(type: str, entity_id: str,
 
 
 @router.post("/entities/resolve")
-def resolve_entities(req: ResolveRequest, _user: dict = Depends(current_user)):
+def resolve_entities(req: ResolveRequest,
+                     _user: dict = Depends(current_user),
+                     ctx: AuthCtx = Depends(get_auth_ctx)):
     """Bulk resolve — used by the message renderer when a message arrives
     with `references[]` and the FE needs full cards in one round-trip."""
+    for ref in req.refs:
+        t = (ref.type or "").strip()
+        if t and t in entity_resolver.ENTITY_TYPES:
+            perm_err = _require_entity_read(ctx, t)
+            if perm_err:
+                return perm_err
     db = SessionLocal()
     try:
         cards: List[Optional[dict]] = entity_resolver.resolve(
