@@ -510,11 +510,47 @@ def inbox_for_org(db: Session, organization_id: int) -> List[dict]:
                 "name": r._mapping["name"],
             }
 
-    # No DM peer resolution: super_admin is not "the other side" of the
-    # DM, so we leave peer=None for DMs (they still show member ids).
+    # DM peer info — super_admin is not actually a participant, so
+    # there's no canonical "other side." For rendering, anchor each DM
+    # card to its first member (deterministic, sorted ascending) so the
+    # audit view shows a real name/avatar instead of a blank card. The
+    # complete participant list still ships in `members` for callers that
+    # need both sides.
+    dm_peer_ids: list = []
+    for r in headers:
+        if r._mapping["type"] == "dm":
+            mids = sorted(members_by_conv.get(r._mapping["id"], []))
+            if mids:
+                dm_peer_ids.append(mids[0])
+    peer_by_id: dict = {}
+    if dm_peer_ids:
+        peer_rows = db.execute(_text("""
+            SELECT id, name, username, profile_image_key
+              FROM users
+             WHERE id IN :ids
+        """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
+            {"ids": list(set(dm_peer_ids))},
+        ).all()
+        from app.chat_layer.s3_chat_service import presign_profile_image
+        for r in peer_rows:
+            m = r._mapping
+            key = m.get("profile_image_key")
+            peer_by_id[m["id"]] = {
+                "id": m["id"],
+                "name": m["name"],
+                "username": m["username"],
+                "profile_image_key": key,
+                "profile_image_url": presign_profile_image(key),
+            }
+
     out = []
     for r in headers:
         h = r._mapping
+        peer = None
+        if h["type"] == "dm":
+            mids = sorted(members_by_conv.get(h["id"], []))
+            if mids:
+                peer = peer_by_id.get(mids[0])
         team = team_by_id.get(h["team_id"]) if h["type"] == "team" else None
         out.append({
             "id": h["id"],
@@ -525,7 +561,7 @@ def inbox_for_org(db: Session, organization_id: int) -> List[dict]:
             "unread_count": 0,
             "members": members_by_conv.get(h["id"], []),
             "latest_message": latest_by_id.get(h["latest_msg_id"]),
-            "peer": None,
+            "peer": peer,
             "team": team,
         })
     return out
