@@ -9,10 +9,13 @@ PUT  /notifications/schedules/{id}/cancel
 import math
 import json
 import logging
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
+from app.api.endpoints.dependencies.auth_utils import (
+    validate_token, check_admin_access, resolve_effective_org_id,
+)
 from app.database_Layer.db_config import get_db
 from app.notification_layer import store
 from app.notification_layer.store import TargetValidationError
@@ -28,6 +31,15 @@ router = APIRouter()
 @router.post("/schedule", response_model=ScheduleOut)
 async def create_schedule(
     request: CreateScheduleRequest,
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) scope the scheduled notification to a specific "
+            "org. Stamped onto the schedule row so the eventual fire targets "
+            "only that org. Ignored for admin / tier callers — they get their "
+            "own JWT organization_id."
+        ),
+    ),
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
@@ -37,12 +49,15 @@ async def create_schedule(
         raise HTTPException(status_code=403, detail="Only admin/super_admin can schedule notifications")
 
     user_id = user_info.get("user_id")
+    effective_org_id = resolve_effective_org_id(user_info, organization_id)
 
-    # Validate target upfront so admins get immediate feedback on bad job_id/user_id/role
+    # Validate target upfront so admins get immediate feedback on bad
+    # job_id/user_id/role — also catches cross-tenant misuse early.
     try:
         store.resolve_target_user_ids(
             db, request.target_type, request.target_id,
             include_admins=(request.target_type != "all"),
+            organization_id=effective_org_id,
         )
     except TargetValidationError as e:
         raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
@@ -62,6 +77,7 @@ async def create_schedule(
         repeat_type=request.repeat_type,
         repeat_until=request.repeat_until,
         created_by=user_id,
+        organization_id=effective_org_id,
     )
     return ScheduleOut.model_validate(sched)
 
@@ -70,6 +86,14 @@ async def create_schedule(
 async def list_schedules(
     page: int = Query(1, ge=1),
     limit: int = Query(25, ge=1, le=100),
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) filter to schedules of a specific org. "
+            "Ignored for admin / tier users — they always see only "
+            "their own org's schedules."
+        ),
+    ),
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
@@ -78,7 +102,10 @@ async def list_schedules(
     if not check_admin_access(role_name):
         raise HTTPException(status_code=403, detail="Only admin/super_admin can view schedules")
 
-    schedules, total = store.get_schedules(db=db, page=page, limit=limit)
+    effective_org_id = resolve_effective_org_id(user_info, organization_id)
+    schedules, total = store.get_schedules(
+        db=db, page=page, limit=limit, organization_id=effective_org_id,
+    )
     total_pages = math.ceil(total / limit) if total > 0 else 1
 
     return ScheduleListResponse(
@@ -121,12 +148,15 @@ async def edit_schedule(
     if updated_target_type == "all":
         updated_target_id = None
 
+    # Edits inherit the schedule's original org scope — we never let
+    # an edit migrate the audience to a different tenant.
     try:
         store.resolve_target_user_ids(
             db,
             updated_target_type,
             updated_target_id,
             include_admins=(updated_target_type != "all"),
+            organization_id=existing.organization_id,
         )
     except TargetValidationError as e:
         raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message})
