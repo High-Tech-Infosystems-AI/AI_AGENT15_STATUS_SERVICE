@@ -10,7 +10,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
+from app.api.endpoints.dependencies.auth_utils import (
+    validate_token, check_admin_access, resolve_effective_org_id,
+)
 from app.database_Layer.db_config import get_db
 from app.notification_layer import store, redis_manager
 from app.notification_layer.schemas import (
@@ -42,6 +44,14 @@ async def get_admin_notification_logs(
     limit: int = Query(25, ge=1, le=100),
     sort_by: str = Query("created_at"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) filter the audit log to one org. "
+            "Ignored for admin / tier users — they always see only "
+            "their own org's history."
+        ),
+    ),
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
@@ -52,6 +62,8 @@ async def get_admin_notification_logs(
     role_name = user_info.get("role_name", "")
     if not check_admin_access(role_name):
         raise HTTPException(status_code=403, detail="Only admin/super_admin can access notification logs")
+
+    effective_org_id = resolve_effective_org_id(user_info, organization_id)
 
     parsed_date_from = None
     parsed_date_to = None
@@ -85,6 +97,7 @@ async def get_admin_notification_logs(
         sort_by=sort_by,
         sort_order=sort_order,
         include_not_received=include_not_received,
+        organization_id=effective_org_id,
     )
 
     total_pages = math.ceil(total / limit) if total > 0 else 1
@@ -123,6 +136,13 @@ def _parse_iso_date(v: Optional[str]) -> Optional[datetime]:
 async def get_admin_stats(
     date_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD). Inclusive."),
     date_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD). Inclusive."),
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) scope the stats to one org. Ignored for "
+            "admin / tier users — they only see their own org's stats."
+        ),
+    ),
     user_info: dict = Depends(validate_token),
     db=Depends(get_db),
 ):
@@ -137,8 +157,12 @@ async def get_admin_stats(
 
     parsed_from = _parse_iso_date(date_from)
     parsed_to = _parse_iso_date(date_to)
+    effective_org_id = resolve_effective_org_id(user_info, organization_id)
 
-    stats = store.get_admin_stats(db=db, date_from=parsed_from, date_to=parsed_to)
+    stats = store.get_admin_stats(
+        db=db, date_from=parsed_from, date_to=parsed_to,
+        organization_id=effective_org_id,
+    )
     return AdminStatsResponse(
         total_notifications_sent=stats["total_notifications_sent"],
         notifications_scheduled=stats["notifications_scheduled"],
