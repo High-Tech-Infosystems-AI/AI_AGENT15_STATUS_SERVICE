@@ -95,30 +95,44 @@ def list_conversations(
     organization_id: Optional[int] = Query(
         None,
         description=(
-            "(super_admin only) view ALL conversations of the named org "
-            "instead of the caller's personal inbox. Ignored for "
-            "admin / tier users — they always see their own membership-"
-            "based inbox, implicitly scoped to their JWT org."
+            "(super_admin only) narrow the personal inbox to one org. "
+            "Membership rules still apply — super_admin only sees "
+            "conversations they actually belong to; the filter just "
+            "hides ones from other orgs. Ignored for admin / tier "
+            "users (their inbox is already implicitly org-scoped)."
         ),
     ),
     user: dict = Depends(current_user),
 ):
-    """Inbox view, org-aware.
+    """Inbox view, membership-based for EVERYONE.
 
-    - Tier / admin caller: personal inbox (membership-based). Already
-      org-scoped because they're only members of their own org's chats.
-    - super_admin without `organization_id`: personal inbox (membership).
-      They typically see only the platform-wide #general.
-    - super_admin with `organization_id=X`: ALL conversations of org X,
-      regardless of membership — audit/inspection view.
+    - Tier / admin / super_admin all use the same membership-based
+      inbox. No audit/inspection mode.
+    - super_admin can additionally pass `?organization_id=N` to FILTER
+      their own multi-org inbox down to one org (useful since super_admin
+      can join chats across tenants). The filter never expands their
+      reach — only narrows it.
     """
     db = SessionLocal()
     try:
-        if _is_super_admin(user) and organization_id is not None:
-            return store.inbox_for_org(db, organization_id)
-
         store.ensure_general_member(db, user["user_id"])
-        return store.inbox_for_user(db, user["user_id"])
+        # Super_admin is an implicit member of EVERY org's #general. The
+        # first time they pick org N in the navbar, we lazily insert a
+        # membership row so #general (N) appears in their inbox and they
+        # can post just like a normal member. No backfill needed — the
+        # next picker tick handles it on demand.
+        is_super = _is_super_admin(user)
+        if is_super and organization_id is not None:
+            store.ensure_general_member_for_org(
+                db, user["user_id"], organization_id,
+            )
+        # Only super_admin's filter is honoured. Tier users get their
+        # natural inbox (their JWT pins them to their own org anyway,
+        # so an extra filter would be a no-op).
+        org_filter = organization_id if is_super else None
+        return store.inbox_for_user(
+            db, user["user_id"], organization_id=org_filter,
+        )
     finally:
         db.close()
 
@@ -128,27 +142,37 @@ def get_general(
     organization_id: Optional[int] = Query(
         None,
         description=(
-            "(super_admin only) view a specific org's #general / 'all "
-            "group'. Ignored for tier / admin users — they always get "
-            "their own org's #general."
+            "(super_admin only) view a specific org's #general. "
+            "Membership is required — super_admin only gets it if they "
+            "actually belong to that org's #general (e.g. an org admin "
+            "added them). Ignored for tier / admin users."
         ),
     ),
     user: dict = Depends(current_user),
 ):
-    """Return the caller's ORG-SCOPED #general conversation.
+    """Return the caller's #general conversation, membership-checked.
 
     Each tenant has its own "all group". Members of org A never see
-    traffic from org B. Users without an org (super_admin platform-only)
-    land on the legacy platform-wide row (organization_id IS NULL).
+    traffic from org B.
 
-    super_admin can pass `?organization_id=X` to view org X's #general
-    (audit / inspection view, no membership required).
+    super_admin without `?organization_id` → their default-org #general
+    (the one their JWT org points to, or the legacy NULL-org row).
+
+    super_admin with `?organization_id=X` → org X's #general IF they're
+    a member; otherwise 404. No audit override.
     """
     db = SessionLocal()
     try:
         if _is_super_admin(user) and organization_id is not None:
+            # Super_admin is an implicit member of every org's #general.
+            # Wire them in lazily (same rule as list_conversations) so
+            # the row + posting permission is in place by the time we
+            # serialise.
+            store.ensure_general_member_for_org(
+                db, user["user_id"], organization_id,
+            )
             conv = store.get_general_conversation(
-                db, organization_id=organization_id
+                db, organization_id=organization_id,
             )
             return _serialise(conv, store.member_user_ids(db, conv.id))
 
@@ -200,12 +224,11 @@ def get_team_conversation(team_id: int, user: dict = Depends(current_user)):
 def get_conversation(conversation_id: int, user: dict = Depends(current_user)):
     db = SessionLocal()
     try:
-        # super_admin: bypass the membership check so they can audit any
-        # tenant's conversation without first joining it. tier / admin
-        # callers MUST be a member — that's their normal scope guarantee.
-        if not _is_super_admin(user):
-            if not store.is_member(db, conversation_id, user["user_id"]):
-                return _err("CHAT_NOT_MEMBER", "Not a conversation member", 403)
+        # Membership is required for EVERYONE, including super_admin.
+        # Audit/inspection mode is gone — super_admin only sees what
+        # they're a member of, just like a normal user.
+        if not store.is_member(db, conversation_id, user["user_id"]):
+            return _err("CHAT_NOT_MEMBER", "Not a conversation member", 403)
         conv = db.get(ChatConversation, conversation_id)
         if not conv or conv.deleted_at is not None:
             return _err("CHAT_NOT_FOUND", "Conversation not found", 404)
