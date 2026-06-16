@@ -510,32 +510,30 @@ def inbox_for_org(db: Session, organization_id: int) -> List[dict]:
                 "name": r._mapping["name"],
             }
 
-    # DM peer info — super_admin is not actually a participant, so
-    # there's no canonical "other side." For rendering, anchor each DM
-    # card to its first member (deterministic, sorted ascending) so the
-    # audit view shows a real name/avatar instead of a blank card. The
-    # complete participant list still ships in `members` for callers that
-    # need both sides.
-    dm_peer_ids: list = []
+    # DM participants — super_admin isn't a member of any audited DM,
+    # so there's no canonical "other side." Resolve ALL DM members (not
+    # just one) so the UI can render "User A ↔ User B" instead of an
+    # arbitrary single name. We collect every DM member id, batch-fetch
+    # their user info in one query, then attach the per-conv lists below.
+    dm_member_ids: set = set()
     for r in headers:
         if r._mapping["type"] == "dm":
-            mids = sorted(members_by_conv.get(r._mapping["id"], []))
-            if mids:
-                dm_peer_ids.append(mids[0])
-    peer_by_id: dict = {}
-    if dm_peer_ids:
+            for uid in members_by_conv.get(r._mapping["id"], []):
+                dm_member_ids.add(uid)
+    user_by_id: dict = {}
+    if dm_member_ids:
         peer_rows = db.execute(_text("""
             SELECT id, name, username, profile_image_key
               FROM users
              WHERE id IN :ids
         """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
-            {"ids": list(set(dm_peer_ids))},
+            {"ids": list(dm_member_ids)},
         ).all()
         from app.chat_layer.s3_chat_service import presign_profile_image
         for r in peer_rows:
             m = r._mapping
             key = m.get("profile_image_key")
-            peer_by_id[m["id"]] = {
+            user_by_id[m["id"]] = {
                 "id": m["id"],
                 "name": m["name"],
                 "username": m["username"],
@@ -547,10 +545,16 @@ def inbox_for_org(db: Session, organization_id: int) -> List[dict]:
     for r in headers:
         h = r._mapping
         peer = None
+        participants = None
         if h["type"] == "dm":
             mids = sorted(members_by_conv.get(h["id"], []))
-            if mids:
-                peer = peer_by_id.get(mids[0])
+            # Both participants, in member-id order so it's stable across
+            # refetches. UI renders all entries when this field is set.
+            participants = [user_by_id[u] for u in mids if u in user_by_id]
+            # Keep `peer` populated too (first participant) for any legacy
+            # renderer that only knows about peer — never a regression.
+            if participants:
+                peer = participants[0]
         team = team_by_id.get(h["team_id"]) if h["type"] == "team" else None
         out.append({
             "id": h["id"],
@@ -562,6 +566,7 @@ def inbox_for_org(db: Session, organization_id: int) -> List[dict]:
             "members": members_by_conv.get(h["id"], []),
             "latest_message": latest_by_id.get(h["latest_msg_id"]),
             "peer": peer,
+            "participants": participants,
             "team": team,
         })
     return out
