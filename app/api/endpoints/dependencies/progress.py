@@ -7,7 +7,6 @@ Uses the custom key pattern: task:{task_id}
 
 import json
 import logging
-import os
 import redis
 from typing import Dict, Optional
 from app.core import settings
@@ -18,20 +17,15 @@ logger = logging.getLogger("app_logger")
 _redis_client: Optional[redis.Redis] = None
 _notified_missing_tasks: set = set()  # Track tasks already logged as missing
 
-# Per-env progress DB. MUST match the resume analyzer's PROGRESS_REDIS_DB
-# (and any other writer's) so reads and writes hit the same keyspace.
-# Override with PROGRESS_REDIS_DB env var if defaults don't fit your setup.
-_ENV = os.getenv("ENV", "dev").lower().strip()
-_DEFAULT_PROGRESS_DB = {"prod": 0, "stage": 1, "dev": 8}.get(_ENV, 9)
-PROGRESS_REDIS_DB = int(os.getenv("PROGRESS_REDIS_DB", _DEFAULT_PROGRESS_DB))
-
 
 def get_redis_client() -> redis.Redis:
-    """
-    Get or create Redis client connection for custom progress tracking.
+    """Get or create Redis client connection for custom progress tracking.
 
-    Returns:
-        redis.Redis: Redis client connected to the per-env progress DB
+    Connects to the SAME `settings.REDIS_DB` every writer uses — the
+    ConfigMap's `REDIS_DB` is the single source of truth so writes and
+    reads can't drift. The previous per-env `PROGRESS_REDIS_DB` scheme
+    was redundant once every env got its own Redis instance via the
+    cluster boundary.
     """
     global _redis_client
 
@@ -40,7 +34,7 @@ def get_redis_client() -> redis.Redis:
             _redis_client = redis.Redis(
                 host=settings.REDIS_HOST,
                 port=settings.REDIS_PORT,
-                db=PROGRESS_REDIS_DB,
+                db=settings.REDIS_DB,
                 password=settings.REDIS_PASSWORD if settings.REDIS_PASSWORD else None,
                 decode_responses=True,
                 socket_connect_timeout=5,
@@ -48,8 +42,9 @@ def get_redis_client() -> redis.Redis:
             )
             _redis_client.ping()
             logger.info(
-                f"Connected to progress Redis (DB {PROGRESS_REDIS_DB}, ENV={_ENV}) "
-                f"at {settings.REDIS_HOST}:{settings.REDIS_PORT}"
+                f"Connected to progress Redis "
+                f"(DB {settings.REDIS_DB}) at "
+                f"{settings.REDIS_HOST}:{settings.REDIS_PORT}"
             )
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {str(e)}")
