@@ -139,8 +139,11 @@ async def send_notification(
         for uid, counts in unread_counts_by_mode.items():
             redis_manager.publish_unread_count(uid, counts.get("push", 0), by_mode=counts)
     else:
-        # push/log go through the regular per-user / broadcast channel
-        if notif.visibility == "public" or request.target_type == "all":
+        # push/log go through the regular per-user / broadcast channel.
+        # Broadcast (all connected sockets) only when NOT org-scoped — an
+        # org-scoped "all"/public notification must go to its resolved
+        # recipients, else it leaks across orgs in real time.
+        if effective_org_id is None and (notif.visibility == "public" or request.target_type == "all"):
             redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts_by_mode)
         else:
             redis_manager.publish_to_users(recipient_ids, pub_payload, unread_counts=unread_counts_by_mode)
