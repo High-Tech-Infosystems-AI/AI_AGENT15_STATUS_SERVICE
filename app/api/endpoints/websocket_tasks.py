@@ -6,6 +6,7 @@ to fetch and stream Celery task progress updates to clients.
 """
 
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter
+from starlette.websockets import WebSocketState
 from app.api.endpoints.dependencies.progress import get_progress
 import asyncio
 import logging
@@ -13,6 +14,52 @@ import logging
 logger = logging.getLogger("app_logger")
 
 router = APIRouter()
+
+
+def _is_open(websocket: WebSocket) -> bool:
+    """True iff the socket is still in a state that will accept a send.
+
+    Starlette transitions `application_state` through CONNECTING →
+    CONNECTED → DISCONNECTED. Calling `.send*` after the close frame
+    has been emitted raises:
+      RuntimeError: Cannot call "send" once a close message has been sent.
+    Checking the state lets us drop the send instead of crashing the
+    handler.
+    """
+    return websocket.application_state == WebSocketState.CONNECTED
+
+
+async def _safe_send_json(websocket: WebSocket, payload: dict) -> bool:
+    """Send if the socket is still open, swallow errors otherwise.
+
+    Returns True on a successful send, False if the socket was already
+    closed or the send raised (treated as client disconnect).
+    """
+    if not _is_open(websocket):
+        return False
+    try:
+        await websocket.send_json(payload)
+        return True
+    except Exception as exc:
+        # Most common: RuntimeError("Cannot call send once a close
+        # message has been sent.") when the client disconnected between
+        # the state check and the await. Log with exc_info so the type
+        # surfaces in pod logs without crashing the loop.
+        logger.info(
+            "send_json dropped for task ws (likely client disconnect): %r",
+            exc,
+        )
+        return False
+
+
+async def _safe_close(websocket: WebSocket) -> None:
+    """Close the socket idempotently — no-op if already closed."""
+    if not _is_open(websocket):
+        return
+    try:
+        await websocket.close()
+    except Exception as exc:
+        logger.debug("close raised on already-closing ws: %r", exc)
 
 
 @router.websocket("/ws/tasks/{task_id}")
@@ -35,6 +82,18 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
 
     try:
         while True:
+            # If the client disconnected during the last sleep, stop
+            # polling immediately instead of trying to send into a
+            # closed socket on the next iteration. This is the main
+            # fix for the `Cannot call "send" once a close message has
+            # been sent` errors we were seeing under client churn.
+            if not _is_open(websocket):
+                logger.info(
+                    "Client disconnected for task %s; stopping poll loop.",
+                    task_id,
+                )
+                break
+
             try:
                 # Get progress data from Redis (custom progress key: task:{task_id})
                 progress_data = get_progress(task_id)
@@ -43,13 +102,13 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                     not_found_count += 1
                     if not_found_count >= max_not_found:
                         logger.info(f"Task {task_id} not found after {max_not_found} polls. Closing WebSocket.")
-                        await websocket.send_json({
+                        await _safe_send_json(websocket, {
                             "task_id": task_id,
                             "status": "NOT_FOUND",
                             "progress": 0,
                             "message": "Task not found. Connection closed."
                         })
-                        await websocket.close()
+                        await _safe_close(websocket)
                         break
                     await asyncio.sleep(2)
                     continue
@@ -64,13 +123,13 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                     not_found_count += 1
                     if not_found_count >= max_not_found:
                         logger.info(f"Task {task_id} not found in Redis after {max_not_found} polls. Closing WebSocket.")
-                        await websocket.send_json({
+                        await _safe_send_json(websocket, {
                             "task_id": task_id,
                             "status": "NOT_FOUND",
                             "progress": 0,
                             "message": "Task not found or already completed. Connection closed."
                         })
-                        await websocket.close()
+                        await _safe_close(websocket)
                         break
                     await asyncio.sleep(2)
                     continue
@@ -98,7 +157,10 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                         if key not in response_data:
                             response_data[key] = value
 
-                    await websocket.send_json(response_data)
+                    sent = await _safe_send_json(websocket, response_data)
+                    if not sent:
+                        # Client gone — no point continuing to poll.
+                        break
                     last_progress = current_progress
                     last_status = current_status
 
@@ -108,29 +170,52 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                     # Close connection if task is completed, failed, or errored
                     if current_status in ["SUCCESS", "FAILED", "ERROR", "CANCELLED"]:
                         logger.info(f"Task {task_id} completed with status: {current_status}. Closing WebSocket connection.")
-                        await websocket.close()
+                        await _safe_close(websocket)
                         break
-                        
+
+            except WebSocketDisconnect:
+                # Client closed mid-iteration — stop cleanly without
+                # trying to send the synthetic error packet below.
+                logger.info(
+                    "WebSocket disconnected during poll for task %s",
+                    task_id,
+                )
+                break
             except Exception as e:
-                logger.error(f"Error getting progress for task {task_id}: {str(e)}")
-                # Send error message to client
-                await websocket.send_json({
+                # Real internal error (e.g. Redis unreachable, JSON
+                # decode of corrupt progress blob). `exc_info=True`
+                # captures the traceback in pod logs so we can
+                # diagnose without having to reproduce. The synthetic
+                # error packet goes out only if the client is still
+                # listening — `_safe_send_json` no-ops otherwise so
+                # we never re-raise here.
+                logger.error(
+                    "Error getting progress for task %s: %r",
+                    task_id, e,
+                    exc_info=True,
+                )
+                await _safe_send_json(websocket, {
                     "task_id": task_id,
                     "status": "ERROR",
                     "progress": 0,
-                    "message": f"Failed to get progress: {str(e)}",
-                    "error": str(e)
+                    "message": f"Failed to get progress: {e}",
+                    "error": str(e),
                 })
                 break
-                
+
             await asyncio.sleep(2)  # Poll every 2 seconds
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for task {task_id}")
     except Exception as e:
-        logger.error(f"WebSocket error for task {task_id}: {str(e)}")
-        try:
-            await websocket.close()
-        except:
-            pass
+        # Anything that escapes the inner try is a real handler-level
+        # failure (not a client churn artefact, which the inner except
+        # now catches). Log with traceback for diagnosis.
+        logger.error(
+            "WebSocket error for task %s: %r",
+            task_id, e,
+            exc_info=True,
+        )
+    finally:
+        await _safe_close(websocket)
 
