@@ -16,6 +16,20 @@ Two configuration constants the service must define:
 Or set the env vars `AUTH_SERVICE_URL` and `RBAC_SERVICE_URL` and the
 template reads from os.getenv() at import time.
 
+Performance note (added):
+  `get_auth_ctx` previously made 1-2 blocking HTTP calls (10s timeout each)
+  to Login/RBAC on EVERY request, uncached. That was the dominant per-request
+  latency across all services. This version adds a short-TTL, in-process,
+  thread-safe cache keyed by the (hashed) bearer token, and a tighter HTTP
+  timeout. Defaults:
+    AUTH_CTX_CACHE_TTL  = 30   (seconds; set 0 to disable caching)
+    AUTH_CTX_CACHE_MAX  = 10000 (max cached tokens before eviction)
+    AUTH_HTTP_TIMEOUT   = 6     (seconds; requests timeout)
+  Trade-off: a token revoked/role-changed mid-window is honoured for up to
+  TTL seconds. 30s is the standard compromise; lower it if you need tighter
+  revocation. The cache is per-process, so it degrades gracefully across
+  multiple workers/pods (each just refreshes independently).
+
 Usage in a route:
 
     from app.dependencies.tenant_auth import (
@@ -38,9 +52,12 @@ Usage in a route:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
-from typing import Optional, Set
+import threading
+import time
+from typing import Any, Dict, Optional, Set
 
 import requests
 from fastapi import Depends, Header, HTTPException
@@ -54,6 +71,68 @@ logger = logging.getLogger("app_logger")
 USER_DETAILS_URL = os.getenv("USER_DETAILS_URL", "")
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "")
 RBAC_SERVICE_URL = os.getenv("RBAC_SERVICE_URL", "").rstrip("/")
+
+# ---- Auth perf tuning (env-overridable) -----------------------------------
+try:
+    _AUTH_TIMEOUT = float(os.getenv("AUTH_HTTP_TIMEOUT", "6"))
+except ValueError:
+    _AUTH_TIMEOUT = 6.0
+try:
+    _CACHE_TTL = int(os.getenv("AUTH_CTX_CACHE_TTL", "30"))
+except ValueError:
+    _CACHE_TTL = 30
+try:
+    _CACHE_MAX = int(os.getenv("AUTH_CTX_CACHE_MAX", "10000"))
+except ValueError:
+    _CACHE_MAX = 10000
+
+# token-hash -> (expires_at_monotonic, auth_ctx_kwargs)
+_auth_cache: Dict[str, tuple] = {}
+_auth_cache_lock = threading.Lock()
+
+
+def _cache_key(token: str) -> str:
+    """Hash the token so raw JWTs aren't held as dict keys."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _cache_get(key: str) -> Optional[Dict[str, Any]]:
+    if _CACHE_TTL <= 0:
+        return None
+    now = time.monotonic()
+    with _auth_cache_lock:
+        item = _auth_cache.get(key)
+        if not item:
+            return None
+        expires_at, data = item
+        if expires_at < now:
+            _auth_cache.pop(key, None)
+            return None
+        return data
+
+
+def _cache_put(key: str, data: Dict[str, Any]) -> None:
+    if _CACHE_TTL <= 0:
+        return
+    now = time.monotonic()
+    with _auth_cache_lock:
+        if len(_auth_cache) >= _CACHE_MAX:
+            # Drop expired entries first; if still full, clear (cheap + rare).
+            expired = [k for k, (exp, _) in _auth_cache.items() if exp < now]
+            for k in expired:
+                _auth_cache.pop(k, None)
+            if len(_auth_cache) >= _CACHE_MAX:
+                _auth_cache.clear()
+        _auth_cache[key] = (now + _CACHE_TTL, data)
+
+
+def invalidate_auth_cache(token: Optional[str] = None) -> None:
+    """Drop a single token (e.g. on logout) or the whole cache."""
+    with _auth_cache_lock:
+        if token is None:
+            _auth_cache.clear()
+        else:
+            _auth_cache.pop(_cache_key(token), None)
 
 
 # ---------------------------------------------------------------------
@@ -88,7 +167,8 @@ class AuthCtx:
         self.role_id = role_id
         self.role_name = role_name
         self.role_type = role_type
-        self.permissions = permissions
+        # Copy the set so request-local code can't mutate the cached value.
+        self.permissions = set(permissions or [])
         self.is_super_admin = is_super_admin
         self.is_admin = is_admin
         self._token = token
@@ -143,28 +223,15 @@ class AuthCtx:
 
 
 # ---------------------------------------------------------------------
-# Dependency: build AuthCtx
+# Network resolution (uncached) — returns AuthCtx kwargs minus the token
 # ---------------------------------------------------------------------
-def get_auth_ctx(
-    authorization: str = Header(..., alias="Authorization"),
-) -> AuthCtx:
-    """Resolve the caller from the bearer token.
+def _resolve_auth_data(token: str) -> Dict[str, Any]:
+    """Resolve identity + tenant + permissions for a token via the auth
+    service(s). Returns the kwargs used to build an AuthCtx (without `token`).
 
-    Preferred path: single call to Login's `/user-details`, which returns
-    identity + tenant + role tier + permission list in one shot. Set the
-    `USER_DETAILS_URL` env var to enable.
-
-    Fallback path: legacy two-call flow against `verify-token` + RBAC's
-    `/me/permissions`, kept for back-compat with deployments that haven't
-    been updated.
-
-    Caller should not cache externally — FastAPI's Depends already caches
-    per-request.
+    Preferred path: single call to Login's `/user-details`.
+    Fallback path: legacy `verify-token` + RBAC `/me/permissions`.
     """
-    token = (authorization or "").replace("Bearer ", "").strip()
-    if not token:
-        raise HTTPException(401, "Missing bearer token")
-
     # ---- Preferred: single call ----------------------------------------
     if USER_DETAILS_URL:
         try:
@@ -180,7 +247,7 @@ def get_auth_ctx(
                     "accept": "application/json",
                     "Authorization": f"Bearer {token}",
                 },
-                timeout=10,
+                timeout=_AUTH_TIMEOUT,
             )
         except requests.RequestException as exc:
             logger.warning("User-details service unreachable: %s", exc)
@@ -198,7 +265,7 @@ def get_auth_ctx(
         if not user_id:
             raise HTTPException(401, "Invalid token response")
         role_block = body.get("role") or {}
-        return AuthCtx(
+        return dict(
             user_id=user_id,
             organization_id=body.get("organization_id"),
             role_id=body.get("role_id"),
@@ -207,7 +274,6 @@ def get_auth_ctx(
             permissions=set(body.get("permissions") or []),
             is_super_admin=bool(body.get("is_super_admin")),
             is_admin=bool(body.get("is_admin")),
-            token=token,
         )
 
     # ---- Fallback: legacy two-call flow --------------------------------
@@ -223,7 +289,7 @@ def get_auth_ctx(
             AUTH_SERVICE_URL,
             params={"token": token},
             headers={"accept": "application/json"},
-            timeout=10,
+            timeout=_AUTH_TIMEOUT,
         )
     except requests.RequestException as exc:
         logger.warning("Auth service unreachable: %s", exc)
@@ -239,7 +305,7 @@ def get_auth_ctx(
         p = requests.get(
             f"{RBAC_SERVICE_URL}/me/permissions",
             headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
+            timeout=_AUTH_TIMEOUT,
         )
     except requests.RequestException as exc:
         logger.warning("RBAC service unreachable: %s", exc)
@@ -249,7 +315,7 @@ def get_auth_ctx(
     perm = p.json()
     role_block = perm.get("role") or {}
 
-    return AuthCtx(
+    return dict(
         user_id=user_id,
         organization_id=base.get("organization_id"),
         role_id=base.get("role_id"),
@@ -258,8 +324,33 @@ def get_auth_ctx(
         permissions=set(perm.get("permissions") or []),
         is_super_admin=bool(perm.get("is_super_admin")),
         is_admin=bool(perm.get("is_admin")),
-        token=token,
     )
+
+
+# ---------------------------------------------------------------------
+# Dependency: build AuthCtx
+# ---------------------------------------------------------------------
+def get_auth_ctx(
+    authorization: str = Header(..., alias="Authorization"),
+) -> AuthCtx:
+    """Resolve the caller from the bearer token.
+
+    Result is cached per-token for `AUTH_CTX_CACHE_TTL` seconds (in-process),
+    so the upstream auth HTTP call is skipped on the hot path. On a cache miss
+    it resolves via `_resolve_auth_data` (single `/user-details` call, or the
+    legacy verify-token + /me/permissions pair).
+    """
+    token = (authorization or "").replace("Bearer ", "").strip()
+    if not token:
+        raise HTTPException(401, "Missing bearer token")
+
+    key = _cache_key(token)
+    data = _cache_get(key)
+    if data is None:
+        data = _resolve_auth_data(token)
+        _cache_put(key, data)
+
+    return AuthCtx(token=token, **data)
 
 
 # ---------------------------------------------------------------------
