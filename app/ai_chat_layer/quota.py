@@ -37,12 +37,34 @@ def _month_anchor(d: date) -> str:
     return d.strftime("%Y-%m")
 
 
+def _resolve_user_org(db: Session, user_id: int) -> Optional[int]:
+    """Look up the user's organisation_id from the shared users table.
+    Returns None if the user has no org (rare: super_admin platform-only).
+    Inlined here to avoid pulling chat_layer.store into ai_chat_layer."""
+    from sqlalchemy import text
+    try:
+        row = db.execute(
+            text("SELECT organization_id FROM users WHERE id = :uid"),
+            {"uid": user_id},
+        ).first()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
 def _ensure_row(db: Session, user_id: int) -> AiTokenQuota:
     row = db.get(AiTokenQuota, user_id)
     today = date.today()
     if row is None:
+        # Stamp organization_id on the freshly created quota row. Previously
+        # this INSERT left organization_id NULL, so ai_token_quota grew
+        # tenant-unidentified rows — a per-org cost report or quota
+        # management UI scoped by tenant could not attribute usage. The
+        # owning user's org is the natural scope (the quota is for that
+        # user's calls).
         row = AiTokenQuota(
             user_id=user_id,
+            organization_id=_resolve_user_org(db, user_id),
             daily_limit=int(getattr(settings, "AI_DEFAULT_DAILY_LIMIT", 50000)),
             monthly_limit=int(getattr(settings, "AI_DEFAULT_MONTHLY_LIMIT", 1000000)),
             used_today=0,
