@@ -69,9 +69,18 @@ def create_dm(req: CreateDMRequest,
         if not _is_user_active(db, req.peer_user_id):
             return _err("CHAT_USER_INACTIVE", "Peer user is not active", 403)
         # Cross-tenant DM block: a tenant user cannot DM a user in another org.
+        # Use the User model already imported from db_model at module top.
+        # The previous local import pulled in db_store.User, which is a
+        # near-duplicate class also mapped to __tablename__ = 'users'
+        # against the same `Base`. SQLAlchemy registers two mappers for
+        # the same table on that import — raising
+        # `InvalidRequestError: Table 'users' is already defined for
+        # this MetaData instance` the first time create_dm runs after a
+        # cold start. The endpoint then 500s. db_model.User has the
+        # exact `id` and `organization_id` columns this branch needs,
+        # so it serves the cross-tenant check identically.
         if not ctx.is_super_admin and ctx.organization_id is not None:
-            from app.database_Layer.db_store import User as _UModel  # local import to avoid cycles
-            peer = db.query(_UModel).filter(_UModel.id == req.peer_user_id).first()
+            peer = db.query(User).filter(User.id == req.peer_user_id).first()
             if peer and getattr(peer, "organization_id", None) not in (None, ctx.organization_id):
                 return _err("CHAT_CROSS_TENANT_DM", "Cannot DM a user in another organisation", 403)
         if not can_post_dm(peer_active=True):
