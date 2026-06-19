@@ -7,10 +7,12 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.endpoints.dependencies.auth_utils import validate_token, check_admin_access
+from app.api.endpoints.dependencies.auth_utils import (
+    validate_token, check_admin_access, resolve_effective_org_id,
+)
 from app.database_Layer.db_config import get_db
 from app.notification_layer import store, redis_manager
 from app.notification_layer.store import TargetValidationError
@@ -42,6 +44,14 @@ def _resolve_banner_expiry(requested: Optional[datetime]) -> datetime:
 @router.post("/send", response_model=SendNotificationResponse)
 async def send_notification(
     request: SendNotificationRequest,
+    organization_id: Optional[int] = Query(
+        None,
+        description=(
+            "(super_admin only) scope the notification to a specific org. "
+            "Ignored for admin / tier users — they're always pinned to their "
+            "own JWT organization_id."
+        ),
+    ),
     user_info: dict = Depends(validate_token),
     db: Session = Depends(get_db),
 ):
@@ -51,6 +61,7 @@ async def send_notification(
         raise HTTPException(status_code=403, detail="Only admin/super_admin can send notifications")
 
     user_id = user_info.get("user_id")
+    effective_org_id = resolve_effective_org_id(user_info, organization_id)
 
     # For banners, validate + default expires_at
     banner_expires = None
@@ -73,6 +84,7 @@ async def send_notification(
             metadata=request.metadata,
             created_by=user_id,
             expires_at=banner_expires,
+            organization_id=effective_org_id,
         )
     except TargetValidationError as e:
         db.rollback()
@@ -127,8 +139,11 @@ async def send_notification(
         for uid, counts in unread_counts_by_mode.items():
             redis_manager.publish_unread_count(uid, counts.get("push", 0), by_mode=counts)
     else:
-        # push/log go through the regular per-user / broadcast channel
-        if notif.visibility == "public" or request.target_type == "all":
+        # push/log go through the regular per-user / broadcast channel.
+        # Broadcast (all connected sockets) only when NOT org-scoped — an
+        # org-scoped "all"/public notification must go to its resolved
+        # recipients, else it leaks across orgs in real time.
+        if effective_org_id is None and (notif.visibility == "public" or request.target_type == "all"):
             redis_manager.publish_broadcast(pub_payload, user_unread_counts=unread_counts_by_mode)
         else:
             redis_manager.publish_to_users(recipient_ids, pub_payload, unread_counts=unread_counts_by_mode)

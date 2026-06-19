@@ -23,11 +23,34 @@ from app.chat_layer.models import (
 
 # ---------- Conversations ----------
 
-def get_or_create_dm(db: Session, user_a_id: int, user_b_id: int):
+def get_or_create_dm(
+    db: Session,
+    user_a_id: int,
+    user_b_id: int,
+    organization_id: Optional[int] = None,
+):
     """Returns (conversation, newly_added_user_ids).
     `newly_added_user_ids` is `[a, b]` only when the DM is freshly created;
     `[]` when an existing DM is returned. Used by the API layer to decide
     whether to fire presence-announcement events between the two users.
+
+    `organization_id`:
+        Tenant the new conversation belongs to. Callers MUST pass this on
+        the create path so the row is org-scoped — without it the row is
+        born with NULL `organization_id` and downstream read-scoping
+        (super_admin org filter, per-tenant inbox queries) leaks/loses
+        DMs. The two peers in a DM are always same-tenant (the
+        create_dm endpoint enforces the cross-tenant block), so the
+        caller's `ctx.organization_id` is the correct value to pass.
+        Defaults to None so old call sites compile, but every NEW DM
+        born without it is a write hole — please pass it.
+
+        For the rare case where the caller didn't pass it (e.g. an
+        internal helper that only has user ids), we look up the
+        creator's own org as a best-effort fallback so we still get
+        SOMETHING non-NULL on the row. The DB column is nullable, so
+        super_admin platform-only DMs (no org on either side) still
+        round-trip cleanly.
     """
     if user_a_id == user_b_id:
         raise ValueError("DM peers must be different users")
@@ -51,7 +74,19 @@ def get_or_create_dm(db: Session, user_a_id: int, user_b_id: int):
     if existing:
         return db.get(ChatConversation, existing), []
 
-    conv = ChatConversation(type="dm", created_by=a)
+    # Stamp organization_id on the fresh DM row. Previously this insert left
+    # org NULL on every DM, so all DM rows were tenant-unidentified — that
+    # silently breaks super_admin's per-org inbox filter and any future
+    # tenant-scoped retention/export job. The cross-tenant block lives in
+    # the endpoint; here we just record the resolved tenant.
+    org_id = organization_id
+    if org_id is None:
+        # Best-effort fallback when an internal caller forgot to pass it.
+        # Use the initiating user's org (peer is same-tenant by construction
+        # at the endpoint layer, so either side works).
+        org_id = _resolve_user_org(db, a)
+
+    conv = ChatConversation(type="dm", created_by=a, organization_id=org_id)
     db.add(conv)
     db.flush()
     db.add_all([
@@ -86,7 +121,32 @@ def get_or_create_team_conversation(db: Session, team_id: int,
             db.refresh(conv)
         return conv, newly_added
 
-    conv = ChatConversation(type="team", team_id=team_id, created_by=created_by)
+    # Stamp organization_id from the team's own row. Teams are tenant-scoped
+    # in the Organisation Service, so the chat conversation that mirrors a
+    # team has to inherit that same org for per-tenant read scoping to work.
+    # Previously this insert left org NULL, so team chat rows were
+    # tenant-unidentified — the super_admin per-org inbox filter never
+    # matched them and a tenant export could not include them. We do a
+    # lightweight SELECT against the shared `teams` table here (the model
+    # for the local service doesn't carry organization_id, so use raw SQL).
+    team_org_id: Optional[int] = None
+    try:
+        from sqlalchemy import text as _text
+        row = db.execute(
+            _text("SELECT organization_id FROM teams WHERE id = :tid"),
+            {"tid": team_id},
+        ).first()
+        if row and row[0] is not None:
+            team_org_id = int(row[0])
+    except Exception:
+        # If the column doesn't exist in this deployment, fall back to the
+        # creator's own org. Better than leaving it NULL.
+        if created_by is not None:
+            team_org_id = _resolve_user_org(db, created_by)
+
+    conv = ChatConversation(type="team", team_id=team_id,
+                            created_by=created_by,
+                            organization_id=team_org_id)
     db.add(conv)
     db.flush()
     for uid in member_user_ids:
@@ -96,28 +156,102 @@ def get_or_create_team_conversation(db: Session, team_id: int,
     return conv, list(member_user_ids)
 
 
-def get_general_conversation(db: Session) -> ChatConversation:
+def _resolve_user_org(db: Session, user_id: int) -> Optional[int]:
+    """Look up the user's organisation_id from the shared users table.
+    Returns None if the user has no org (rare: super_admin platform-only)."""
+    from sqlalchemy import text
+    try:
+        row = db.execute(
+            text("SELECT organization_id FROM users WHERE id = :uid"),
+            {"uid": user_id},
+        ).first()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
+def get_general_conversation(
+    db: Session, organization_id: Optional[int] = None
+) -> ChatConversation:
+    """Return (or create) the org-scoped #general conversation.
+
+    Each organisation has its OWN #general / "all group" — members of org A
+    must never see traffic from org B. The original implementation used a
+    single platform-wide conversation (id=1); that's now reserved for
+    super_admins / users with no org.
+    """
     conv = db.execute(
-        select(ChatConversation).where(ChatConversation.type == "general")
+        select(ChatConversation).where(
+            and_(
+                ChatConversation.type == "general",
+                ChatConversation.organization_id.is_(None)
+                if organization_id is None
+                else ChatConversation.organization_id == organization_id,
+            )
+        )
     ).scalar_one_or_none()
-    if not conv:
-        conv = ChatConversation(id=1, type="general", title="#general")
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
+    if conv:
+        return conv
+
+    title = (
+        "#general"
+        if organization_id is None
+        else f"#general (org {organization_id})"
+    )
+    conv = ChatConversation(
+        type="general",
+        title=title,
+        organization_id=organization_id,
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
     return conv
 
 
 def ensure_general_member(db: Session, user_id: int) -> None:
+    """Make sure the caller is a member of THEIR org's #general."""
+    org_id = _resolve_user_org(db, user_id)
+    _ensure_member_of_general(db, user_id, org_id)
+
+
+def ensure_general_member_for_org(
+    db: Session, user_id: int, organization_id: int,
+) -> None:
+    """Ensure the user is a member of the given org's #general.
+
+    Used to lazily wire super_admins into every tenant's #general the
+    first time they pick that org in the navbar — they get chat access
+    without anyone having to add them manually, and the membership row
+    means all the existing posting / unread / WS logic keeps working
+    untouched.
+    """
+    _ensure_member_of_general(db, user_id, organization_id)
+
+
+def _ensure_member_of_general(
+    db: Session, user_id: int, org_id: Optional[int],
+) -> None:
+    """Shared core: idempotently add user_id to (org_id)'s #general."""
     exists_q = db.execute(
         select(ChatConversationMember.id)
-        .join(ChatConversation, ChatConversation.id == ChatConversationMember.conversation_id)
-        .where(and_(ChatConversation.type == "general",
-                    ChatConversationMember.user_id == user_id))
+        .join(
+            ChatConversation,
+            ChatConversation.id == ChatConversationMember.conversation_id,
+        )
+        .where(
+            and_(
+                ChatConversation.type == "general",
+                ChatConversation.organization_id.is_(None)
+                if org_id is None
+                else ChatConversation.organization_id == org_id,
+                ChatConversationMember.user_id == user_id,
+            )
+        )
     ).first()
     if exists_q:
         return
-    conv = get_general_conversation(db)
+    conv = get_general_conversation(db, organization_id=org_id)
     db.add(ChatConversationMember(conversation_id=conv.id, user_id=user_id))
     db.commit()
 
@@ -205,10 +339,20 @@ def _ensure_ai_assistant_dm(db: Session, user_id: int) -> None:
             pass
 
 
-def inbox_for_user(db: Session, user_id: int) -> List[dict]:
+def inbox_for_user(
+    db: Session, user_id: int, organization_id: Optional[int] = None,
+) -> List[dict]:
     """
     Return the WhatsApp-style inbox: every conversation the user belongs to,
     enriched with the latest message preview, unread count, and peer/team info.
+
+    organization_id:
+        Optional org filter. When set, only conversations whose owning
+        org matches are returned. Used by super_admin to narrow their
+        OWN inbox (which spans multiple tenants, since they can be a
+        member of conversations in different orgs) to a single picked
+        org. Membership is still required — super_admin never sees
+        conversations they don't belong to.
 
     Output rows have shape:
       {
@@ -237,8 +381,15 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
 
     from sqlalchemy import text as _text
 
-    # 1. Conversation headers + unread count + latest message id
-    headers = db.execute(_text("""
+    # 1. Conversation headers + unread count + latest message id.
+    # Org filter is a no-op when organization_id is None — we keep the
+    # SQL identical so MySQL can reuse its plan cache.
+    org_clause = "AND c.organization_id = :org_id" if organization_id is not None else ""
+    params = {"uid": user_id}
+    if organization_id is not None:
+        params["org_id"] = organization_id
+
+    headers = db.execute(_text(f"""
         SELECT c.id, c.type, c.team_id, c.title, c.last_message_at,
                m.last_read_message_id,
                (SELECT COUNT(*)
@@ -255,8 +406,9 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
           JOIN chat_conversation_members m ON m.conversation_id = c.id
          WHERE m.user_id = :uid
            AND c.deleted_at IS NULL
+           {org_clause}
          ORDER BY (c.last_message_at IS NULL), c.last_message_at DESC, c.id DESC
-    """), {"uid": user_id}).all()
+    """), params).all()
 
     if not headers:
         return []
@@ -373,6 +525,169 @@ def inbox_for_user(db: Session, user_id: int) -> List[dict]:
     return out
 
 
+def inbox_for_org(db: Session, organization_id: int) -> List[dict]:
+    """Return the inbox view for ALL conversations in an organisation.
+
+    Intended only for super_admin scoping (`?organization_id=X`) so they
+    can audit another tenant's chat surface without being a member of
+    every conversation.
+
+    Same shape as `inbox_for_user` (peer, team, latest_message, members)
+    EXCEPT `unread_count` is always 0 — super_admin isn't really a
+    member, so the per-user-unread-count maths doesn't apply.
+    """
+    from sqlalchemy import text as _text
+
+    headers = db.execute(_text("""
+        SELECT c.id, c.type, c.team_id, c.title, c.last_message_at,
+               (SELECT MAX(cm2.id) FROM chat_messages cm2
+                 WHERE cm2.conversation_id = c.id) AS latest_msg_id
+          FROM chat_conversations c
+         WHERE c.organization_id = :org_id
+           AND c.deleted_at IS NULL
+         ORDER BY (c.last_message_at IS NULL), c.last_message_at DESC, c.id DESC
+    """), {"org_id": organization_id}).all()
+
+    if not headers:
+        return []
+
+    conv_ids = [r._mapping["id"] for r in headers]
+    latest_msg_ids = [r._mapping["latest_msg_id"] for r in headers
+                      if r._mapping["latest_msg_id"] is not None]
+
+    # Members (same as inbox_for_user)
+    member_rows = db.execute(_text("""
+        SELECT conversation_id, user_id
+          FROM chat_conversation_members
+         WHERE conversation_id IN :ids
+    """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
+        {"ids": conv_ids},
+    ).all()
+    members_by_conv: dict = {}
+    for r in member_rows:
+        members_by_conv.setdefault(r._mapping["conversation_id"], []).append(
+            r._mapping["user_id"]
+        )
+
+    # Latest messages
+    latest_by_id: dict = {}
+    if latest_msg_ids:
+        msg_rows = db.execute(_text("""
+            SELECT id, conversation_id, sender_id, message_type, body,
+                   created_at, deleted_at
+              FROM chat_messages
+             WHERE id IN :ids
+        """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
+            {"ids": latest_msg_ids},
+        ).all()
+        for r in msg_rows:
+            m = r._mapping
+            preview = _preview_for(m["message_type"], m["body"], m["deleted_at"])
+            latest_by_id[m["id"]] = {
+                "id": m["id"],
+                "sender_id": m["sender_id"],
+                "message_type": m["message_type"],
+                "body_preview": preview,
+                "created_at": m["created_at"],
+                "deleted_at": m["deleted_at"],
+            }
+
+    # Team metadata for team conversations
+    team_ids = [r._mapping["team_id"] for r in headers
+                if r._mapping["type"] == "team" and r._mapping["team_id"]]
+    team_by_id: dict = {}
+    if team_ids:
+        team_rows = db.execute(_text("""
+            SELECT id, name FROM teams WHERE id IN :ids
+        """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
+            {"ids": team_ids},
+        ).all()
+        for r in team_rows:
+            team_by_id[r._mapping["id"]] = {
+                "id": r._mapping["id"],
+                "name": r._mapping["name"],
+            }
+
+    # DM participants — super_admin isn't a member of any audited DM,
+    # so there's no canonical "other side." Resolve ALL DM members (not
+    # just one) so the UI can render "User A ↔ User B" instead of an
+    # arbitrary single name. We collect every DM member id, batch-fetch
+    # their user info in one query, then attach the per-conv lists below.
+    dm_member_ids: set = set()
+    for r in headers:
+        if r._mapping["type"] == "dm":
+            for uid in members_by_conv.get(r._mapping["id"], []):
+                dm_member_ids.add(uid)
+    user_by_id: dict = {}
+    if dm_member_ids:
+        peer_rows = db.execute(_text("""
+            SELECT id, name, username, profile_image_key
+              FROM users
+             WHERE id IN :ids
+        """).bindparams(__import__("sqlalchemy").bindparam("ids", expanding=True)),
+            {"ids": list(dm_member_ids)},
+        ).all()
+        from app.chat_layer.s3_chat_service import presign_profile_image
+        for r in peer_rows:
+            m = r._mapping
+            key = m.get("profile_image_key")
+            user_by_id[m["id"]] = {
+                "id": m["id"],
+                "name": m["name"],
+                "username": m["username"],
+                "profile_image_key": key,
+                "profile_image_url": presign_profile_image(key),
+            }
+
+    out = []
+    for r in headers:
+        h = r._mapping
+        peer = None
+        participants = None
+        if h["type"] == "dm":
+            mids = sorted(members_by_conv.get(h["id"], []))
+            # Both participants, in member-id order so it's stable across
+            # refetches. UI renders all entries when this field is set.
+            participants = [user_by_id[u] for u in mids if u in user_by_id]
+            # Keep `peer` populated too (first participant) for any legacy
+            # renderer that only knows about peer — never a regression.
+            if participants:
+                peer = participants[0]
+        team = team_by_id.get(h["team_id"]) if h["type"] == "team" else None
+        out.append({
+            "id": h["id"],
+            "type": h["type"],
+            "team_id": h["team_id"],
+            "title": h["title"],
+            "last_message_at": h["last_message_at"],
+            "unread_count": 0,
+            "members": members_by_conv.get(h["id"], []),
+            "latest_message": latest_by_id.get(h["latest_msg_id"]),
+            "peer": peer,
+            "participants": participants,
+            "team": team,
+        })
+    return out
+
+
+def conversation_belongs_to_org(
+    db: Session, conversation_id: int, organization_id: int
+) -> bool:
+    """True if the conversation's owning organisation matches.
+    Used by super_admin code paths to authorise access without
+    requiring membership.
+    """
+    from sqlalchemy import text as _text
+    row = db.execute(
+        _text(
+            "SELECT 1 FROM chat_conversations "
+            "WHERE id = :cid AND organization_id = :oid AND deleted_at IS NULL"
+        ),
+        {"cid": conversation_id, "oid": organization_id},
+    ).first()
+    return row is not None
+
+
 def _preview_for(message_type: str, body, deleted_at) -> str:
     if deleted_at is not None:
         return "[message deleted]"
@@ -430,8 +745,22 @@ def create_message(db: Session, *, conversation_id: int, sender_id: int,
                    forwarded_from_sender_id: Optional[int] = None,
                    refs: Optional[list] = None,
                    is_system: bool = False) -> ChatMessage:
+    # Resolve the conversation's organization_id ONCE and stamp the message
+    # with it. Previously every chat_messages row was inserted with NULL
+    # organization_id — the table grew tenant-unidentified rows that:
+    #   - never matched a per-tenant export / retention query;
+    #   - couldn't be filtered when super_admin scopes by org;
+    #   - silently leaked across tenants in any future raw-SQL read.
+    # The conversation already knows its org (DM / team / general all stamp
+    # it on the conversation row now), so we just mirror it onto each
+    # message. Symmetric with how the existing #general path used to be the
+    # ONLY message path that got org right via the conversation lookup.
+    conv = db.get(ChatConversation, conversation_id)
+    msg_org_id = getattr(conv, "organization_id", None) if conv else None
+
     msg = ChatMessage(
         conversation_id=conversation_id,
+        organization_id=msg_org_id,
         sender_id=sender_id,
         message_type=message_type,
         body=body,
@@ -444,7 +773,6 @@ def create_message(db: Session, *, conversation_id: int, sender_id: int,
     )
     db.add(msg)
     db.flush()
-    conv = db.get(ChatConversation, conversation_id)
     if conv:
         conv.last_message_at = datetime.utcnow()
     db.commit()

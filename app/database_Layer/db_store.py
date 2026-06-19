@@ -47,6 +47,7 @@ class User(Base):
     name = Column(String(100), nullable=False)
     username = Column(String(50), unique=True, nullable=False, index=True)
     email = Column(String(100), unique=True, nullable=False, index=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     password_hash = Column(String(255), nullable=False)
     created_at = Column(TIMESTAMP)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)

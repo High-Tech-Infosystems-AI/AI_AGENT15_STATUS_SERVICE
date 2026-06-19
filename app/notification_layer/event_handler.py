@@ -25,6 +25,25 @@ logger = logging.getLogger("app_logger")
 # Default banner TTL when event config doesn't override it
 DEFAULT_BANNER_EXPIRES_HOURS = 24
 
+# Target types whose recipient set spans an entire tenant (or the platform).
+# For these, a missing organization_id means recipient resolution would run
+# platform-wide and leak the notification into EVERY org — so we fail closed
+# (skip + warn) rather than send.
+ORG_SCOPED_TARGETS = {"all", "role"}
+
+
+def _extract_org_id(data: dict) -> Optional[int]:
+    """Pull organization_id out of an event's data payload, tolerating string
+    ints and missing values. Returns None when absent/invalid."""
+    raw = (data or {}).get("organization_id")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        logger.warning("Event data has non-int organization_id=%r — treating as None", raw)
+        return None
+
 
 def _banner_expiry(event_config_hours: Optional[int] = None) -> datetime:
     """
@@ -103,6 +122,7 @@ def _publish_notification(
     event_name: str,
     metadata: dict,
     unread_counts: dict,
+    organization_id: Optional[int] = None,
 ) -> None:
     """Publish a push/log notification to Redis for WS fan-out."""
     payload = {
@@ -119,7 +139,12 @@ def _publish_notification(
         "created_at": str(notif.created_at),
     }
 
-    if notif.visibility == "public" or notif.target_type == "all":
+    # Broadcast (fan-out to ALL connected sockets) only for genuinely
+    # platform-wide notifications (no org scope). When the notification is
+    # scoped to an org, deliver only to the resolved recipients — otherwise a
+    # public/all notification would leak across orgs in real time even though
+    # the DB recipients are correctly org-scoped.
+    if organization_id is None and (notif.visibility == "public" or notif.target_type == "all"):
         redis_manager.publish_broadcast(payload, user_unread_counts=unread_counts)
     else:
         redis_manager.publish_to_users(user_ids, payload, unread_counts=unread_counts)
@@ -171,6 +196,7 @@ def _create_and_publish(
     target_id: Optional[str],
     metadata: dict,
     expires_at: Optional[datetime] = None,
+    organization_id: Optional[int] = None,
 ) -> Tuple[Notification, List[int]]:
     """Create one notification row + recipients; caller does the publishing."""
     notif, user_ids = store.create_notification(
@@ -187,6 +213,7 @@ def _create_and_publish(
         event_type=event_name,
         metadata=metadata,
         expires_at=expires_at,
+        organization_id=organization_id,
     )
     return notif, user_ids
 
@@ -209,12 +236,30 @@ def handle_event(
 
     metadata = data.copy() if data else {}
 
+    # Tenant scope: org-targeted events MUST carry organization_id in their data
+    # payload (the emitting service supplies it). Without it the recipient
+    # resolution runs platform-wide and the notification leaks into every org.
+    organization_id = _extract_org_id(data)
+
     # 2. Primary delivery (push | banner | log) ---------------------------------
     title = _render_template(event_config.default_title_template, data)
     message = _render_template(event_config.default_message_template, data)
     target_type, target_id = _determine_target(
         event_config.target_type, event_config.target_roles, data,
     )
+
+    # Fail closed: for tenant-/platform-wide target types we refuse to send
+    # without an org scope rather than risk a cross-org leak.
+    if organization_id is None and target_type in ORG_SCOPED_TARGETS:
+        logger.error(
+            "Event '%s' (target_type=%s) arrived with NO organization_id — "
+            "SKIPPING to prevent cross-org notification leak. data keys=%s",
+            event_name, target_type, list((data or {}).keys()),
+        )
+        return False, None, (
+            f"Event '{event_name}' skipped: organization_id is required for "
+            f"target_type='{target_type}' (cross-org leak guard)"
+        )
 
     primary_expires = None
     if event_config.delivery_mode == "banner":
@@ -233,6 +278,7 @@ def handle_event(
             target_id=target_id,
             metadata=metadata,
             expires_at=primary_expires,
+            organization_id=organization_id,
         )
     except TargetValidationError as e:
         db.rollback()
@@ -259,6 +305,7 @@ def handle_event(
         # the delivery_mode field embedded in the payload.
         _publish_notification(
             primary_notif, primary_user_ids, event_name, metadata, unread_counts,
+            organization_id=organization_id,
         )
 
     # 3. Optional secondary banner ----------------------------------------------
@@ -285,6 +332,13 @@ def handle_event(
                 b_target_type_cfg, b_target_roles_cfg, data,
             )
 
+            # Same cross-org guard for the secondary banner.
+            if organization_id is None and b_target_type in ORG_SCOPED_TARGETS:
+                raise TargetValidationError(
+                    f"organization_id required for org-scoped banner (target_type={b_target_type})",
+                    code="MISSING_ORG_ID",
+                )
+
             banner_expires = _banner_expiry(event_config.banner_expires_hours)
 
             banner_notif, banner_user_ids = _create_and_publish(
@@ -298,6 +352,7 @@ def handle_event(
                 target_id=b_target_id,
                 metadata=metadata,
                 expires_at=banner_expires,
+                organization_id=organization_id,
             )
             banner_id = banner_notif.id
             _publish_banner(banner_notif, banner_user_ids, event_name, metadata, db=db)

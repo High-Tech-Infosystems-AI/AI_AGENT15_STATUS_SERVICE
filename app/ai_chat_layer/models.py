@@ -12,6 +12,7 @@ import app.chat_layer.models  # noqa: F401  ensure shared metadata loaded
 class AiTokenQuota(Base):
     __tablename__ = "ai_token_quota"
     user_id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     daily_limit = Column(Integer, nullable=False, server_default="50000")
     monthly_limit = Column(Integer, nullable=False, server_default="1000000")
     used_today = Column(Integer, nullable=False, server_default="0")
@@ -29,6 +30,7 @@ class AiTokenQuota(Base):
 class AiQueryAudit(Base):
     __tablename__ = "ai_query_audit"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    organization_id = Column(Integer, nullable=True, index=True)
     user_id = Column(Integer, nullable=False)
     conversation_id = Column(Integer, nullable=True)
     prompt = Column(MEDIUMTEXT, nullable=False)

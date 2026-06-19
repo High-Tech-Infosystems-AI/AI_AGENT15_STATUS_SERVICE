@@ -135,6 +135,7 @@ def check_job_deadlines(self):
                     "job_id": job.id,
                     "job_public_id": job.job_id,
                     "deadline": str(job.deadline),
+                    "organization_id": getattr(job, "organization_id", None),
                 })
             except Exception as e:
                 logger.error("Deadline exceeded event for job %s failed: %s", job.id, e)
@@ -149,6 +150,7 @@ def check_job_deadlines(self):
                     "job_public_id": job.job_id,
                     "deadline": str(job.deadline),
                     "days_remaining": DEADLINE_APPROACHING_DAYS,
+                    "organization_id": getattr(job, "organization_id", None),
                 })
             except Exception as e:
                 logger.error("Deadline approaching event for job %s failed: %s", job.id, e)

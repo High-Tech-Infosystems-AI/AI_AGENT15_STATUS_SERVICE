@@ -38,6 +38,7 @@ def resolve_target_user_ids(
     target_type: str,
     target_id: Optional[str],
     include_admins: bool = False,
+    organization_id: Optional[int] = None,
 ) -> List[int]:
     """
     Resolve target specification into a list of concrete user IDs.
@@ -46,6 +47,12 @@ def resolve_target_user_ids(
         target_type: all | user | job | role
         target_id: csv user_ids | job internal id | role name
         include_admins: always include admin + super_admin users
+        organization_id: when set, every branch is restricted to users
+            belonging to this org. Set by the endpoint layer from:
+              - super_admin: explicit `?organization_id=N` query param
+              - tier/admin: the caller's JWT organization_id (always)
+            None means platform-wide — only used by super_admin with no
+            picker selection.
 
     Raises:
         TargetValidationError: when target_type/target_id is invalid,
@@ -72,8 +79,10 @@ def resolve_target_user_ids(
     user_ids: set = set()
 
     if target_type == "all":
-        rows = db.query(User.id).filter(User.deleted_at.is_(None)).all()
-        user_ids = {r[0] for r in rows}
+        q = db.query(User.id).filter(User.deleted_at.is_(None))
+        if organization_id is not None:
+            q = q.filter(User.organization_id == organization_id)
+        user_ids = {r[0] for r in q.all()}
 
     elif target_type == "user":
         # Parse + validate ID format
@@ -96,16 +105,20 @@ def resolve_target_user_ids(
             )
 
         # Verify all requested user IDs actually exist (and not soft-deleted)
-        existing_rows = (
-            db.query(User.id)
-            .filter(User.id.in_(list(requested_ids)), User.deleted_at.is_(None))
-            .all()
+        existing_q = db.query(User.id).filter(
+            User.id.in_(list(requested_ids)), User.deleted_at.is_(None),
         )
+        if organization_id is not None:
+            # Cross-tenant guard: reject the request rather than silently
+            # dropping users from another org — the caller asked for them
+            # by ID, so a silent drop would be confusing.
+            existing_q = existing_q.filter(User.organization_id == organization_id)
+        existing_rows = existing_q.all()
         existing_ids = {r[0] for r in existing_rows}
         missing = requested_ids - existing_ids
         if missing:
             raise TargetValidationError(
-                f"User(s) not found or deleted: {sorted(missing)}",
+                f"User(s) not found, deleted, or not in target org: {sorted(missing)}",
                 code="USER_NOT_FOUND",
             )
         user_ids = existing_ids
@@ -120,15 +133,17 @@ def resolve_target_user_ids(
                 code="INVALID_JOB_ID_FORMAT",
             )
 
-        # Verify the job exists (and not soft-deleted)
-        job = (
-            db.query(JobOpenings.id)
-            .filter(JobOpenings.id == job_int_id, JobOpenings.deleted_at.is_(None))
-            .first()
+        # Verify the job exists (and not soft-deleted). When org-scoped,
+        # also confirm the job belongs to that org — caller shouldn't be
+        # able to address a job they don't own.
+        job_q = db.query(JobOpenings.id).filter(
+            JobOpenings.id == job_int_id, JobOpenings.deleted_at.is_(None),
         )
-        if not job:
+        if organization_id is not None and hasattr(JobOpenings, "organization_id"):
+            job_q = job_q.filter(JobOpenings.organization_id == organization_id)
+        if not job_q.first():
             raise TargetValidationError(
-                f"Job with id={job_int_id} not found or deleted",
+                f"Job with id={job_int_id} not found, deleted, or not in target org",
                 code="JOB_NOT_FOUND",
             )
 
@@ -141,12 +156,12 @@ def resolve_target_user_ids(
 
         # Filter to only existing/active users (assigned table may have stale IDs)
         if assigned_ids:
-            existing_rows = (
-                db.query(User.id)
-                .filter(User.id.in_(list(assigned_ids)), User.deleted_at.is_(None))
-                .all()
+            assigned_q = db.query(User.id).filter(
+                User.id.in_(list(assigned_ids)), User.deleted_at.is_(None),
             )
-            user_ids = {r[0] for r in existing_rows}
+            if organization_id is not None:
+                assigned_q = assigned_q.filter(User.organization_id == organization_id)
+            user_ids = {r[0] for r in assigned_q.all()}
 
         if not user_ids and not include_admins:
             raise TargetValidationError(
@@ -174,15 +189,17 @@ def resolve_target_user_ids(
                 code="ROLE_NOT_FOUND",
             )
 
-        rows = (
+        role_q = (
             db.query(User.id)
             .join(Role, User.role_id == Role.id)
             .filter(
                 func.lower(Role.name).in_(role_names),
                 User.deleted_at.is_(None),
             )
-            .all()
         )
+        if organization_id is not None:
+            role_q = role_q.filter(User.organization_id == organization_id)
+        rows = role_q.all()
         user_ids = {r[0] for r in rows}
 
         if not user_ids and not include_admins:
@@ -191,18 +208,22 @@ def resolve_target_user_ids(
                 code="ROLE_NO_RECIPIENTS",
             )
 
-    # Always include admin/super_admin for restricted notifications
+    # Always include admin/super_admin for restricted notifications.
+    # When org-scoped, only include admins of the SAME org (super_admin
+    # rows have NULL organization_id and are intentionally excluded —
+    # they don't need to be cc'd on every tenant notification).
     if include_admins:
-        admin_rows = (
+        admin_q = (
             db.query(User.id)
             .join(Role, User.role_id == Role.id)
             .filter(
                 func.lower(Role.name).in_(["admin", "super_admin"]),
                 User.deleted_at.is_(None),
             )
-            .all()
         )
-        user_ids.update(r[0] for r in admin_rows)
+        if organization_id is not None:
+            admin_q = admin_q.filter(User.organization_id == organization_id)
+        user_ids.update(r[0] for r in admin_q.all())
 
     # Final safety net: drop any IDs that somehow don't exist (defensive)
     if user_ids:
@@ -245,18 +266,29 @@ def create_notification(
     metadata: Optional[dict] = None,
     created_by: Optional[int] = None,
     expires_at: Optional[datetime] = None,
+    organization_id: Optional[int] = None,
 ) -> Tuple[Notification, List[int]]:
     """
     Create a notification record and resolve + insert recipients.
     Returns (notification, list_of_recipient_user_ids).
+
+    organization_id:
+        - super_admin with `?organization_id=N` → scopes recipients + stamps row
+        - tier/admin → caller's JWT org (always); the caller cannot escape it
+        - None → platform-wide (super_admin with no picker selection)
     """
     # Resolve recipients FIRST — before any DB writes.
     # If validation fails (invalid job/user/role), TargetValidationError
     # is raised here and no notification row is created (clean rollback).
     include_admins = target_type != "all"  # 'all' already includes everyone
-    user_ids = resolve_target_user_ids(db, target_type, target_id, include_admins=include_admins)
+    user_ids = resolve_target_user_ids(
+        db, target_type, target_id,
+        include_admins=include_admins,
+        organization_id=organization_id,
+    )
 
-    # Now safe to create the notification record
+    # Now safe to create the notification record. The org stamp drives
+    # admin log scoping later (so tier admins only see their own org).
     notif = Notification(
         title=title,
         message=message,
@@ -271,6 +303,7 @@ def create_notification(
         extra_metadata=json.dumps(metadata) if metadata else None,
         created_by=created_by,
         expires_at=expires_at,
+        organization_id=organization_id,
     )
     db.add(notif)
     db.flush()  # get notif.id
@@ -442,6 +475,7 @@ def get_admin_notification_logs(
     sort_by: str = "created_at",
     sort_order: str = "desc",
     include_not_received: bool = False,  # expensive N+1 resolution, opt-in
+    organization_id: Optional[int] = None,
 ) -> Tuple[list, int]:
     """
     Admin view — returns all notifications with recipient stats.
@@ -464,6 +498,11 @@ def get_admin_notification_logs(
             ),
         ),
     )
+
+    # Tenant scope — admins of org X see only org X's history; super_admin
+    # gets the literal value (None = platform-wide).
+    if organization_id is not None:
+        query = query.filter(Notification.organization_id == organization_id)
 
     if domain_type:
         types = [t.strip() for t in domain_type.split(",")]
@@ -790,21 +829,24 @@ def mark_notification_unread(db: Session, notification_id: int, user_id: int) ->
 # Active Banners
 # ---------------------------------------------------------------------------
 
-def get_active_banners(db: Session) -> list:
-    """All currently-active banners (admin/global view, no user filtering)."""
-    banners = (
-        db.query(Notification)
-        .filter(
-            Notification.delivery_mode == "banner",
-            Notification.is_active == 1,
-            or_(
-                Notification.expires_at.is_(None),
-                Notification.expires_at > datetime.utcnow(),
-            ),
-        )
-        .order_by(Notification.created_at.desc())
-        .all()
+def get_active_banners(db: Session, organization_id: Optional[int] = None) -> list:
+    """All currently-active banners (admin/global view, no user filtering).
+
+    organization_id: when set, restrict to banners of that org. Used so
+    tier admins on the banner management page only see their tenant's
+    banners (super_admin sees everything when not picking).
+    """
+    q = db.query(Notification).filter(
+        Notification.delivery_mode == "banner",
+        Notification.is_active == 1,
+        or_(
+            Notification.expires_at.is_(None),
+            Notification.expires_at > datetime.utcnow(),
+        ),
     )
+    if organization_id is not None:
+        q = q.filter(Notification.organization_id == organization_id)
+    banners = q.order_by(Notification.created_at.desc()).all()
     results = []
     for b in banners:
         meta = None
@@ -974,10 +1016,19 @@ def get_schedules(
     created_by: Optional[int] = None,
     page: int = 1,
     limit: int = 25,
+    organization_id: Optional[int] = None,
 ) -> Tuple[list, int]:
+    """List scheduled notifications.
+
+    organization_id: when set, only return schedules stamped with this
+    org (or with NULL org, which is the legacy platform-wide bucket).
+    Set by the endpoint layer to the caller's effective org.
+    """
     query = db.query(NotificationSchedule)
     if created_by:
         query = query.filter(NotificationSchedule.created_by == created_by)
+    if organization_id is not None:
+        query = query.filter(NotificationSchedule.organization_id == organization_id)
     query = query.order_by(NotificationSchedule.scheduled_at.desc())
     total = query.count()
     offset = (page - 1) * limit
@@ -1105,6 +1156,7 @@ def get_admin_stats(
     db: Session,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    organization_id: Optional[int] = None,
 ) -> dict:
     """
     Aggregate stats for the admin dashboard, optionally date-filtered.
@@ -1121,6 +1173,8 @@ def get_admin_stats(
         notif_q = notif_q.filter(Notification.created_at >= date_from)
     if date_to:
         notif_q = notif_q.filter(Notification.created_at <= date_to)
+    if organization_id is not None:
+        notif_q = notif_q.filter(Notification.organization_id == organization_id)
     total_notifications_sent = notif_q.count()
 
     # --- Pending scheduled notifications (date-filtered by scheduled_at if provided)
@@ -1129,6 +1183,8 @@ def get_admin_stats(
         sched_q = sched_q.filter(NotificationSchedule.scheduled_at >= date_from)
     if date_to:
         sched_q = sched_q.filter(NotificationSchedule.scheduled_at <= date_to)
+    if organization_id is not None:
+        sched_q = sched_q.filter(NotificationSchedule.organization_id == organization_id)
     notifications_scheduled = sched_q.count()
 
     # --- Engagement rate: sum(read) / sum(recipients) * 100
@@ -1144,6 +1200,8 @@ def get_admin_stats(
         recipients_stats = recipients_stats.filter(Notification.created_at >= date_from)
     if date_to:
         recipients_stats = recipients_stats.filter(Notification.created_at <= date_to)
+    if organization_id is not None:
+        recipients_stats = recipients_stats.filter(Notification.organization_id == organization_id)
     row = recipients_stats.one()
     total_recipients = row.total or 0
     total_read = int(row.read or 0)
@@ -1165,6 +1223,8 @@ def get_admin_stats(
             delivered_q = delivered_q.filter(Notification.created_at >= date_from)
         if date_to:
             delivered_q = delivered_q.filter(Notification.created_at <= date_to)
+        if organization_id is not None:
+            delivered_q = delivered_q.filter(Notification.organization_id == organization_id)
         delivered_count = delivered_q.count()
         delivery_success = round((delivered_count / total_notifications_sent) * 100, 2)
     else:
