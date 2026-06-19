@@ -57,6 +57,21 @@ def _to_json_safe(value: Any, _depth: int = 0) -> Any:
     return str(value)[:500]
 
 
+def _resolve_user_org(db: Session, user_id: int) -> Optional[int]:
+    """Look up the user's organisation_id from the shared users table.
+    Returns None if the user has no org (rare: super_admin platform-only).
+    """
+    from sqlalchemy import text
+    try:
+        row = db.execute(
+            text("SELECT organization_id FROM users WHERE id = :uid"),
+            {"uid": user_id},
+        ).first()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
 def log_query(
     db: Session,
     *,
@@ -69,21 +84,38 @@ def log_query(
     tokens_out: int = 0,
     latency_ms: int = 0,
     conversation_id: Optional[int] = None,
+    organization_id: Optional[int] = None,
     refs: Optional[List[Dict[str, Any]]] = None,
     tools_called: Optional[List[Dict[str, Any]]] = None,
     error_msg: Optional[str] = None,
     ip_address: Optional[str] = None,
 ) -> Optional[int]:
     """Insert one audit row. Swallows DB errors to avoid breaking the
-    request path — audit is best-effort, not load-bearing."""
+    request path — audit is best-effort, not load-bearing.
+
+    `organization_id` is stamped on every row so a per-tenant audit
+    surface (compliance export, super_admin "show me usage in org X")
+    can filter without a join. Callers should pass the resolved tenant
+    when they have it (always known at the endpoint layer). When omitted
+    we look it up from the user row — better than leaving NULL.
+    """
     try:
         # Coerce both JSON columns to plain primitives so SQLAlchemy's
         # default json.dumps doesn't choke on Pydantic models, datetimes,
         # or Decimals nested inside tool-call args.
         safe_refs = _to_json_safe(refs) if refs is not None else None
         safe_tools = _to_json_safe(tools_called) if tools_called is not None else None
+        # Resolve the tenant once. Previously this INSERT left
+        # organization_id NULL on every audit row, so the audit table grew
+        # tenant-unidentified rows — un-filterable by org without an extra
+        # join against users.organization_id at read time (and missing
+        # entirely once users are re-org'd or deleted).
+        org_id = organization_id
+        if org_id is None:
+            org_id = _resolve_user_org(db, user_id)
         row = AiQueryAudit(
             user_id=user_id,
+            organization_id=org_id,
             conversation_id=conversation_id,
             prompt=(prompt or "")[:65535],
             refs=safe_refs,

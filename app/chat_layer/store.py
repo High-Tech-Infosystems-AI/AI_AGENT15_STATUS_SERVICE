@@ -23,11 +23,34 @@ from app.chat_layer.models import (
 
 # ---------- Conversations ----------
 
-def get_or_create_dm(db: Session, user_a_id: int, user_b_id: int):
+def get_or_create_dm(
+    db: Session,
+    user_a_id: int,
+    user_b_id: int,
+    organization_id: Optional[int] = None,
+):
     """Returns (conversation, newly_added_user_ids).
     `newly_added_user_ids` is `[a, b]` only when the DM is freshly created;
     `[]` when an existing DM is returned. Used by the API layer to decide
     whether to fire presence-announcement events between the two users.
+
+    `organization_id`:
+        Tenant the new conversation belongs to. Callers MUST pass this on
+        the create path so the row is org-scoped — without it the row is
+        born with NULL `organization_id` and downstream read-scoping
+        (super_admin org filter, per-tenant inbox queries) leaks/loses
+        DMs. The two peers in a DM are always same-tenant (the
+        create_dm endpoint enforces the cross-tenant block), so the
+        caller's `ctx.organization_id` is the correct value to pass.
+        Defaults to None so old call sites compile, but every NEW DM
+        born without it is a write hole — please pass it.
+
+        For the rare case where the caller didn't pass it (e.g. an
+        internal helper that only has user ids), we look up the
+        creator's own org as a best-effort fallback so we still get
+        SOMETHING non-NULL on the row. The DB column is nullable, so
+        super_admin platform-only DMs (no org on either side) still
+        round-trip cleanly.
     """
     if user_a_id == user_b_id:
         raise ValueError("DM peers must be different users")
@@ -51,7 +74,19 @@ def get_or_create_dm(db: Session, user_a_id: int, user_b_id: int):
     if existing:
         return db.get(ChatConversation, existing), []
 
-    conv = ChatConversation(type="dm", created_by=a)
+    # Stamp organization_id on the fresh DM row. Previously this insert left
+    # org NULL on every DM, so all DM rows were tenant-unidentified — that
+    # silently breaks super_admin's per-org inbox filter and any future
+    # tenant-scoped retention/export job. The cross-tenant block lives in
+    # the endpoint; here we just record the resolved tenant.
+    org_id = organization_id
+    if org_id is None:
+        # Best-effort fallback when an internal caller forgot to pass it.
+        # Use the initiating user's org (peer is same-tenant by construction
+        # at the endpoint layer, so either side works).
+        org_id = _resolve_user_org(db, a)
+
+    conv = ChatConversation(type="dm", created_by=a, organization_id=org_id)
     db.add(conv)
     db.flush()
     db.add_all([
@@ -86,7 +121,32 @@ def get_or_create_team_conversation(db: Session, team_id: int,
             db.refresh(conv)
         return conv, newly_added
 
-    conv = ChatConversation(type="team", team_id=team_id, created_by=created_by)
+    # Stamp organization_id from the team's own row. Teams are tenant-scoped
+    # in the Organisation Service, so the chat conversation that mirrors a
+    # team has to inherit that same org for per-tenant read scoping to work.
+    # Previously this insert left org NULL, so team chat rows were
+    # tenant-unidentified — the super_admin per-org inbox filter never
+    # matched them and a tenant export could not include them. We do a
+    # lightweight SELECT against the shared `teams` table here (the model
+    # for the local service doesn't carry organization_id, so use raw SQL).
+    team_org_id: Optional[int] = None
+    try:
+        from sqlalchemy import text as _text
+        row = db.execute(
+            _text("SELECT organization_id FROM teams WHERE id = :tid"),
+            {"tid": team_id},
+        ).first()
+        if row and row[0] is not None:
+            team_org_id = int(row[0])
+    except Exception:
+        # If the column doesn't exist in this deployment, fall back to the
+        # creator's own org. Better than leaving it NULL.
+        if created_by is not None:
+            team_org_id = _resolve_user_org(db, created_by)
+
+    conv = ChatConversation(type="team", team_id=team_id,
+                            created_by=created_by,
+                            organization_id=team_org_id)
     db.add(conv)
     db.flush()
     for uid in member_user_ids:
@@ -685,8 +745,22 @@ def create_message(db: Session, *, conversation_id: int, sender_id: int,
                    forwarded_from_sender_id: Optional[int] = None,
                    refs: Optional[list] = None,
                    is_system: bool = False) -> ChatMessage:
+    # Resolve the conversation's organization_id ONCE and stamp the message
+    # with it. Previously every chat_messages row was inserted with NULL
+    # organization_id — the table grew tenant-unidentified rows that:
+    #   - never matched a per-tenant export / retention query;
+    #   - couldn't be filtered when super_admin scopes by org;
+    #   - silently leaked across tenants in any future raw-SQL read.
+    # The conversation already knows its org (DM / team / general all stamp
+    # it on the conversation row now), so we just mirror it onto each
+    # message. Symmetric with how the existing #general path used to be the
+    # ONLY message path that got org right via the conversation lookup.
+    conv = db.get(ChatConversation, conversation_id)
+    msg_org_id = getattr(conv, "organization_id", None) if conv else None
+
     msg = ChatMessage(
         conversation_id=conversation_id,
+        organization_id=msg_org_id,
         sender_id=sender_id,
         message_type=message_type,
         body=body,
@@ -699,7 +773,6 @@ def create_message(db: Session, *, conversation_id: int, sender_id: int,
     )
     db.add(msg)
     db.flush()
-    conv = db.get(ChatConversation, conversation_id)
     if conv:
         conv.last_message_at = datetime.utcnow()
     db.commit()

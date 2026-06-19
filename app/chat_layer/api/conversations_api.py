@@ -85,7 +85,18 @@ def create_dm(req: CreateDMRequest,
                 return _err("CHAT_CROSS_TENANT_DM", "Cannot DM a user in another organisation", 403)
         if not can_post_dm(peer_active=True):
             return _err("CHAT_USER_INACTIVE", "Cannot DM inactive user", 403)
-        conv, newly_added = store.get_or_create_dm(db, user["user_id"], req.peer_user_id)
+        # Pass the caller's tenant down so the new ChatConversation row gets
+        # organization_id stamped. Previously this insert left org NULL on
+        # every DM, breaking super_admin's per-org inbox filter and any
+        # future per-tenant export. The cross-tenant peer-check above
+        # already guarantees both peers share `ctx.organization_id` (admin /
+        # tier are blocked from cross-org; super_admin DMing across orgs
+        # is intentionally allowed and falls back to the peer's org via
+        # the store helper).
+        conv, newly_added = store.get_or_create_dm(
+            db, user["user_id"], req.peer_user_id,
+            organization_id=ctx.organization_id,
+        )
         members = store.member_user_ids(db, conv.id)
         # Both users now share this DM. Push current presence to both ends
         # so they see each other's online dot immediately — without this,
