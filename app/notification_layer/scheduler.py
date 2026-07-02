@@ -33,17 +33,26 @@ async def run_scheduler():
         try:
             await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
 
-            # Try to acquire lock — if Celery Beat already holds it, skip
-            if not redis_manager.acquire_scheduler_lock("notif:lock:scheduled", ttl=55):
-                continue
-
-            try:
-                _process_tick()
-            finally:
-                redis_manager.release_scheduler_lock("notif:lock:scheduled")
+            # Run the whole tick (Redis lock + blocking DB work) in a worker
+            # thread. Doing synchronous DB/Redis I/O directly on the event loop
+            # blocks it — a slow/locked tick froze /health, failing the liveness
+            # probe and crash-looping the pod (137). Offloading keeps the loop
+            # free so /health stays responsive.
+            await asyncio.to_thread(_run_tick_locked)
 
         except Exception as e:
             logger.error("Scheduler tick error: %s", e, exc_info=True)
+
+
+def _run_tick_locked():
+    """Acquire the scheduler lock and process one tick (runs in a thread)."""
+    # If Celery Beat already holds the lock, skip (no double execution).
+    if not redis_manager.acquire_scheduler_lock("notif:lock:scheduled", ttl=55):
+        return
+    try:
+        _process_tick()
+    finally:
+        redis_manager.release_scheduler_lock("notif:lock:scheduled")
 
 
 def _process_tick():
