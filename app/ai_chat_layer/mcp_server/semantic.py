@@ -436,8 +436,8 @@ DIMENSIONS: Dict[str, Dimension] = {
         name="outcome_tag",
         description=(
             "Cross-stage outcome category from pipeline_stage_status.tag "
-            "(Sourcing / Screening / LineUps / TurnUps / Selected / "
-            "OfferReleased / OfferAccepted)."
+            "(Sourcing / Screening / Submitted / Line Ups / Turn Ups / Selected / "
+            "Offer Released / Offer Accepted)."
         ),
         sql="pss.tag",
         requires_aliases=("cj", "cps", "pss"),
@@ -720,8 +720,8 @@ FILTERS: Dict[str, Filter] = {
     ),
     "outcome_tag": Filter(
         "outcome_tag",
-        "Outcome tag match — Sourcing / Screening / LineUps / TurnUps / "
-        "Selected / OfferReleased / OfferAccepted.",
+        "Outcome tag match — Sourcing / Screening / Submitted / Line Ups / Turn Ups / "
+        "Selected / Offer Released / Offer Accepted.",
         "pss.tag = :outcome_tag",
         ("cj", "cps", "pss"), ("outcome_tag",),
     ),
