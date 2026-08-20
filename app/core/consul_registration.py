@@ -334,3 +334,81 @@ class ConsulServiceRegistry:
 
 
 consul_registry = ConsulServiceRegistry()
+
+
+# --- Consul self-healing heartbeat (auto re-register on drop) -----------------
+# Services register with Consul once at startup and never re-announce. If the
+# single-node Consul server drops the entry (health-check reap / state hiccup)
+# the service becomes invisible to the API gateway until its pod is restarted.
+# This heartbeat periodically verifies the registration and re-registers ONLY
+# when the entry is missing (so there is no log spam) — a Consul blip then
+# self-heals within one interval instead of needing a manual pod restart.
+# Interval: CONSUL_HEARTBEAT_INTERVAL env / settings, default 30s (0 disables).
+import threading as _hb_threading
+
+
+def _hb_interval() -> int:
+    try:
+        return int(os.getenv(
+            "CONSUL_HEARTBEAT_INTERVAL",
+            str(getattr(settings, "CONSUL_HEARTBEAT_INTERVAL", 30)),
+        ))
+    except Exception:
+        return 30
+
+
+def _install_consul_heartbeat(registry) -> None:
+    if getattr(registry, "_hb_installed", False):
+        return
+    registry._hb_installed = True
+    registry._hb_last_args = ((), {})
+    registry._hb_started = False
+    registry._hb_stop = _hb_threading.Event()
+
+    _orig_register = registry.register_service
+
+    def _present() -> bool:
+        try:
+            client = getattr(registry, "consul_client", None)
+            if client is None or not registry.service_id:
+                return False
+            return registry.service_id in client.agent.services()
+        except Exception:
+            # Can't reach Consul to check -> assume present, avoid churn.
+            return True
+
+    def _loop() -> None:
+        while not registry._hb_stop.wait(_hb_interval()):
+            try:
+                if not _present():
+                    logger.warning(
+                        "Consul no longer lists %s - re-registering (self-heal)",
+                        registry.service_id,
+                    )
+                    a, k = registry._hb_last_args
+                    _orig_register(*a, **k)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Consul heartbeat cycle error: %s", exc)
+
+    def _start() -> None:
+        if registry._hb_started or _hb_interval() <= 0:
+            return
+        registry._hb_started = True
+        _hb_threading.Thread(
+            target=_loop, name="consul-heartbeat", daemon=True,
+        ).start()
+        logger.info(
+            "Consul self-healing heartbeat active (interval=%ss)", _hb_interval()
+        )
+
+    def _wrapped_register(*args, **kwargs):
+        ok = _orig_register(*args, **kwargs)
+        if ok:
+            registry._hb_last_args = (args, kwargs)
+            _start()
+        return ok
+
+    registry.register_service = _wrapped_register
+
+
+_install_consul_heartbeat(consul_registry)
