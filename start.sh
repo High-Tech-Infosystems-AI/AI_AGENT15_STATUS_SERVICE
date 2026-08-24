@@ -22,12 +22,14 @@ set -u
 STATUS_PORT="${STATUS_SERVICE_PORT:-8515}"
 CHAT_PORT="${CHAT_SERVICE_PORT:-8517}"
 AI_CHAT_PORT="${AI_CHAT_SERVICE_PORT:-8518}"
+MAIL_PORT="${MAIL_SERVICE_PORT:-8521}"
 UI_PORT="${UI_PORT:-5009}"
 CELERY_ENABLED="${CELERY_ENABLED:-0}"
 
 # Toggle a known-broken non-critical subprocess off entirely, if ever needed.
 CHAT_ENABLED="${CHAT_ENABLED:-1}"
 AI_CHAT_ENABLED="${AI_CHAT_ENABLED:-1}"
+MAIL_ENABLED="${MAIL_ENABLED:-1}"
 UI_ENABLED="${UI_ENABLED:-1}"
 
 # supervise <name> <cmd...> : keep a non-critical process alive WITHOUT ever
@@ -70,6 +72,15 @@ fi
 if [ "${AI_CHAT_ENABLED}" = "1" ]; then
   echo "Starting (supervised) AI Chat API on port ${AI_CHAT_PORT}..."
   supervise "ai_chat" uvicorn app.ai_chat_main:app --host 0.0.0.0 --port "${AI_CHAT_PORT}" &
+fi
+
+if [ "${MAIL_ENABLED}" = "1" ]; then
+  echo "Starting (supervised) Mail API on port ${MAIL_PORT}..."
+  supervise "mail" uvicorn app.mail_main:app --host 0.0.0.0 --port "${MAIL_PORT}" &
+  echo "Starting (supervised) Mail sync worker..."
+  supervise "mail_sync" python -m app.mail_layer.sync_worker &
+  echo "Starting (supervised) Mail send worker..."
+  supervise "mail_send" python -m app.mail_layer.send_worker &
 fi
 
 if [ "${UI_ENABLED}" = "1" ]; then

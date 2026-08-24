@@ -30,14 +30,16 @@ COPY . /app
 #   8515 — Status API
 #   8517 — Chat API
 #   8518 — AI Chat API
+#   8521 — Mail API
 #   5009 — Notification UI
-EXPOSE 8515 8517 8518 5009
+EXPOSE 8515 8517 8518 8521 5009
 
-# Healthcheck — verify the three APIs respond. UI is non-critical.
+# Healthcheck — verify the core APIs respond. UI + workers are non-critical.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
   CMD curl -f http://127.0.0.1:8515/health \
    && curl -f http://127.0.0.1:8517/health \
-   && curl -f http://127.0.0.1:8518/health || exit 1
+   && curl -f http://127.0.0.1:8518/health \
+   && curl -f http://127.0.0.1:8521/health || exit 1
 
 # Start four processes: status API + chat API + AI chat API + notification UI
 COPY start.sh /app/start.sh
