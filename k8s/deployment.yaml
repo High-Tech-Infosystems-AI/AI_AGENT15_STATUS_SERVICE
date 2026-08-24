@@ -27,6 +27,8 @@ spec:
               containerPort: 8517
             - name: ai-chat
               containerPort: 8518
+            - name: mail
+              containerPort: 8521
             - name: ui
               containerPort: 5009
           envFrom:
@@ -61,6 +63,24 @@ spec:
               value: "/ai-chat"
             - name: AI_CHAT_SERVICE_AUTH
               value: "jwt"
+            # Mail service (port 8521). Gateway routes /mail/* here via Consul.
+            - name: MAIL_SERVICE_PORT
+              value: "8521"
+            - name: MAIL_SERVICE_NAME
+              value: "HRMIS_MAIL_SERVICE"
+            - name: MAIL_SERVICE_PATH
+              value: "/mail"
+            - name: MAIL_SERVICE_AUTH
+              value: "required"
+            # Fernet key that encrypts stored SMTP/IMAP credentials. Create with:
+            #   kubectl -n <ns> create secret generic mail-enc \
+            #     --from-literal=MAIL_ENCRYPTION_KEY=$(python -c \
+            #     "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())")
+            - name: MAIL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mail-enc
+                  key: MAIL_ENCRYPTION_KEY
             # Celery worker + beat run inside this pod so AI scheduled
             # queries and anomaly subscriptions fire on the beat tick.
             - name: CELERY_ENABLED
@@ -135,6 +155,23 @@ spec:
     - name: ai-chat
       port: 8518
       targetPort: 8518
+  type: ClusterIP
+---
+# ClusterIP for the Mail API (internal traffic; gateway hits this via Consul)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mail-service
+  labels:
+    app: status-service
+    component: mail
+spec:
+  selector:
+    app: status-service
+  ports:
+    - name: mail
+      port: 8521
+      targetPort: 8521
   type: ClusterIP
 ---
 # NodePort for the Notification UI (exposed to internet on port 30509)
