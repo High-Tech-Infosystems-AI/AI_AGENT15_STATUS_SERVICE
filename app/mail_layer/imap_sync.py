@@ -33,6 +33,22 @@ _SPECIAL_USE = {
 # Folders we never pull from the server (outbox is local; drafts stay local in v1).
 _SKIP_ROLES = {"outbox"}
 
+# Gmail (and some servers) expose virtual/overlay folders that re-list mail
+# already held in real folders ("All Mail", "Important", "Starred"), plus
+# non-selectable container nodes (e.g. "[Gmail]"). Skip them so we neither
+# mirror the same message many times nor create empty container folders.
+_SKIP_SPECIAL_USE = {b"\\All", b"\\Important", b"\\Flagged"}
+
+
+def _is_skippable_folder(flags) -> bool:
+    for f in (flags or []):
+        fb = f if isinstance(f, bytes) else str(f).encode()
+        if fb in _SKIP_SPECIAL_USE:
+            return True
+        if fb.lower() in (b"\\noselect", b"\\nonexistent"):
+            return True
+    return False
+
 
 def _imapclient():
     from imapclient import IMAPClient  # lazy
@@ -105,6 +121,10 @@ def _sync_folders(db: Session, account: m.MailAccount, server) -> None:
                 fold.imap_path = name
             seen_roles.add(role)
         else:
+            # Skip virtual overlays (Gmail All Mail/Important/Starred) and
+            # non-selectable containers — they duplicate real mail or hold none.
+            if _is_skippable_folder(flags):
+                continue
             # custom folder — create if we don't have it yet
             exists = (db.query(m.MailFolder)
                       .filter(m.MailFolder.account_id == account.id,

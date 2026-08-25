@@ -87,7 +87,13 @@ class MailFolder(Base):
     account = relationship("MailAccount", back_populates="folders")
 
     __table_args__ = (
-        UniqueConstraint("account_id", "role", "is_system", name="uq_acct_role_sys"),
+        # Dedupe folders by their server path per account. NULL imap_path (the
+        # seeded system folders before first sync, the local Outbox, and any
+        # user-created custom folders) is allowed to repeat — MySQL treats NULLs
+        # as distinct in a UNIQUE index. System folders stay one-per-role via the
+        # idempotent seed_system_folders(). (Replaces uq_acct_role_sys, which
+        # wrongly capped an account at a single custom folder.)
+        UniqueConstraint("account_id", "imap_path", name="uq_acct_imap_path"),
         Index("idx_mail_fold_acct", "account_id"),
         Index("idx_mail_fold_user", "user_id"),
     )
