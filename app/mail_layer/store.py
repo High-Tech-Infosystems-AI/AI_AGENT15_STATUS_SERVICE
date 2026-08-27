@@ -131,6 +131,24 @@ def category_ids_for(db: Session, message_id: int) -> List[int]:
     return [r[0] for r in rows]
 
 
+def category_map_for(db: Session, message_ids: List[int]) -> dict:
+    """Batch the category lookup for a page of messages into ONE query.
+
+    Serializing a list used to call category_ids_for() per message — an N+1 that
+    dominated the message-list latency (one DB round-trip per row). This returns
+    {message_id: [category_id, ...]} in a single query so the list serializes
+    without extra round-trips.
+    """
+    if not message_ids:
+        return {}
+    out: dict = {}
+    rows = (db.query(m.MailMessageCategory.message_id, m.MailMessageCategory.category_id)
+            .filter(m.MailMessageCategory.message_id.in_(message_ids)).all())
+    for mid, cid in rows:
+        out.setdefault(mid, []).append(cid)
+    return out
+
+
 # ------------------------------------------------------------------ serializers
 def serialize_account(a: m.MailAccount) -> dict:
     return {
@@ -158,7 +176,10 @@ def serialize_folder(f: m.MailFolder) -> dict:
     }
 
 
-def serialize_message_item(db: Session, msg: m.MailMessage) -> dict:
+def serialize_message_item(db: Session, msg: m.MailMessage,
+                           categories: Optional[List[int]] = None) -> dict:
+    # Pass `categories` (from category_map_for) when serializing a LIST to avoid
+    # a per-message category query (N+1). Falls back to a single lookup otherwise.
     return {
         "id": msg.id, "folder_id": msg.folder_id,
         "conversation_id": msg.conversation_id, "direction": msg.direction,
@@ -168,7 +189,7 @@ def serialize_message_item(db: Session, msg: m.MailMessage) -> dict:
         "is_flagged": bool(msg.is_flagged), "is_draft": bool(msg.is_draft),
         "importance": msg.importance, "send_status": msg.send_status,
         "internal_date": msg.internal_date or msg.sent_at or msg.created_at,
-        "categories": category_ids_for(db, msg.id),
+        "categories": categories if categories is not None else category_ids_for(db, msg.id),
     }
 
 
