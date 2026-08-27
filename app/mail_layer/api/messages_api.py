@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.database_Layer.db_config import get_db
 from app.dependencies.tenant_auth import AuthCtx, get_auth_ctx
@@ -16,6 +16,14 @@ from app.mail_layer.schemas import (
 )
 
 router = APIRouter()
+
+# Heavy MEDIUMTEXT columns not needed for an envelope list — deferring them stops
+# the list query from hauling every message's full body/html over the wire.
+_LIST_DEFER = (
+    defer(m.MailMessage.body_text),
+    defer(m.MailMessage.body_html),
+    defer(m.MailMessage.references_hdr),
+)
 
 
 def _settings_for(db: Session, account_id: int) -> Optional[m.MailSettings]:
@@ -52,10 +60,12 @@ def list_messages(folder_id: int,
             m.MailMessageCategory,
             m.MailMessageCategory.message_id == m.MailMessage.id).filter(
                 m.MailMessageCategory.category_id == category_id)
-    rows = (query.order_by(m.MailMessage.internal_date.desc(),
-                           m.MailMessage.id.desc())
+    rows = (query.options(*_LIST_DEFER)
+            .order_by(m.MailMessage.internal_date.desc(), m.MailMessage.id.desc())
             .offset((page - 1) * limit).limit(limit).all())
-    return [store.serialize_message_item(db, msg) for msg in rows]
+    cat_map = store.category_map_for(db, [r.id for r in rows])
+    return [store.serialize_message_item(db, msg, categories=cat_map.get(msg.id, []))
+            for msg in rows]
 
 
 # ------------------------------------------------------------------ read
@@ -107,8 +117,11 @@ def search(q: str = Query(..., min_length=1),
         query = query.filter(m.MailMessage.account_id == account_id)
     if folder_id:
         query = query.filter(m.MailMessage.folder_id == folder_id)
-    rows = query.order_by(m.MailMessage.internal_date.desc()).limit(limit).all()
-    return [store.serialize_message_item(db, msg) for msg in rows]
+    rows = (query.options(*_LIST_DEFER)
+            .order_by(m.MailMessage.internal_date.desc()).limit(limit).all())
+    cat_map = store.category_map_for(db, [r.id for r in rows])
+    return [store.serialize_message_item(db, msg, categories=cat_map.get(msg.id, []))
+            for msg in rows]
 
 
 # ------------------------------------------------------------------ actions
