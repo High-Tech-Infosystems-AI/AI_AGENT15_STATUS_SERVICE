@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -10,7 +11,22 @@ from typing import List, Optional, Tuple
 
 logger = logging.getLogger("app_logger")
 
-_TIMEOUT = 20
+# Socket timeout for SMTP. Sending a large attachment (e.g. a video) pushes many
+# MB through the DATA phase and the server can take a while to accept/scan it; a
+# short timeout makes sock.sendall()/the final read time out and smtplib raises
+# "Server not connected", so we scale the timeout by the message size.
+_TIMEOUT = int(os.getenv("MAIL_SMTP_TIMEOUT", "60"))
+_TIMEOUT_PER_MB = int(os.getenv("MAIL_SMTP_TIMEOUT_PER_MB", "20"))
+_TIMEOUT_MAX = int(os.getenv("MAIL_SMTP_TIMEOUT_MAX", "600"))
+
+
+def _timeout_for(msg: EmailMessage) -> int:
+    """Give larger messages a proportionally longer socket timeout."""
+    try:
+        size_mb = len(msg.as_bytes()) / (1024 * 1024)
+    except Exception:
+        size_mb = 0.0
+    return min(_TIMEOUT_MAX, max(_TIMEOUT, int(_TIMEOUT + size_mb * _TIMEOUT_PER_MB)))
 
 
 def _connect(host: str, port: int, security: str, timeout: int = _TIMEOUT):
@@ -93,7 +109,7 @@ def send(*, host: str, port: int, security: str, username: str, password: str,
          recipients: List[str]) -> Tuple[bool, str]:
     """Send an already-built EmailMessage. Returns (ok, detail)."""
     try:
-        server = _connect(host, port, security)
+        server = _connect(host, port, security, timeout=_timeout_for(msg))
     except Exception as exc:
         return False, f"connect failed: {exc}"
     try:
