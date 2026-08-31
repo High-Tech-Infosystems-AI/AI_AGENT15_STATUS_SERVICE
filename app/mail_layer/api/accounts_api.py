@@ -33,9 +33,9 @@ def create_account(body: AccountCreate,
     if not body.consent_acknowledged:
         raise HTTPException(400, "Full-mirror consent must be acknowledged")
 
-    email = str(body.email_address)
-    smtp_user = body.smtp_username or email
-    imap_user = body.imap_username or email
+    email = str(body.email_address).strip()
+    smtp_user = (body.smtp_username or email).strip()
+    imap_user = (body.imap_username or email).strip()
 
     # The unique key uq_user_email (user_id, email_address) also counts
     # soft-deleted rows, so we must look past deleted_at here: if the user
@@ -124,6 +124,11 @@ def update_account(account_id: int, body: AccountUpdate,
     for bfield in ("use_same_credentials", "sync_enabled", "use_idle"):
         if bfield in data and data[bfield] is not None:
             setattr(acct, bfield, 1 if data[bfield] else 0)
+    # Trim stray whitespace that would break SMTP/IMAP login.
+    for sfield in ("smtp_username", "imap_username", "smtp_host", "imap_host"):
+        val = getattr(acct, sfield, None)
+        if isinstance(val, str):
+            setattr(acct, sfield, val.strip())
     if data.get("smtp_password"):
         acct.smtp_password_enc = crypto.encrypt(data["smtp_password"])
     if data.get("imap_password"):
