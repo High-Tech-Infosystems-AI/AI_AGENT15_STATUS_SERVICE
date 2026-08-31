@@ -27,6 +27,9 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pywebpush>=2.0.0",
     "cryptography>=42.0.0",
+    # Mail service — IMAP receive + HTML->text for snippets
+    "imapclient>=3.0.0",
+    "html2text>=2024.2.26",
     # AI chatbot
     "langchain>=0.3.0",
     "langchain-core>=0.3.0",

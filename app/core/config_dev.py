@@ -106,6 +106,17 @@ class Settings(BaseSettings):
     MCP_MYSQL_COMMAND: str = os.getenv("MCP_MYSQL_COMMAND", "")
     MCP_MYSQL_ARGS: str = os.getenv("MCP_MYSQL_ARGS", "")
 
+    # Mail service (per-user SMTP+IMAP mailboxes) — runs as app.mail_main:app
+    MAIL_SERVICE_NAME: str = os.getenv("MAIL_SERVICE_NAME", "HRMIS_MAIL_SERVICE")
+    MAIL_SERVICE_PORT: int = _parse_port(os.getenv("MAIL_SERVICE_PORT", "8521"), 8521)
+    MAIL_SERVICE_PATH: str = os.getenv("MAIL_SERVICE_PATH", "/mail")
+    # Fernet key for encrypting stored SMTP/IMAP credentials (K8s Secret).
+    MAIL_ENCRYPTION_KEY: str = os.getenv("MAIL_ENCRYPTION_KEY", "")
+    MAIL_SYNC_ENABLED: bool = os.getenv("MAIL_SYNC_ENABLED", "1").lower() in ("true", "1", "yes")
+    MAIL_SYNC_CONCURRENCY: int = int(os.getenv("MAIL_SYNC_CONCURRENCY", "4"))
+    MAIL_MAX_SEND_RETRIES: int = int(os.getenv("MAIL_MAX_SEND_RETRIES", "5"))
+    MAIL_DEFAULT_BACKFILL_DAYS: int = int(os.getenv("MAIL_DEFAULT_BACKFILL_DAYS", "90"))
+
     @property
     def DB_URI(self) -> str:
         # Use mysql+mysqlconnector as ORM dialect and driver
