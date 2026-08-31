@@ -34,6 +34,15 @@ def _require_account(db: Session, user_id: int) -> m.MailAccount:
     return acct
 
 
+def _resolve_account(db: Session, ctx: AuthCtx, account_id) -> m.MailAccount:
+    """Send from the mailbox the composer selected (body.account_id); fall back
+    to the default only when none was given. Without this the send always used
+    the default account, so picking another mailbox had no effect."""
+    if account_id:
+        return store.get_owned_account(db, ctx.user_id, account_id)  # 404 if not owned
+    return _require_account(db, ctx.user_id)
+
+
 def _draft_folder(db: Session, account_id: int) -> m.MailFolder:
     f = store.get_folder_by_role(db, account_id, "drafts")
     if not f:
@@ -57,7 +66,7 @@ def _apply_compose_fields(msg: m.MailMessage, body) -> None:
 @router.post("/drafts", response_model=MessageOut)
 def create_draft(body: DraftCreate, ctx: AuthCtx = Depends(get_auth_ctx),
                  db: Session = Depends(get_db)):
-    acct = _require_account(db, ctx.user_id)
+    acct = _resolve_account(db, ctx, body.account_id)
     drafts = _draft_folder(db, acct.id)
     msg = m.MailMessage(
         account_id=acct.id, folder_id=drafts.id, user_id=ctx.user_id,
@@ -122,7 +131,7 @@ def send_message(body: SendRequest, ctx: AuthCtx = Depends(get_auth_ctx),
         if body.to or body.subject or body.body_html or body.body_text:
             _apply_compose_fields(msg, body)
     else:
-        acct = _require_account(db, ctx.user_id)
+        acct = _resolve_account(db, ctx, body.account_id)
         drafts = _draft_folder(db, acct.id)
         msg = m.MailMessage(
             account_id=acct.id, folder_id=drafts.id, user_id=ctx.user_id,
@@ -152,7 +161,7 @@ def schedule_message(body: ScheduleRequest, ctx: AuthCtx = Depends(get_auth_ctx)
         msg = store.get_owned_message(db, ctx.user_id, body.draft_id)
         _apply_compose_fields(msg, body)
     else:
-        acct = _require_account(db, ctx.user_id)
+        acct = _resolve_account(db, ctx, body.account_id)
         drafts = _draft_folder(db, acct.id)
         msg = m.MailMessage(
             account_id=acct.id, folder_id=drafts.id, user_id=ctx.user_id,

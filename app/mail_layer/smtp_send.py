@@ -50,7 +50,7 @@ def test_smtp(host: str, port: int, security: str, username: str,
     except Exception as exc:
         return False, f"connect failed: {exc}"
     try:
-        server.login(username, password)
+        server.login(username.strip(), password)
         return True, "authenticated"
     except smtplib.SMTPAuthenticationError:
         return False, "authentication rejected"
@@ -113,7 +113,7 @@ def send(*, host: str, port: int, security: str, username: str, password: str,
     except Exception as exc:
         return False, f"connect failed: {exc}"
     try:
-        server.login(username, password)
+        server.login(username.strip(), password)
         server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
         return True, "sent"
     except Exception as exc:

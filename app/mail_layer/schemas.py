@@ -189,6 +189,7 @@ class BulkRequest(BaseModel):
 
 # ---------------------------------------------------------------- compose
 class DraftCreate(BaseModel):
+    account_id: Optional[int] = None       # which mailbox to send from
     to: List[str] = Field(default_factory=list)
     cc: List[str] = Field(default_factory=list)
     bcc: List[str] = Field(default_factory=list)
@@ -207,6 +208,7 @@ class DraftUpdate(DraftCreate):
 
 class SendRequest(BaseModel):
     draft_id: Optional[int] = None
+    account_id: Optional[int] = None       # which mailbox to send from
     # inline send (no pre-saved draft)
     to: List[str] = Field(default_factory=list)
     cc: List[str] = Field(default_factory=list)
