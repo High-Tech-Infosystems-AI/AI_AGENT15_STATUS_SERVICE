@@ -5,6 +5,7 @@ import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database_Layer.db_config import get_db
@@ -32,38 +33,59 @@ def create_account(body: AccountCreate,
     if not body.consent_acknowledged:
         raise HTTPException(400, "Full-mirror consent must be acknowledged")
 
-    dup = (db.query(m.MailAccount)
-           .filter(m.MailAccount.user_id == ctx.user_id,
-                   m.MailAccount.email_address == str(body.email_address),
-                   m.MailAccount.deleted_at.is_(None)).first())
-    if dup:
+    email = str(body.email_address)
+    smtp_user = body.smtp_username or email
+    imap_user = body.imap_username or email
+
+    # The unique key uq_user_email (user_id, email_address) also counts
+    # soft-deleted rows, so we must look past deleted_at here: if the user
+    # previously removed this mailbox (soft delete), reactivate that row instead
+    # of inserting a duplicate — otherwise db.flush() raises IntegrityError (500).
+    existing = (db.query(m.MailAccount)
+                .filter(m.MailAccount.user_id == ctx.user_id,
+                        m.MailAccount.email_address == email)
+                .first())
+    if existing and existing.deleted_at is None:
         raise HTTPException(409, "This mailbox is already connected")
 
-    smtp_user = body.smtp_username or str(body.email_address)
-    imap_user = body.imap_username or str(body.email_address)
-    acct = m.MailAccount(
-        user_id=ctx.user_id, organization_id=ctx.organization_id,
-        display_name=body.display_name, email_address=str(body.email_address),
-        provider=body.provider,
-        smtp_host=body.smtp_host, smtp_port=body.smtp_port,
-        smtp_security=body.smtp_security, smtp_username=smtp_user,
-        smtp_password_enc=crypto.encrypt(body.smtp_password),
-        imap_host=body.imap_host, imap_port=body.imap_port,
-        imap_security=body.imap_security, imap_username=imap_user,
-        imap_password_enc=(None if body.use_same_credentials
-                           else crypto.encrypt(body.imap_password or "")),
-        use_same_credentials=1 if body.use_same_credentials else 0,
-        sync_enabled=1 if body.sync_enabled else 0,
-        sync_interval_seconds=body.sync_interval_seconds,
-        backfill_days=body.backfill_days,
-        use_idle=1 if body.use_idle else 0,
-        status="pending", consent_acknowledged=1, is_default=1,
-    )
-    db.add(acct)
-    db.flush()
-    store.seed_system_folders(db, acct)
-    store.ensure_settings(db, acct)
-    db.commit()
+    acct = existing or m.MailAccount(user_id=ctx.user_id)
+    acct.deleted_at = None
+    acct.organization_id = ctx.organization_id
+    acct.display_name = body.display_name
+    acct.email_address = email
+    acct.provider = body.provider
+    acct.smtp_host = body.smtp_host
+    acct.smtp_port = body.smtp_port
+    acct.smtp_security = body.smtp_security
+    acct.smtp_username = smtp_user
+    acct.smtp_password_enc = crypto.encrypt(body.smtp_password)
+    acct.imap_host = body.imap_host
+    acct.imap_port = body.imap_port
+    acct.imap_security = body.imap_security
+    acct.imap_username = imap_user
+    acct.imap_password_enc = (None if body.use_same_credentials
+                              else crypto.encrypt(body.imap_password or ""))
+    acct.use_same_credentials = 1 if body.use_same_credentials else 0
+    acct.sync_enabled = 1 if body.sync_enabled else 0
+    acct.sync_interval_seconds = body.sync_interval_seconds
+    acct.backfill_days = body.backfill_days
+    acct.use_idle = 1 if body.use_idle else 0
+    acct.status = "pending"
+    acct.consent_acknowledged = 1
+    acct.is_default = 1
+    if existing is None:
+        db.add(acct)
+
+    try:
+        db.flush()
+        store.seed_system_folders(db, acct)  # idempotent
+        store.ensure_settings(db, acct)      # idempotent
+        db.commit()
+    except IntegrityError:
+        # A concurrent double-submit raced us to the same (user, email).
+        db.rollback()
+        raise HTTPException(409, "This mailbox is already connected")
+
     db.refresh(acct)
 
     # Kick the first mirror off-thread so the request returns immediately.
