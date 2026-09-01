@@ -148,6 +148,24 @@ def _upsert_message(db: Session, account: m.MailAccount, folder: m.MailFolder,
         return None
 
     parsed = parsing.parse_message(raw)
+    mid = parsed["message_id_hdr"] or None
+
+    # Reconcile with a copy of the same message we already have in this folder
+    # (matched by RFC Message-ID) instead of inserting a duplicate. This stops
+    # our own sent mail — which the send worker files locally AND the server also
+    # stores in Sent — from appearing twice: we just adopt the server UID onto
+    # the local row so future syncs recognise it.
+    if mid:
+        dupe = (db.query(m.MailMessage)
+                .filter(m.MailMessage.account_id == account.id,
+                        m.MailMessage.folder_id == folder.id,
+                        m.MailMessage.message_id_hdr == mid,
+                        m.MailMessage.deleted_at.is_(None)).first())
+        if dupe:
+            if dupe.imap_uid is None:
+                dupe.imap_uid = uid
+                db.flush()
+            return None
     is_seen = 0
     is_flagged = 0
     for fl in (flags or []):
