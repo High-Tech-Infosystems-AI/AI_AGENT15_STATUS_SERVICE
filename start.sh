@@ -81,6 +81,8 @@ if [ "${MAIL_ENABLED}" = "1" ]; then
   supervise "mail_sync" python -m app.mail_layer.sync_worker &
   echo "Starting (supervised) Mail send worker..."
   supervise "mail_send" python -m app.mail_layer.send_worker &
+  echo "Starting (supervised) Mail IDLE worker (real-time receive)..."
+  supervise "mail_idle" python -m app.mail_layer.idle_worker &
 fi
 
 if [ "${UI_ENABLED}" = "1" ]; then
