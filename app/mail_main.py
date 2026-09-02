@@ -10,18 +10,21 @@ Run locally:
 In production this is started by `start.sh` alongside `app.main:app` (status),
 `app.chat_main:app` (chat) and `app.ai_chat_main:app` (ai-chat).
 """
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Iterable
 
 import consul
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core import settings
 from app.core.consul_registration import consul_registry, get_local_ip
+from app.dependencies.tenant_auth import _resolve_auth_data
+from app.mail_layer import realtime
 from app.mail_layer.api.mail_router import router as mail_router
 
 logger = logging.getLogger("app_logger")
@@ -37,6 +40,9 @@ MAIL_NO_AUTH_PATHS: Iterable[str] = [
     f"{MAIL_SERVICE_PATH}/model/api/docs",
     f"{MAIL_SERVICE_PATH}/openapi.json",
     f"{MAIL_SERVICE_PATH}/redoc",
+    # WS auth is done in-endpoint via the ?token= query param (gateway can't
+    # forward a Bearer header on the WebSocket upgrade), so bypass gateway auth.
+    f"{MAIL_SERVICE_PATH}/ws",
 ]
 
 
@@ -101,6 +107,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Mail Consul registration failed during startup: %s",
                        exc, exc_info=True)
+    try:
+        await realtime.ws_manager.start_redis_subscriber()
+    except Exception as exc:
+        logger.warning("Mail realtime subscriber failed to start: %s", exc, exc_info=True)
     yield
     _deregister_mail_from_consul(service_id)
 
@@ -130,3 +140,28 @@ def health():
     return JSONResponse(status_code=200,
                         content={"status": "ok", "service": "mail",
                                  "port": MAIL_SERVICE_PORT})
+
+
+@app.websocket(f"{MAIL_SERVICE_PATH}/ws")
+async def mail_ws(websocket: WebSocket, token: str = Query(...)):
+    """Real-time mail channel. Client connects with ?token=<jwt>; on new mail
+    the IDLE worker publishes a ``mail:new`` event that we push here."""
+    try:
+        data = await asyncio.to_thread(_resolve_auth_data, token)
+        user_id = data.get("user_id") if isinstance(data, dict) else None
+    except Exception:
+        user_id = None
+    if not user_id:
+        await websocket.close(code=1008)  # policy violation / unauthenticated
+        return
+    await realtime.ws_manager.connect(websocket, int(user_id))
+    try:
+        # We don't expect client messages; block on receive to detect disconnect.
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        realtime.ws_manager.disconnect(websocket, int(user_id))
