@@ -344,6 +344,7 @@ consul_registry = ConsulServiceRegistry()
 # when the entry is missing (so there is no log spam) — a Consul blip then
 # self-heals within one interval instead of needing a manual pod restart.
 # Interval: CONSUL_HEARTBEAT_INTERVAL env / settings, default 30s (0 disables).
+import functools as _hb_functools
 import threading as _hb_threading
 
 
@@ -357,6 +358,23 @@ def _hb_interval() -> int:
         return 30
 
 
+# python-consul 1.1.0 passes no timeout to requests, so a request sent into a
+# connection that died mid-stream waits forever. If that request is a heartbeat
+# poll, the heartbeat freezes: Consul reaps the service after its deregister
+# window and nothing re-registers it. Bound every call this client makes; a
+# timed-out poll falls into _present()'s "assume present" branch and the next
+# cycle opens a fresh connection.
+_HB_HTTP_TIMEOUT = (3, 10)  # (connect, read) seconds
+
+
+def _hb_bind_timeout(client) -> None:
+    session = getattr(getattr(client, "http", None), "session", None)
+    if session is None or getattr(session, "_hb_timeout_bound", False):
+        return
+    session.request = _hb_functools.partial(session.request, timeout=_HB_HTTP_TIMEOUT)
+    session._hb_timeout_bound = True
+
+
 def _install_consul_heartbeat(registry) -> None:
     if getattr(registry, "_hb_installed", False):
         return
@@ -364,6 +382,7 @@ def _install_consul_heartbeat(registry) -> None:
     registry._hb_last_args = ((), {})
     registry._hb_started = False
     registry._hb_stop = _hb_threading.Event()
+    _hb_bind_timeout(getattr(registry, "consul_client", None))
 
     _orig_register = registry.register_service
 
@@ -380,6 +399,7 @@ def _install_consul_heartbeat(registry) -> None:
     def _loop() -> None:
         while not registry._hb_stop.wait(_hb_interval()):
             try:
+                _hb_bind_timeout(getattr(registry, "consul_client", None))
                 if not _present():
                     logger.warning(
                         "Consul no longer lists %s - re-registering (self-heal)",
