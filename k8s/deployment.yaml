@@ -6,6 +6,14 @@ metadata:
     app: status-service
 spec:
   replicas: 1
+  # __PLACEMENT_BEGIN__ staging only: worker02 runs at its pod cap,
+  # so there is no slot for a surge pod. Replace in place instead.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  # __PLACEMENT_END__
   selector:
     matchLabels:
       app: status-service
@@ -14,6 +22,11 @@ spec:
       labels:
         app: status-service
     spec:
+      # __PLACEMENT_BEGIN__ rendered by the Jenkinsfile: staging -> worker02.
+      # On main the whole block is stripped, leaving prod placement free.
+      nodeSelector:
+        kubernetes.io/hostname: __NODE_NAME__
+      # __PLACEMENT_END__
       imagePullSecrets:
         - name: harbor-creds
       containers:
