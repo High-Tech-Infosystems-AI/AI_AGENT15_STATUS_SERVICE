@@ -78,16 +78,19 @@ spec:
       steps {
         script {
           def namespace   = 'hrmis-prod'
+          def nodeName    = ''
           def configMap   = 'hrmis-prod-config'
           def logsPvc     = 'hrmis-logs-pvc-prod'
 
           if (env.BRANCH_NAME == 'staging') {
             namespace = 'hrmis-stage'
+            nodeName = 'worker02'
             configMap = 'hrmis-stage-config'
             logsPvc = 'hrmis-logs-pvc'
           }
 
           env.K8S_NAMESPACE   = namespace
+          env.NODE_NAME       = nodeName
           env.CONFIG_MAP_NAME = configMap
           env.LOGS_PVC        = logsPvc
           env.IMAGE_TAG       = "${env.BUILD_NUMBER}"
@@ -103,6 +106,11 @@ spec:
               cp deployment.yaml deployment.rendered.yaml || true
 
               sed -i "s|__DOCKER_IMAGE__|${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}|g" deployment.rendered.yaml
+              if [ -n "${NODE_NAME}" ]; then
+                sed -i "s|__NODE_NAME__|${NODE_NAME}|g" deployment.rendered.yaml
+              else
+                sed -i "/__PLACEMENT_BEGIN__/,/__PLACEMENT_END__/d" deployment.rendered.yaml
+              fi
               sed -i "s|__CONFIG_MAP_NAME__|${CONFIG_MAP_NAME}|g" deployment.rendered.yaml || true
               sed -i "s|__LOGS_PVC__|${LOGS_PVC}|g" deployment.rendered.yaml || true
             """
@@ -137,9 +145,9 @@ spec:
             kubectl get namespace ${K8S_NAMESPACE} || kubectl create namespace ${K8S_NAMESPACE}
 
             kubectl apply -f k8s/deployment.rendered.yaml -n ${K8S_NAMESPACE}
-            # Rollout timeout bumped to 7 min to absorb the extra
+            # Rollout timeout bumped to 10 min to absorb the extra
             # AI Chat process + LangChain/Gemini import warm-up.
-            kubectl rollout status deployment/status-service -n ${K8S_NAMESPACE} --timeout=420s
+            kubectl rollout status deployment/status-service -n ${K8S_NAMESPACE} --timeout=600s
 
             echo "Status API   -> ClusterIP svc/status-service:8515"
             echo "Chat API     -> ClusterIP svc/chat-service:8517"
