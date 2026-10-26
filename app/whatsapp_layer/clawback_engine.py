@@ -308,12 +308,15 @@ class PlannedMessage:
 
 
 def plan_recruiter_messages(entries: List[Dict[str, Any]],
-                            threshold: Optional[int]) -> List[PlannedMessage]:
-    """Group a run's due entries per recruiter (plan §6.3 step 3).
+                            threshold: Optional[int],
+                            combine: bool = True) -> List[PlannedMessage]:
+    """Group a run's due entries per recruiter (plan §6.3 step 3, contract §6.1).
 
     final_validation entries are always individual. For reminders: up to
-    `threshold` per recruiter → one message each; more → one batch_reminder.
-    threshold None/≤0 disables batching."""
+    `threshold` per recruiter → one message each; more → one batch_reminder
+    (default threshold 1: 2+ due → one combined message).
+    threshold None/≤0, or `combine` False (system:recruiter_summary off),
+    disables batching."""
     out: List[PlannedMessage] = []
     by_rec: Dict[Optional[int], List[Dict[str, Any]]] = defaultdict(list)
     for e in entries:
@@ -322,7 +325,7 @@ def plan_recruiter_messages(entries: List[Dict[str, Any]],
         else:
             by_rec[e.get("recruiter_user_id")].append(e)
     for rec, es in by_rec.items():
-        if threshold and threshold > 0 and len(es) > threshold:
+        if combine and threshold and threshold > 0 and len(es) > threshold:
             out.append(PlannedMessage("batch_reminder", rec, es))
         else:
             out.extend(PlannedMessage("reminder", rec, [e]) for e in es)
@@ -386,6 +389,31 @@ def reminder_params(item: Dict[str, Any], rule: RuleSpec, day: int,
     }
 
 
+def candidate_list_params(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """`candidate_count` / `candidate_list` for a batch_reminder (contract
+    §6.1), plus `candidates`: the full list (the message may show "+k more")."""
+    from app.whatsapp_layer import variables as V
+    lines, full = [], []
+    for n, e in enumerate(entries, start=1):
+        item, anchor = e["item"], e.get("anchor")
+        cp = cooling_days(item)
+        oa = parse_date(item.get("offer_accepted_at"))
+        line = V.candidate_list_entry(
+            n, candidate_name=item.get("candidate_name"), job_title=item.get("job_title"),
+            company_name=item.get("company_name"), pre_joining=anchor == "offer_accepted",
+            day_number=e.get("day"), cooling_period_days=str(cp) if cp > 0 else "-",
+            offer_accepted_date=oa)
+        lines.append(line)
+        chk = e.get("check")
+        full.append({"candidate_job_id": item.get("candidate_job_id"),
+                     "health_check_id": chk.id if chk is not None else None,
+                     "candidate_name": item.get("candidate_name"),
+                     "job_title": item.get("job_title"), "company_name": item.get("company_name"),
+                     "anchor": anchor, "day_number": e.get("day"), "entry": line})
+    value, _shown = V.format_candidate_list(lines)
+    return {"candidate_count": str(len(entries)), "candidate_list": value, "candidates": full}
+
+
 # ===========================================================================
 # DB glue
 # ===========================================================================
@@ -414,7 +442,7 @@ def get_settings(db: Session, organization_id: int, create: bool = True):
     from app.core import settings as app_settings
     st = S(organization_id=organization_id, enabled=0, timezone=DEFAULT_TIMEZONE,
            quiet_hours_start="21:00", quiet_hours_end="08:00",
-           working_days=list(DEFAULT_WORKING_DAYS), recruiter_batch_threshold=3,
+           working_days=list(DEFAULT_WORKING_DAYS), recruiter_batch_threshold=1,
            missed_check_cutoff_time="23:00", fallback_to_created_by=1,
            digest_skip_if_empty=1,
            app_base_url=(getattr(app_settings, "WEB_PUSH_FRONTEND_BASE_URL", "") or None))
@@ -544,8 +572,10 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
     fresh = [e for e in entries if keys[id(e)] not in existing
              and not (e["kind"] == "reminder" and batch_keys[e["recruiter_user_id"]] in existing)]
 
+    from app.whatsapp_layer import events as EV
+    combine = EV.system_enabled(st, EV.RECRUITER_SUMMARY)
     to_dispatch: List[int] = []
-    for msg in plan_recruiter_messages(fresh, st.recruiter_batch_threshold):
+    for msg in plan_recruiter_messages(fresh, st.recruiter_batch_threshold, combine):
         rid = msg.recruiter_user_id
         if not rid:
             logger.warning("Clawback reminder for candidate_job %s has no recruiter; not sent",
@@ -559,6 +589,7 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
                                           H.due_date < today).count())
             params = {"recruiter_name": user.get("name") or "-",
                       "due_count": str(len(msg.entries)), "overdue_count": str(overdue),
+                      **candidate_list_params(msg.entries),
                       "app_link": V.app_link(base, "recruiter_batch")}
             fields = _log_fields(organization_id, "batch_reminder",
                                  batch_keys[rid], None, None, None, rid, recipients,

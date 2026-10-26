@@ -125,7 +125,7 @@ def apply_events(db: Session, account: A, events: List[WebhookEvent]) -> List[in
                     db, account.organization_id,
                     title="WhatsApp template rejected",
                     message=f"Template '{tpl.name}' was rejected: {tpl.rejection_reason or 'no reason given'}.",
-                    dedupe_key=f"template_rejected:{tpl.id}")
+                    dedupe_key=f"template_rejected:{tpl.id}", event="alert_template_rejected")
     db.commit()
     return changed
 

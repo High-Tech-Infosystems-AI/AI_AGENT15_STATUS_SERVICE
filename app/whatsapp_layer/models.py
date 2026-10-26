@@ -105,12 +105,15 @@ class ClawbackNotificationSettings(Base):
     quiet_hours_start = Column(String(5), nullable=True, server_default="21:00")
     quiet_hours_end = Column(String(5), nullable=True, server_default="08:00")
     working_days = Column(JSON, nullable=True)
-    recruiter_batch_threshold = Column(Integer, nullable=False, server_default="3")
+    recruiter_batch_threshold = Column(Integer, nullable=False, server_default="1")
     missed_check_cutoff_time = Column(String(5), nullable=False, server_default="23:00")
     fallback_to_created_by = Column(Integer, nullable=False, server_default="1")
     digest_skip_if_empty = Column(Integer, nullable=False, server_default="1")
     app_base_url = Column(String(512), nullable=True)
     defaults_seeded_at = Column(DateTime, nullable=True)
+    # system:* event on/off (contract §6.2), e.g. {"recruiter_summary": false}.
+    # Missing keys (or NULL) mean enabled.
+    event_toggles = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     created_by = Column(Integer, nullable=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

@@ -127,6 +127,11 @@ class Toggle(_Body):
     is_active: bool
 
 
+class EventToggle(_Body):
+    """PATCH /events/{key} (contract §6.2)."""
+    enabled: bool
+
+
 # --- Logs / send now / health checks (§2.8 / §2.9) --------------------------
 class SendNow(_Body):
     candidate_job_id: int

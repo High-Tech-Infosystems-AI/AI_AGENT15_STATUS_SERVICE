@@ -1,6 +1,10 @@
 """In-app alerts to an org's admins (provider auth_error, high failure rate,
 template rejected). Reuses the notification store + Redis fan-out exactly
-like the scheduler does, deduplicated for 24 h per (org, key) in Redis."""
+like the scheduler does, deduplicated for 24 h per (org, key) in Redis.
+
+Each alert is an Event (contract §6.2: system:alert_failure_rate,
+system:alert_template_rejected, system:alert_account_error); a disabled
+alert is not raised."""
 from __future__ import annotations
 
 import logging
@@ -38,11 +42,20 @@ def _first_time(dedupe_key: Optional[str], organization_id: int) -> bool:
 
 def notify_org_admins(db: Session, organization_id: int, *, title: str,
                       message: str, dedupe_key: Optional[str] = None,
-                      metadata: Optional[dict] = None) -> Optional[int]:
+                      metadata: Optional[dict] = None,
+                      event: Optional[str] = None) -> Optional[int]:
     """Create a push notification for the org's admins. Returns its id, or
-    None when deduplicated / no admins / failed (never raises)."""
+    None when the `event` toggle is off / deduplicated / no admins / failed
+    (never raises). `event` is the system event name, e.g.
+    "alert_failure_rate"."""
     from app.notification_layer import redis_manager, store
+    from app.whatsapp_layer import events as EV
 
+    # Checked before dedupe so turning the alert back on isn't blocked for 24 h.
+    if event and not EV.is_system_enabled(db, organization_id, event):
+        logger.info("WhatsApp alert '%s' for org %s not raised: event %s is off",
+                    title, organization_id, event)
+        return None
     if not _first_time(dedupe_key, organization_id):
         return None
     try:
