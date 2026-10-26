@@ -1,0 +1,162 @@
+"""Default seeds per org (contract §4): applied the first time an org enables
+clawback notifications with no rules, or by reset-defaults.
+
+Templates are created as drafts (en_US, UTILITY); the engine skips with
+`template_not_approved` until each is approved.
+
+Deviation: the contract's template bodies end with `{{app_link}}`, but the
+same contract (and Meta) forbid a body ending with a variable, so the seeds
+end with "{{app_link}}." — wording otherwise unchanged.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional
+
+from sqlalchemy.orm import Session
+
+from app.whatsapp_layer import templates_service as ts
+from app.whatsapp_layer import variables as V
+
+logger = logging.getLogger("app_logger")
+
+DEFAULT_TEMPLATES: List[Dict] = [
+    {
+        "name": "clawback_health_check_due", "purpose": "recruiter_reminder",
+        "body_text": ("Hi {{recruiter_name}}, a health check is due today for {{candidate_name}} "
+                      "({{job_title}}, {{company_name}}). They are on day {{day_number}} of "
+                      "{{cooling_period_days}}. Please speak to them and record the outcome "
+                      "here: {{app_link}}."),
+    },
+    {
+        "name": "clawback_health_checks_batch", "purpose": "recruiter_batch",
+        "body_text": ("Hi {{recruiter_name}}, you have {{due_count}} clawback health checks due "
+                      "today and {{overdue_count}} still pending from earlier. Please complete "
+                      "them and record the outcomes here: {{app_link}}."),
+    },
+    {
+        "name": "clawback_final_validation_due", "purpose": "final_validation",
+        "body_text": ("Hi {{recruiter_name}}, the cooling period for {{candidate_name}} "
+                      "({{job_title}}, {{company_name}}) ended on {{clawback_completion_date}}. "
+                      "Please complete the final status and eligibility validation: {{app_link}}."),
+    },
+    {
+        "name": "clawback_team_digest", "purpose": "team_digest",
+        "body_text": ("Hi {{recipient_name}}, clawback summary for {{scope_label}} "
+                      "({{period_label}}): {{active_count}} active, {{due_count}} checks due, "
+                      "{{done_count}} done, {{missed_count}} missed, {{at_risk_count}} at risk, "
+                      "{{ending_soon_count}} cooling periods ending within 7 days. "
+                      "Details: {{app_link}}."),
+    },
+]
+
+_FINAL = "final_validation"
+
+DEFAULT_RULES: List[Dict] = [
+    {"name": "Offer accepted, pre-joining", "anchor": "offer_accepted", "start_day": 1,
+     "end_day": None, "frequency_type": "every_n_days", "frequency_value": {"n": 2}},
+    {"name": "DOJ to Day 7", "anchor": "doj", "start_day": 1, "end_day": 7,
+     "frequency_type": "specific_days", "frequency_value": {"days": [1, 3, 7]}},
+    {"name": "Days 8–30", "anchor": "doj", "start_day": 8, "end_day": 30,
+     "frequency_type": "weekly", "frequency_value": {}},
+    {"name": "Days 31–60", "anchor": "doj", "start_day": 31, "end_day": 60,
+     "frequency_type": "weekly", "frequency_value": {}},
+    {"name": "Days 61–75", "anchor": "doj", "start_day": 61, "end_day": 75,
+     "frequency_type": "weekdays", "frequency_value": {"weekdays": ["MON", "THU"]}},
+    {"name": "Days 76–90", "anchor": "doj", "start_day": 76, "end_day": 90,
+     "frequency_type": "every_n_days", "frequency_value": {"n": 2}},
+    {"name": "Cooling completed", "anchor": "cooling_end", "start_day": 0, "end_day": 0,
+     "frequency_type": "once", "frequency_value": {}, "template_purpose": _FINAL},
+]
+
+DEFAULT_DIGEST_RULES: List[Dict] = [
+    {"name": "Team leads – daily", "audience_type": "team_managers", "audience_value": {},
+     "scope": "full_subtree", "frequency_type": "daily", "frequency_value": {},
+     "send_time": "09:30", "priority": 10},
+    {"name": "Senior managers – weekly", "audience_type": "has_subordinate_managers",
+     "audience_value": {}, "scope": "full_subtree", "frequency_type": "weekly",
+     "frequency_value": {"weekday": "MON"}, "send_time": "09:30", "priority": 20},
+]
+
+
+def _sample_values(body: str) -> Dict[str, str]:
+    return {k: V.sample_for(k) or k for k in ts.extract_keys(body)}
+
+
+def ensure_default_templates(db: Session, organization_id: int,
+                             user_id: Optional[int]) -> Dict[str, int]:
+    """Create any missing seed template (by name). Returns purpose → template id
+    (preferring an approved template of that purpose if the org has one)."""
+    from app.whatsapp_layer import accounts as acct_svc
+    from app.whatsapp_layer.models import WhatsAppTemplate as T
+
+    account = acct_svc.get_any_account(db, organization_id)
+    by_purpose: Dict[str, int] = {}
+    for spec in DEFAULT_TEMPLATES:
+        purpose = spec["purpose"]
+        approved = (db.query(T).filter(T.organization_id == organization_id, T.purpose == purpose,
+                                       T.approval_status == "approved", T.deleted_at.is_(None),
+                                       T.is_active == 1)
+                    .order_by(T.version.desc(), T.id.desc()).first())
+        existing = (db.query(T).filter(T.organization_id == organization_id,
+                                       T.name == spec["name"], T.language == "en_US",
+                                       T.deleted_at.is_(None)).first())
+        if existing is None:
+            existing = T(organization_id=organization_id,
+                         account_id=account.id if account else None,
+                         language="en_US", category="UTILITY", approval_status="draft",
+                         is_active=1, version=1, base_name=spec["name"],
+                         created_by=user_id, updated_by=user_id)
+            ts.apply_fields(existing, {
+                "name": spec["name"], "purpose": purpose, "header_format": "NONE",
+                "header_text": None, "body_text": spec["body_text"], "footer_text": None,
+                "buttons": [], "sample_values": _sample_values(spec["body_text"]),
+            })
+            db.add(existing)
+            db.flush()
+        by_purpose[purpose] = (approved or existing).id
+    return by_purpose
+
+
+def seed_defaults(db: Session, organization_id: int, user_id: Optional[int],
+                  replace: bool = False):
+    """Seed §4 rules + digest rules (+ templates). `replace` soft-deletes the
+    org's current rules first (reset-defaults). Caller commits."""
+    from app.whatsapp_layer.models import (
+        ClawbackDigestRule as D, ClawbackNotificationRule as R,
+    )
+    now = datetime.utcnow()
+    tpl = ensure_default_templates(db, organization_id, user_id)
+    if replace:
+        for model in (R, D):
+            (db.query(model).filter(model.organization_id == organization_id,
+                                    model.deleted_at.is_(None))
+             .update({model.deleted_at: now, model.is_active: 0, model.updated_by: user_id},
+                     synchronize_session=False))
+    rules, digests = [], []
+    for spec in DEFAULT_RULES:
+        purpose = spec.get("template_purpose", "recruiter_reminder")
+        r = R(organization_id=organization_id, name=spec["name"], stage_label=spec["name"],
+              anchor=spec["anchor"], start_day=spec["start_day"], end_day=spec["end_day"],
+              frequency_type=spec["frequency_type"], frequency_value=spec["frequency_value"],
+              send_time="10:00", recipient_type="recruiter", template_id=tpl.get(purpose),
+              creates_health_check=1, priority=0, is_active=1,
+              created_by=user_id, updated_by=user_id)
+        db.add(r)
+        rules.append(r)
+    for spec in DEFAULT_DIGEST_RULES:
+        d = D(organization_id=organization_id, name=spec["name"],
+              audience_type=spec["audience_type"], audience_value=spec["audience_value"],
+              scope=spec["scope"], frequency_type=spec["frequency_type"],
+              frequency_value=spec["frequency_value"], send_time=spec["send_time"],
+              template_id=tpl.get("team_digest"), sections=list(
+                  ("active", "due", "done", "missed", "at_risk", "ending_soon", "final_pending")),
+              skip_if_empty=1, priority=spec["priority"], is_active=1,
+              created_by=user_id, updated_by=user_id)
+        db.add(d)
+        digests.append(d)
+    db.flush()
+    logger.info("Seeded clawback defaults for org %s (replace=%s): %d rules, %d digest rules",
+                organization_id, replace, len(rules), len(digests))
+    return rules, digests

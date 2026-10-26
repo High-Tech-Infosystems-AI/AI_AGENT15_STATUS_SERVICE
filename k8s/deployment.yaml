@@ -94,6 +94,16 @@ spec:
                 secretKeyRef:
                   name: mail-enc
                   key: MAIL_ENCRYPTION_KEY
+            # Fernet key that encrypts stored WhatsApp provider tokens. Create with:
+            #   kubectl -n <ns> create secret generic whatsapp-cred \
+            #     --from-literal=WHATSAPP_CRED_KEY=$(python -c \
+            #     "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())")
+            - name: WHATSAPP_CRED_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: whatsapp-cred
+                  key: WHATSAPP_CRED_KEY
+                  optional: true
             # Celery worker + beat run inside this pod so AI scheduled
             # queries and anomaly subscriptions fire on the beat tick.
             - name: CELERY_ENABLED

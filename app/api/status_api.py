@@ -24,6 +24,8 @@ NO_AUTH_PATHS = [
     # Event trigger — called by other microservices without JWT (signup, login, etc.)
     "/notifications/event",
     "/status/notifications/event",
+    # WhatsApp provider webhooks — token in the path identifies the account.
+    "/status/whatsapp/webhooks/",
     "/test",
     "/test/",
     "/test/users",

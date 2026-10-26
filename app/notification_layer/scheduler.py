@@ -40,6 +40,11 @@ async def run_scheduler():
             # free so /health stays responsive.
             await asyncio.to_thread(_run_tick_locked)
 
+            # Clawback WhatsApp jobs. Each job takes its own Redis lock
+            # (wa:lock:<job>, TTL ≈ its interval, shared with Celery Beat), so
+            # calling this every tick runs each job at most once per interval.
+            await asyncio.to_thread(_run_whatsapp_tick)
+
         except Exception as e:
             logger.error("Scheduler tick error: %s", e, exc_info=True)
 
@@ -53,6 +58,15 @@ def _run_tick_locked():
         _process_tick()
     finally:
         redis_manager.release_scheduler_lock("notif:lock:scheduled")
+
+
+def _run_whatsapp_tick():
+    """Fallback for the app.whatsapp_layer Celery Beat entries (runs in a thread)."""
+    try:
+        from app.whatsapp_layer.tasks import run_fallback_tick
+        run_fallback_tick()
+    except Exception as e:
+        logger.error("WhatsApp scheduler tick error: %s", e, exc_info=True)
 
 
 def _process_tick():

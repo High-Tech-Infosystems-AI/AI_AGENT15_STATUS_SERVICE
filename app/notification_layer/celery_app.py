@@ -63,8 +63,43 @@ celery_app.conf.update(
             "task": "app.ai_chat_layer.scheduler.evaluate_anomaly_subs",
             "schedule": 120.0,
         },
+        # Clawback WhatsApp notifications (app.whatsapp_layer.tasks).
+        # Each task takes a Redis lock (wa:lock:<job>) shared with the
+        # asyncio fallback in scheduler.py, so it runs once per interval.
+        "wa-evaluate-clawback-reminders": {
+            "task": "app.whatsapp_layer.tasks.evaluate_clawback_reminders",
+            "schedule": 900.0,  # every 15 min
+        },
+        "wa-evaluate-clawback-digests": {
+            "task": "app.whatsapp_layer.tasks.evaluate_clawback_digests",
+            "schedule": 900.0,  # every 15 min
+        },
+        "wa-mark-missed-health-checks": {
+            "task": "app.whatsapp_layer.tasks.mark_missed_health_checks",
+            "schedule": crontab(minute=5),  # hourly
+        },
+        "wa-poll-whatsapp-batches": {
+            "task": "app.whatsapp_layer.tasks.poll_whatsapp_batches",
+            "schedule": 300.0,  # every 5 min (also sends due retries)
+        },
+        "wa-sync-whatsapp-templates": {
+            "task": "app.whatsapp_layer.tasks.sync_whatsapp_templates",
+            "schedule": 900.0,  # every 15 min
+        },
+        "wa-refresh-account-health": {
+            "task": "app.whatsapp_layer.tasks.refresh_whatsapp_account_health",
+            "schedule": crontab(minute=10),  # hourly
+        },
+        "wa-cleanup-webhook-events": {
+            "task": "app.whatsapp_layer.tasks.cleanup_whatsapp_webhook_events",
+            "schedule": crontab(minute=30, hour=2),  # daily, 02:30 UTC
+        },
+        "wa-failure-rate-alert": {
+            "task": "app.whatsapp_layer.tasks.whatsapp_failure_rate_alert",
+            "schedule": crontab(minute=15),  # hourly
+        },
     },
 )
 
 # Auto-discover tasks
-celery_app.autodiscover_tasks(["app.notification_layer", "app.ai_chat_layer"])
+celery_app.autodiscover_tasks(["app.notification_layer", "app.ai_chat_layer", "app.whatsapp_layer"])
