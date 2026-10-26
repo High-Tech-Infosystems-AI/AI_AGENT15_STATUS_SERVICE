@@ -31,9 +31,10 @@ DEFAULT_TEMPLATES: List[Dict] = [
     },
     {
         "name": "clawback_health_checks_batch", "purpose": "recruiter_batch",
-        "body_text": ("Hi {{recruiter_name}}, you have {{due_count}} clawback health checks due "
-                      "today and {{overdue_count}} still pending from earlier. Please complete "
-                      "them and record the outcomes here: {{app_link}}."),
+        # Contract §6.1: one combined message per recruiter per day.
+        "body_text": ("Hi {{recruiter_name}}, you have {{candidate_count}} clawback health checks "
+                      "due today: {{candidate_list}}. Also pending from earlier days: "
+                      "{{overdue_count}}. Please record each outcome here: {{app_link}}."),
     },
     {
         "name": "clawback_final_validation_due", "purpose": "final_validation",

@@ -136,21 +136,21 @@ def check_failure_alerts(db, now: Optional[datetime] = None) -> Dict[str, int]:
                     db, org_id, title="WhatsApp messages are failing",
                     message=(f"{d['failed']} of {d['total']} WhatsApp messages failed in the last "
                              f"hour. Check Settings → WhatsApp logs."),
-                    dedupe_key=f"failure_rate:{now:%Y%m%d%H}"):
+                    dedupe_key=f"failure_rate:{now:%Y%m%d%H}", event="alert_failure_rate"):
                 sent += 1
     for acct in db.query(A).filter(A.status == "auth_error").all():
         if alerts.notify_org_admins(
                 db, acct.organization_id, title="WhatsApp account needs attention",
                 message=(f"The WhatsApp provider rejects the access token for "
                          f"'{acct.display_name}'. Update it in Settings → WhatsApp."),
-                dedupe_key=f"auth_error:{acct.id}"):
+                dedupe_key=f"auth_error:{acct.id}", event="alert_account_error"):
             sent += 1
     for tpl in db.query(T).filter(T.approval_status == "rejected", T.deleted_at.is_(None),
                                   T.updated_at >= now - timedelta(days=2)).all():
         if alerts.notify_org_admins(
                 db, tpl.organization_id, title="WhatsApp template rejected",
                 message=f"Template '{tpl.name}' was rejected: {tpl.rejection_reason or 'no reason given'}.",
-                dedupe_key=f"template_rejected:{tpl.id}"):
+                dedupe_key=f"template_rejected:{tpl.id}", event="alert_template_rejected"):
             sent += 1
     return {"alerts": sent}
 

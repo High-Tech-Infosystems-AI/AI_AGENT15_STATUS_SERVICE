@@ -78,6 +78,7 @@ def mark_auth_error(db: Session, account: WhatsAppProviderAccount, message: str)
                          f"'{account.display_name}'. Clawback reminders are paused "
                          f"until the token is updated in Settings → WhatsApp."),
                 dedupe_key=f"auth_error:{account.id}",
+                event="alert_account_error",
             )
         except Exception as exc:
             logger.warning("auth_error alert failed for account %s: %s", account.id, exc)

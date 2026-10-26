@@ -5,7 +5,10 @@ may only be used in a template whose `purpose` is listed for it.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import re
+import unicodedata
+from datetime import date
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 PURPOSES = ["recruiter_reminder", "recruiter_batch", "final_validation",
             "team_digest", "generic"]
@@ -43,6 +46,10 @@ VARIABLES: List[Dict] = [
     _v("due_count", "Checks due", "Batch", "5",
        sorted(set(_BATCH + _DIGEST), key=PURPOSES.index)),
     _v("overdue_count", "Checks overdue", "Batch", "2", _BATCH),
+    _v("candidate_count", "Candidates due today", "Batch", "2", _BATCH),
+    _v("candidate_list", "Candidates due today (list)", "Batch",
+       "1) Ravi K – Sales Executive, Acme (day 14 of 90) · "
+       "2) Neha P – Store Manager, Acme (offer accepted 20 Oct)", _BATCH),
     # Digest
     _v("scope_label", "Scope", "Digest", "Your team (12 recruiters)", _DIGEST),
     _v("period_label", "Period", "Digest", "today", _DIGEST),
@@ -93,3 +100,75 @@ def app_link(base_url: Optional[str], purpose: str, *,
         path = APP_LINK_PATHS.get(purpose, "/clawback/health-checks")
         path = path.format(health_check_id=health_check_id, job_id=job_id)
     return f"{base}{path}"
+
+
+# ---------------------------------------------------------------------------
+# candidate_list (contract §6.1)
+# ---------------------------------------------------------------------------
+CANDIDATE_LIST_MAX_ENTRIES = 8
+CANDIDATE_LIST_MAX_CHARS = 600
+CANDIDATE_LIST_SEPARATOR = " · "
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_WS_RE = re.compile(r"\s+")
+
+
+def sanitize_text(value: Any) -> str:
+    """One clean line: control characters (incl. \\n, \\t) become spaces or go,
+    whitespace collapses to single spaces — so never 4+ consecutive spaces
+    (Meta rejects those in variables). Empty → "-"."""
+    s = "" if value is None else str(value)
+    s = "".join(" " if ch.isspace() else ("" if unicodedata.category(ch) == "Cc" else ch)
+                for ch in s)
+    s = _WS_RE.sub(" ", s).strip()
+    return s or "-"
+
+
+def short_date(value: Optional[date]) -> str:
+    """`D Mon`, e.g. "20 Oct" (locale independent). None → "-"."""
+    if value is None:
+        return "-"
+    return f"{value.day} {_MONTHS[value.month - 1]}"
+
+
+def candidate_list_entry(n: int, *, candidate_name: Any, job_title: Any, company_name: Any,
+                         pre_joining: bool = False, day_number: Any = None,
+                         cooling_period_days: Any = None,
+                         offer_accepted_date: Optional[date] = None) -> str:
+    """doj / cooling: "1) Ravi K – Sales Executive, Acme (day 14 of 90)"
+    pre-joining:  "1) Ravi K – Sales Executive, Acme (offer accepted 20 Oct)."""
+    head = (f"{n}) {sanitize_text(candidate_name)} – {sanitize_text(job_title)}, "
+            f"{sanitize_text(company_name)}")
+    if pre_joining:
+        return f"{head} (offer accepted {short_date(offer_accepted_date)})"
+    return f"{head} (day {sanitize_text(day_number)} of {sanitize_text(cooling_period_days)})"
+
+
+def _join_entries(shown: Sequence[str], more: int) -> str:
+    value = CANDIDATE_LIST_SEPARATOR.join(shown)
+    if more > 0:
+        value = (value + CANDIDATE_LIST_SEPARATOR if value else "") + f"+{more} more"
+    return value
+
+
+def format_candidate_list(entries: Sequence[str],
+                          max_entries: int = CANDIDATE_LIST_MAX_ENTRIES,
+                          max_chars: int = CANDIDATE_LIST_MAX_CHARS) -> Tuple[str, int]:
+    """Join pre-formatted entries with " · ": at most `max_entries`, then
+    " · +k more"; the whole value is capped at `max_chars` by dropping entries
+    from the end (k adjusted). Returns (value, number of entries shown).
+
+    A single entry longer than the cap on its own is cut with "…" so the
+    message still names someone."""
+    entries = [sanitize_text(e) for e in entries]
+    total = len(entries)
+    shown = list(entries[:max_entries])
+    value = _join_entries(shown, total - len(shown))
+    while len(value) > max_chars and len(shown) > 1:
+        shown.pop()
+        value = _join_entries(shown, total - len(shown))
+    if len(value) > max_chars and shown:
+        tail = _join_entries([], total - 1)
+        room = max_chars - len(tail) - (len(CANDIDATE_LIST_SEPARATOR) if tail else 0) - 1
+        shown = [shown[0][:max(0, room)].rstrip() + "…"]
+        value = _join_entries(shown, total - 1)
+    return value, len(shown)
