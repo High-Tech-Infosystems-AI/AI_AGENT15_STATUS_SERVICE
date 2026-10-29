@@ -66,13 +66,17 @@ def create_account(body: AccountCreate,
     if db.query(A.id).filter(A.organization_id == org, A.provider == body.provider).first():
         raise HTTPException(409, "This organisation already has an account for this provider")
 
+    token = (body.access_token or "").strip()
+    # Without a token the account is saved disabled: the webhook URL exists
+    # straight away, nothing is sent, and adding the token later activates it.
     acct = A(organization_id=org, provider=body.provider, display_name=body.display_name.strip(),
              base_url=body.base_url.strip().rstrip("/"), username=body.username,
-             access_token_enc=_encrypt(body.access_token.strip()),
-             token_last4=crypto.last4(body.access_token), waba_id=body.waba_id,
+             access_token_enc=_encrypt(token) if token else None,
+             token_last4=crypto.last4(token) if token else None, waba_id=body.waba_id,
              phone_number_id=body.phone_number_id,
              display_phone_number=body.display_phone_number,
-             webhook_token=acct_svc.new_webhook_token(), status="active", sandbox=0,
+             webhook_token=acct_svc.new_webhook_token(),
+             status="active" if token else "disabled", sandbox=0,
              created_by=ctx.user_id, updated_by=ctx.user_id)
     db.add(acct)
     try:
@@ -109,11 +113,13 @@ def update_account(account_id: int, body: AccountUpdate,
             setattr(acct, field, data[field])
     if data.get("base_url"):
         acct.base_url = data["base_url"].strip().rstrip("/")
-    if data.get("access_token"):
+    if data.get("access_token") and data["access_token"].strip():
+        first_token = acct.access_token_enc is None
         acct.access_token_enc = _encrypt(data["access_token"].strip())
         acct.token_last4 = crypto.last4(data["access_token"])
-        # A new token clears a previous auth error.
-        if acct.status == "auth_error" and data.get("status") is None:
+        # A new token clears a previous auth error; the first token activates an
+        # account that was saved without credentials.
+        if data.get("status") is None and (acct.status == "auth_error" or first_token):
             acct.status = "active"
         acct.last_error = None
     acct.updated_by = ctx.user_id
@@ -131,6 +137,8 @@ def refresh_account_health(account_id: int, ctx: AuthCtx = Depends(get_auth_ctx)
                            db: Session = Depends(get_db)):
     ctx.require(PERM)
     acct = get_scoped(db, A, account_id, ctx, soft_delete=False)
+    if acct.access_token_enc is None:
+        unprocessable([{"field": "access_token", "message": "Add the access token before checking health"}])
     acct_svc.refresh_health(db, acct)
     db.commit()
     db.refresh(acct)

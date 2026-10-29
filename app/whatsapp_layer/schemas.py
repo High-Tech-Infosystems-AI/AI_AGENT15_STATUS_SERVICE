@@ -24,7 +24,9 @@ class AccountCreate(_Body):
     display_name: str = Field(..., min_length=1, max_length=255)
     base_url: str = Field(..., min_length=1, max_length=512)
     username: Optional[str] = Field(None, max_length=255)
-    access_token: str = Field(..., min_length=1)
+    # Optional so the webhook URL can be generated (and given to the provider)
+    # before the provider has issued an access token.
+    access_token: Optional[str] = None
     waba_id: Optional[str] = Field(None, max_length=64)
     phone_number_id: Optional[str] = Field(None, max_length=64)
     display_phone_number: Optional[str] = Field(None, max_length=32)
