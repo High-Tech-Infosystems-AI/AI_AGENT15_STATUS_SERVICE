@@ -52,3 +52,11 @@ def test_check_alerts():
 
 def test_day_number_stops_at_the_end_of_the_period():
     assert _case(_row(ago=200, cooling=30))["day_number"] == 30
+
+
+def test_finished_at_is_when_the_case_finished():
+    done = _case(_row(ago=90, closed=datetime(2026, 10, 1, 5)))
+    assert done["finished_at"] == "2026-10-01"
+    dropped = {**_row(ended="dropped"), "ended_at": datetime(2026, 10, 20, 9)}
+    assert _case(dropped)["finished_at"] == "2026-10-20"
+    assert _case(_row())["finished_at"] is None

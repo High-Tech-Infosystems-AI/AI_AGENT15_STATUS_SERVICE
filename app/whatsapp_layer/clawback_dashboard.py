@@ -23,7 +23,10 @@ _CASES_SQL = text("""
            j.title, j.company_id, co.company_name, j.cooling_period, s.joined_at,
            s.cooling_period_closed,
            (SELECT d.type FROM candidate_job_status d WHERE d.candidate_job_id = cj.id
-             AND d.type IN ('rejected', 'dropped') ORDER BY d.id DESC LIMIT 1) AS ended_type
+             AND d.type IN ('rejected', 'dropped') ORDER BY d.id DESC LIMIT 1) AS ended_type,
+           (SELECT COALESCE(d.rejected_at, d.created_at) FROM candidate_job_status d
+             WHERE d.candidate_job_id = cj.id AND d.type IN ('rejected', 'dropped')
+             ORDER BY d.id DESC LIMIT 1) AS ended_at
       FROM candidate_job_status s
       JOIN candidate_jobs cj ON cj.id = s.candidate_job_id
       JOIN job_openings j ON j.id = cj.job_id
@@ -44,6 +47,11 @@ def fetch_case_rows(db: Session, org: int) -> List[Dict[str, Any]]:
             seen.add(r["id"])
             out.append(dict(r))
     return out
+
+
+def _iso_date(value: Any) -> Optional[str]:
+    parsed = E.parse_date(value)
+    return parsed.isoformat() if parsed else None
 
 
 def _case_status(row: Dict[str, Any], days_pending: Optional[int]) -> str:
@@ -77,6 +85,9 @@ def build_case(row: Dict[str, Any], check: Optional[Dict[str, Any]], today: date
         "recruiter_user_id": int(rid) if rid else None,
         "recruiter_name": names.get(int(rid), "Unassigned") if rid else "Unassigned",
         "case_status": status,
+        # When the case finished, for the dashboard's date filter.
+        "finished_at": _iso_date(row.get("ended_at") if status == "dropped"
+                                 else row.get("cooling_period_closed") if status == "completed" else None),
         # Stops at the end of the period, however long a case stays open after it.
         "day_number": (min((today - joined).days + 1, progress["cooling_period_days"] or 10 ** 6)
                        if joined else None),
