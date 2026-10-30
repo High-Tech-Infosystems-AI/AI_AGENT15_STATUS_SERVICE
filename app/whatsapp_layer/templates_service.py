@@ -199,6 +199,13 @@ def send_variables(variable_map: Optional[Dict[str, List[str]]],
     return header, body
 
 
+def body_param_names(tpl) -> List[str]:
+    """Variable names to send with each body value; empty for numbered templates."""
+    if (tpl.parameter_format or "").upper() != "NAMED":
+        return []
+    return list((tpl.variable_map or {}).get("body") or [])
+
+
 def _fill(text: Optional[str], values: Dict[str, Any]) -> Optional[str]:
     if text is None:
         return None
@@ -388,6 +395,9 @@ def submit(db: Session, tpl, account, user_id: Optional[int]) -> None:
 def apply_provider_status(tpl, ptpl) -> bool:
     """Copy a provider status onto a template; returns True when changed."""
     changed = False
+    if ptpl.parameter_format and ptpl.parameter_format != tpl.parameter_format:
+        tpl.parameter_format = ptpl.parameter_format
+        changed = True
     if ptpl.status and ptpl.status != tpl.approval_status:
         tpl.approval_status = ptpl.status
         changed = True

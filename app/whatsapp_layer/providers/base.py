@@ -43,6 +43,9 @@ class ProviderCredentials:
 class TemplateRef:
     name: str
     language: str
+    # Set for templates approved with named variables (parameterFormat NAMED):
+    # the variable name of each body value, in the same order.
+    body_param_names: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -77,6 +80,7 @@ class ProviderTemplate:
     body_text: Optional[str] = None
     footer_text: Optional[str] = None
     sample_values: Dict[str, str] = field(default_factory=dict)
+    parameter_format: Optional[str] = None   # NAMED | POSITIONAL
     raw: Any = None
 
 

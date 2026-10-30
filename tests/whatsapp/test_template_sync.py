@@ -103,3 +103,21 @@ def test_inactive_account_not_called(wa_db, account, monkeypatch):
     wa_db.commit()
     _use(monkeypatch, FakeProvider(error=ProviderError("should not be called")))
     assert ts.sync_templates(wa_db, ORG)["failed"] == 0
+
+
+def test_sync_records_named_format_for_sending(wa_db, account, monkeypatch):
+    _use(monkeypatch, FakeProvider([{**DAILY, "parameterFormat": "NAMED"}]))
+    ts.sync_templates(wa_db, ORG)
+    tpl = wa_db.query(T).one()
+    assert ts.body_param_names(tpl) == ["recruiter_name", "part_label", "candidate_list", "overdue_count"]
+    tpl.parameter_format = None
+    assert ts.body_param_names(tpl) == []
+
+
+def test_sync_backfills_format_on_existing_template(wa_db, account, monkeypatch):
+    _use(monkeypatch, FakeProvider([DAILY]))
+    ts.sync_templates(wa_db, ORG)
+    assert wa_db.query(T).one().parameter_format is None
+    _use(monkeypatch, FakeProvider([{**DAILY, "parameterFormat": "NAMED"}]))
+    ts.sync_templates(wa_db, ORG)
+    assert wa_db.query(T).one().parameter_format == "NAMED"

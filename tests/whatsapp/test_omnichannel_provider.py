@@ -241,3 +241,17 @@ def test_list_templates_reads_every_page():
     assert [t.name for t in provider.list_templates(CREDS)] == ["a", "b"]
     assert [c["params"]["page"] for c in http.calls] == [0, 1]
     assert http.calls[0]["url"].endswith("/whatsapp/template/list")
+
+
+def test_named_template_sends_parameter_name_and_text():
+    fields = dict((k, v[1]) for k, v in OmnichannelProvider.build_send_fields(
+        "91999", TemplateRef("t", "en_US", ["recruiter_name", "part_label"]),
+        [], ["Supriyo Chowdhury", "3 candidates – part 1"], "cbk_1"))
+    assert json.loads(fields["bodyTemplateVariables[0]"]) == {
+        "parameter_name": "recruiter_name", "text": "Supriyo Chowdhury"}
+    assert fields["bodyTemplateVariables[1]"] == \
+        '{"parameter_name": "part_label", "text": "3 candidates – part 1"}'
+
+
+def test_parse_template_reads_parameter_format():
+    assert OmnichannelProvider.parse_template({"parameterFormat": "NAMED"}).parameter_format == "NAMED"
