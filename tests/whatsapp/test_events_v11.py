@@ -207,7 +207,7 @@ def org(wa_db, monkeypatch):
     db.flush()
     seeds.seed_defaults(db, ORG, user_id=1)
     for tpl in db.query(T).all():
-        tpl.approval_status = "draft" if tpl.name.endswith("_prompt") else "approved"
+        tpl.approval_status = "draft" if tpl.name.endswith(("_prompt", "_names")) else "approved"
     db.commit()
     return db
 
@@ -281,7 +281,7 @@ def test_events_listing(org):
     assert [e["key"] for e in final] == [f"rule:{rules['Cooling completed']}"]
     assert final[0]["schedule_summary"] == "Once · 10:00"
     digests = [e for e in data if e["group"] == "team_summaries"]
-    assert {e["schedule_summary"] for e in digests} == {"Daily · 09:30"}
+    assert {e["schedule_summary"] for e in digests} == {"Daily · 09:30", "Daily · 18:30"}
     assert all(e["key"].startswith("digest:") for e in digests)
     system = [e for e in data if e["type"] == "system"]
     assert [e["key"] for e in system] == [

@@ -65,6 +65,19 @@ VARIABLES: List[Dict] = [
     _v("at_risk_count", "At risk", "Digest", "2", _DIGEST),
     _v("ending_soon_count", "Ending within 7 days", "Digest", "5", _DIGEST),
     _v("final_pending_count", "Final validations pending", "Digest", "2", _DIGEST),
+    # Names instead of a full list (contract §6.9)
+    _v("candidate_names", "Candidate names", "Lists", "Ravi Kumar, Priya Shah and Imran Ali", _BATCH),
+    _v("recruiter_summary", "Recruiters and their candidates", "Lists",
+       "Asha Rao (3), Vikram Das (2)", _DIGEST),
+    # End of day report
+    _v("report_date", "Report date", "End of day", "30 Oct", ["generic"]),
+    _v("total_count", "Check-ins due", "End of day", "5", ["generic"]),
+    _v("recruiter_progress", "What each recruiter did", "End of day",
+       "Asha Rao 2 of 3 and Vikram Das 2 of 2", ["generic"]),
+    _v("untracked_count", "Candidates not tracked", "End of day", "1", ["generic"]),
+    _v("untracked_list", "Who was not tracked", "End of day", "Imran Ali", ["generic"]),
+    _v("flagged_count", "Candidates flagged", "End of day", "1", ["generic"]),
+    _v("flagged_list", "Who was flagged", "End of day", "Priya Shah (Dropped)", ["generic"]),
     # Manager notes (Today's check-ins page)
     _v("sender_name", "Sent by", "Notes", "Meera Iyer", ["generic"]),
     _v("note", "Message", "Notes", "Please finish today's calls before 5 pm", ["generic"]),
@@ -123,6 +136,23 @@ CANDIDATE_LIST_SEPARATOR = " · "
 GROUP_SEPARATOR = " | "
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 _WS_RE = re.compile(r"\s+")
+
+
+def names_list(names: List[str], max_chars: int = 500) -> str:
+    """"A, B and C" on one line; what doesn't fit becomes "A, B and 5 more"."""
+    names = [sanitize_text(n) for n in names]
+    if len(names) <= 1:
+        return names[0] if names else "-"
+    full = ", ".join(names[:-1]) + " and " + names[-1]
+    if len(full) <= max_chars:
+        return full
+    shown: List[str] = []
+    for i, n in enumerate(names):
+        rest = len(names) - i
+        if len(", ".join(shown + [n])) + len(f" and {rest} more") > max_chars:
+            break
+        shown.append(n)
+    return f"{', '.join(shown)} and {len(names) - len(shown)} more" if shown else f"{len(names)} candidates"
 
 
 def sanitize_text(value: Any) -> str:

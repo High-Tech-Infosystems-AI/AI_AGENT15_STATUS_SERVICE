@@ -427,6 +427,8 @@ def clean_provider_body(text: Optional[str]) -> str:
 def purpose_for_import(name: str, body_text: str) -> str:
     """Which messages an imported template can carry, from its variables."""
     keys = set(extract_keys(body_text))
+    if "untracked_list" in keys:      # the end of day report is looked up by name
+        return "generic"
     if "candidate_list" in keys:
         return "team_digest" if "recipient_name" in keys else "recruiter_batch"
     if "missed_count" in keys or "recipient_name" in keys:

@@ -44,7 +44,8 @@ ADMIN_ALERTS: Dict[str, Dict[str, str]] = {
         "description": "Alert when the WhatsApp provider rejects the login or access token",
     },
 }
-SYSTEM_EVENTS = [RECRUITER_SUMMARY] + list(ADMIN_ALERTS)
+EOD_REPORT = "eod_report"
+SYSTEM_EVENTS = [RECRUITER_SUMMARY, EOD_REPORT] + list(ADMIN_ALERTS)
 
 _DAY_NAMES = {"MON": "Mon", "TUE": "Tue", "WED": "Wed", "THU": "Thu", "FRI": "Fri",
               "SAT": "Sat", "SUN": "Sun"}
@@ -338,7 +339,25 @@ def _approved_batch_template(db: Session, organization_id: int):
             .order_by(T.version.desc(), T.id.desc()).first())
 
 
+def eod_event(db: Session, organization_id: int, settings) -> Dict[str, Any]:
+    from app.whatsapp_layer import eod_report
+    from app.whatsapp_layer.models import WhatsAppTemplate as T
+    tpl = (db.query(T).filter(T.organization_id == organization_id,
+                              T.name == eod_report.TEMPLATE_NAME, T.deleted_at.is_(None)).first())
+    return {
+        "key": f"system:{EOD_REPORT}", "type": "system", "ref_id": None,
+        "group": "team_summaries", "label": "End of day report",
+        "description": ("What each recruiter did today, which candidates weren't tracked, and "
+                        "who was dropped or is at risk"),
+        "enabled": system_enabled(settings, EOD_REPORT), "template": _template_ref(tpl),
+        "schedule_summary": f"Daily · {eod_report.EOD_TIME}",
+        "recipients": "Team leads, senior managers and admins",
+    }
+
+
 def system_event(db: Session, organization_id: int, settings, name: str) -> Dict[str, Any]:
+    if name == EOD_REPORT:
+        return eod_event(db, organization_id, settings)
     if name == RECRUITER_SUMMARY:
         times = [r.send_time for r in _rules(db, organization_id)
                  if r.is_active and r.anchor != "cooling_end"]
@@ -360,6 +379,7 @@ def list_events(db: Session, organization_id: int) -> List[Dict[str, Any]]:
     out = reminders + finals
     out.append(system_event(db, organization_id, st, RECRUITER_SUMMARY))
     out.extend(digest_event(d, tmap.get(d.template_id)) for d in digests)
+    out.append(eod_event(db, organization_id, st))
     out.extend(alert_event(st, name) for name in ADMIN_ALERTS)
     return out
 

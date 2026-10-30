@@ -84,6 +84,34 @@ DEFAULT_TEMPLATES += [
     },
 ]
 
+# Names instead of the list (contract §6.9); the newest approved template is used.
+DEFAULT_TEMPLATES += [
+    {
+        "name": "clawback_daily_names", "purpose": "recruiter_batch",
+        "header_text": "Today's clawback check-ins", "buttons": SHOW_LIST_BUTTON,
+        "body_text": ("Hi {{recruiter_name}}, you have {{due_count}} clawback check-ins for today: "
+                      "{{candidate_names}}.\n\nPending from earlier days: {{overdue_count}}.\n\n"
+                      "Open and update them at {{app_link}}, or tap Show list for details."),
+    },
+    {
+        "name": "clawback_team_names", "purpose": "team_digest",
+        "header_text": "Team clawback check-ins", "buttons": SHOW_LIST_BUTTON,
+        "body_text": ("Hi {{recipient_name}}, your team has {{due_count}} clawback check-ins for "
+                      "today: {{recruiter_summary}}.\n\nMissed ({{period_label}}): {{missed_count}}."
+                      "\n\nSee the team's progress at {{app_link}}, or tap Show list for details."),
+    },
+    {
+        "name": "clawback_eod_report", "purpose": "generic",
+        "header_text": "Clawback end of day report",
+        "body_text": ("Hi {{recipient_name}}, here is the clawback report for {{report_date}}. "
+                      "Check-ins done: {{done_count}} of {{total_count}}.\n\n"
+                      "By recruiter: {{recruiter_progress}}.\n\n"
+                      "Not tracked ({{untracked_count}}): {{untracked_list}}.\n\n"
+                      "Flagged ({{flagged_count}}): {{flagged_list}}.\n\n"
+                      "See the details at {{app_link}}."),
+    },
+]
+
 DEFAULT_RULES: List[Dict] = [
     {"name": "Offer accepted, pre-joining", "action_text": "Call to confirm joining",
      "anchor": "offer_accepted", "start_day": 1,
