@@ -87,25 +87,60 @@ def _overdue(db: Session, org: int, today: date, base_url: Optional[str],
     } for c in q.order_by(H.due_date.asc(), H.id.asc()).limit(500).all()]
 
 
-def build_today(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[str, Any]:
-    """Candidates due today plus earlier open checks, grouped by recruiter.
-    `scope` None = whole org. Creates today's health checks if not there yet."""
+def _checks_between(db: Session, org: int, start: date, end: date, today: date,
+                    base_url: Optional[str], scope: Optional[Set[int]],
+                    items_by_cj: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The checks that were due in a date range, with their status now."""
+    from app.whatsapp_layer.models import ClawbackHealthCheck as H
+    q = db.query(H).filter(H.organization_id == org, H.due_date >= start, H.due_date <= end,
+                           H.status != "cancelled")
+    if scope is not None:
+        q = q.filter(H.recruiter_user_id.in_(list(scope)))
+    return [{
+        **_progress(items_by_cj.get(c.candidate_job_id), today),
+        "check_id": c.id, "candidate_job_id": c.candidate_job_id, "candidate_id": c.candidate_id,
+        "candidate_name": c.candidate_name or "-", "company_name": c.company_name or "-",
+        "job_id": c.job_id, "job_title": c.job_title or "-", "day_number": c.day_number,
+        "progress": f"was due {c.due_date.strftime('%d %b')}", "action": c.stage_label or "Check-in",
+        "status": c.status, "outcome": c.outcome, "notes": c.notes,
+        "due_date": c.due_date.isoformat(),
+        "overdue": c.due_date < today and c.status in ("pending", "missed"),
+        "link": V.check_link(base_url, c.id), "recruiter_user_id": c.recruiter_user_id,
+    } for c in q.order_by(H.due_date.desc(), H.id.asc()).limit(1000).all()]
+
+
+def build_today(db: Session, org: int, scope: Optional[Set[int]],
+                date_from: Optional[date] = None, date_to: Optional[date] = None) -> Dict[str, Any]:
+    """Check-ins for a date range (default today), grouped by recruiter. A range
+    that includes today also has today's due candidates, with their checks
+    created if not there yet, and earlier ones still open. `scope` None = whole org."""
     from app.whatsapp_layer import clients, people
     st = E.get_settings(db, org)
     today = E.local_now(st.timezone).date()
+    start, end = date_from or today, date_to or date_from or today
+    includes_today = start <= today <= end
     items = clients.fetch_active_clawbacks(org).get("items") or []
-    rules = [E.as_rule_spec(r) for r in E.active_rules(db, org)]
-    due = D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by))
-    db.commit()
     base = st.app_base_url
     by_rec: Dict[Optional[int], List[Dict[str, Any]]] = {}
-    for e in due:
-        rid = e["recruiter_user_id"]
-        if scope is None or (rid is not None and int(rid) in scope):
-            by_rec.setdefault(rid, []).append(_candidate(e, base, today))
+    seen: Set[int] = set()
+    if includes_today:
+        rules = [E.as_rule_spec(r) for r in E.active_rules(db, org)]
+        due = D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by))
+        db.commit()
+        for e in due:
+            rid = e["recruiter_user_id"]
+            if scope is None or (rid is not None and int(rid) in scope):
+                c = _candidate(e, base, today)
+                seen.add(c["check_id"])
+                by_rec.setdefault(rid, []).append(c)
     items_by_cj = {int(i["candidate_job_id"]): i for i in items if i.get("candidate_job_id")}
-    for c in _overdue(db, org, today, base, scope, items_by_cj):
-        by_rec.setdefault(c.pop("recruiter_user_id"), []).append(c)
+    others = _checks_between(db, org, start, end, today, base, scope, items_by_cj)
+    if includes_today:
+        others += _overdue(db, org, today, base, scope, items_by_cj)
+    for c in others:
+        if c["check_id"] not in seen:
+            seen.add(c["check_id"])
+            by_rec.setdefault(c.pop("recruiter_user_id"), []).append(c)
     users = people.get_users(db, [r for r in by_rec if r])
     groups = []
     for rid, cands in by_rec.items():
@@ -117,7 +152,8 @@ def build_today(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[str, A
             "done_count": sum(1 for c in cands if c["status"] == "done"),
         })
     groups.sort(key=lambda g: (g["recruiter_name"] or "").lower())
-    return {"date": today.isoformat(), "groups": groups}
+    return {"date": today.isoformat(), "date_from": start.isoformat(),
+            "date_to": end.isoformat(), "groups": groups}
 
 
 def _entry_text(n: int, c: Dict[str, Any]) -> str:
@@ -227,7 +263,7 @@ def send_prompt(db: Session, org: int, recruiter_user_id: int, ctx_user_id: int)
         "overdue_count": str(overdue), **part,
         "candidate_names": V.names_list([c["candidate_name"] for g in data["groups"]
                                          for c in g["candidates"] if not c["overdue"]]),
-        "app_link": V.app_link(st.app_base_url, "recruiter_batch")})
+        "app_link": V.day_link(st.app_base_url, "recruiter_batch", today)})
 
 
 def send_note(db: Session, org: int, recruiter_user_id: int, ctx_user_id: int, note: str):
@@ -243,7 +279,8 @@ def send_note(db: Session, org: int, recruiter_user_id: int, ctx_user_id: int, n
     return _send_manual(db, org, st, account, template, recruiter_user_id, user, ctx_user_id, "note", {
         "recruiter_name": user.get("name") or "-",
         "sender_name": (names.get(ctx_user_id) or {}).get("name") or "Your manager",
-        "note": V.sanitize_text(note), "app_link": V.app_link(st.app_base_url, "recruiter_batch")})
+        "note": V.sanitize_text(note),
+        "app_link": V.day_link(st.app_base_url, "recruiter_batch", E.local_now(st.timezone).date())})
 
 
 def _send_manual(db, org, st, account, template, rid, user, by, what, params):

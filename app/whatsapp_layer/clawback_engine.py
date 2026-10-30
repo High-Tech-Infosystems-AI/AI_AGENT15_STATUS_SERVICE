@@ -662,7 +662,7 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
                                     "overdue_count": str(overdue), **part,
                                     "candidate_names": V.names_list(
                                         [e["item"].get("candidate_name") or "-" for e in msg.entries]),
-                                    "app_link": V.app_link(base, "recruiter_batch")}
+                                    "app_link": V.day_link(base, "recruiter_batch", today)}
                 outgoing.append((fields, template))
         else:
             e = msg.entries[0]

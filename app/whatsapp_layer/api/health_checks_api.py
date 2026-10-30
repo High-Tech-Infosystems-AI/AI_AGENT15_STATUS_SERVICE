@@ -138,14 +138,15 @@ def _require_manager_of(ctx: AuthCtx, org: int, recruiter_user_id: int) -> None:
 
 
 @router.get("/today")
-def today_checkins(organization_id: Optional[int] = Query(None),
+def today_checkins(date_from: Optional[date] = Query(None), date_to: Optional[date] = Query(None),
+                   organization_id: Optional[int] = Query(None),
                    ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
     """Today's check-ins and earlier open ones, grouped by recruiter (contract §6.7)."""
     ctx.require(VIEW)
     org = read_org(organization_id, ctx)
     visible = visible_recruiters(ctx, org)
     try:
-        data = today_list.build_today(db, org, visible)
+        data = today_list.build_today(db, org, visible, date_from, date_to)
     except clients.ServiceClientError as exc:
         raise HTTPException(502, str(exc))
     for g in data["groups"]:

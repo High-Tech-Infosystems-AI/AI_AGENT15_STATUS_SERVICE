@@ -145,7 +145,7 @@ def run_org_eod(db: Session, org: int, now_utc: Optional[datetime] = None,
             scheduled_for=E.local_to_utc_naive(today, time(18, 30), st.timezone),
             params={"recipient_name": user.get("name") or record.get("name") or "-",
                     "report_date": today.strftime("%d %b"), **report,
-                    "app_link": V.app_link(st.app_base_url, "team_digest")})
+                    "app_link": V.day_link(st.app_base_url, "team_digest", today)})
         if not created:
             continue
         sender.apply_prechecks(db, log, settings=st, account=account, template=template,
