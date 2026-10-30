@@ -280,18 +280,20 @@ def test_events_listing(org):
     final = [e for e in data if e["group"] == "final_validation"]
     assert [e["key"] for e in final] == [f"rule:{rules['Cooling completed']}"]
     assert final[0]["schedule_summary"] == "Once · 10:00"
-    digests = [e for e in data if e["group"] == "team_summaries"]
-    assert {e["schedule_summary"] for e in digests} == {"Daily · 09:30", "Daily · 18:30"}
+    digests = [e for e in data if e["group"] == "team_summaries" and e["type"] != "system"]
+    assert [e["key"] for e in data if e["group"] == "team_summaries" and e["type"] == "system"] == [
+        "system:eod_report"]
+    assert {e["schedule_summary"] for e in digests} == {"Daily · 09:30"}
     assert all(e["key"].startswith("digest:") for e in digests)
     system = [e for e in data if e["type"] == "system"]
     assert [e["key"] for e in system] == [
-        "system:recruiter_summary", "system:alert_failure_rate",
+        "system:recruiter_summary", "system:eod_report", "system:alert_failure_rate",
         "system:alert_template_rejected", "system:alert_account_error"]
     assert all(e["enabled"] for e in system)
     summary = system[0]
     assert summary["template"]["name"] == "clawback_daily_checklist"
     assert summary["recipients"] == "Recruiter"
-    assert all(e["recipients"] == "Org admins (in-app)" for e in system[1:])
+    assert all(e["recipients"] == "Org admins (in-app)" for e in system[2:])
     assert all(set(e) == {"key", "type", "ref_id", "group", "label", "description", "enabled",
                           "template", "schedule_summary", "recipients"} for e in data)
 
