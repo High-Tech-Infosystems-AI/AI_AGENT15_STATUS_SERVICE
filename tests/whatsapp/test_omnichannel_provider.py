@@ -250,7 +250,7 @@ def test_named_template_sends_parameter_name_and_text():
     assert json.loads(fields["bodyTemplateVariables[0]"]) == {
         "parameter_name": "recruiter_name", "text": "Supriyo Chowdhury"}
     assert fields["bodyTemplateVariables[1]"] == \
-        '{"parameter_name": "part_label", "text": "3 candidates – part 1"}'
+        '{"parameter_name":"part_label","text":"3 candidates – part 1"}'
 
 
 def test_parse_template_reads_parameter_format():

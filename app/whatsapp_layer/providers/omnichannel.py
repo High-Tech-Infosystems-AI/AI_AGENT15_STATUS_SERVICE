@@ -172,7 +172,7 @@ class OmnichannelProvider(WhatsAppProvider):
         for i, value in enumerate(body_vars or []):
             if i < len(names):
                 value = json.dumps({"parameter_name": names[i], "text": str(value)},
-                                   ensure_ascii=False)
+                                   ensure_ascii=False, separators=(",", ":"))
             fields.append((f"bodyTemplateVariables[{i}]", str(value)))
         return [(k, (None, v)) for k, v in fields]
 
