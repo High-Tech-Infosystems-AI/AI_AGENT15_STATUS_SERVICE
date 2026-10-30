@@ -139,3 +139,12 @@ def test_process_stores_raw_event_even_when_unparseable(wa_db):
     assert "Authorization" not in ev.headers
     assert webhooks.find_account(wa_db, "omnichannel", "tok9").id == acct.id
     assert webhooks.find_account(wa_db, "omnichannel", "nope") is None
+
+
+def test_webhook_path_is_exempt_from_gateway_auth():
+    """The gateway full-matches no_auth_path (`{x}` = one path segment), so a
+    bare prefix would leave providers getting 401."""
+    import re
+    from app.api.status_api import NO_AUTH_PATHS
+    path = "/status/whatsapp/webhooks/omnichannel/abc_DEF-123"
+    assert any(re.fullmatch(re.sub(r"\{[^/{}]+\}", r"[^/]+", t), path) for t in NO_AUTH_PATHS)
