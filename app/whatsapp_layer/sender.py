@@ -178,7 +178,9 @@ def send_log(db: Session, log_id: int, now: Optional[datetime] = None) -> Option
     correlation = log.correlation_id or f"cbk_{log.id}"
     try:
         result = get_provider(account.provider).send_template(
-            creds, log.phone_e164.lstrip("+"), TemplateRef(template.name, template.language),
+            creds, log.phone_e164.lstrip("+"),
+            TemplateRef(template.name, template.language,
+                        ts.body_param_names(template)),
             header_vars, body_vars, correlation)
     except Exception as exc:  # defensive: providers should return SendResult
         logger.error("WhatsApp send crashed for log %s: %s", log.id, exc, exc_info=True)

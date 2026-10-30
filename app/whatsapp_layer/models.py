@@ -70,6 +70,8 @@ class WhatsAppTemplate(Base):
     buttons = Column(JSON, nullable=True)
     # {"header": ["key"], "body": ["key1", "key2", ...]} — index+1 = position
     variable_map = Column(JSON, nullable=True)
+    # NAMED when the approved template uses {{name}}; else numbered variables.
+    parameter_format = Column(String(16), nullable=True)
     sample_values = Column(JSON, nullable=True)
     provider_template_id = Column(String(64), nullable=True)
     approval_status = Column(String(20), nullable=False, server_default="draft")
