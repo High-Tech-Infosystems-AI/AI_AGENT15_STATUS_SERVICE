@@ -406,7 +406,7 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
                  if scope is None else len(scope - {uid}))
         base_params = digest_params(totals, user.get("name") or record.get("name"),
                                     scope_label(n_rec), plabel,
-                                    V.app_link(st.app_base_url, "team_digest"))
+                                    V.day_link(st.app_base_url, "team_digest", today))
         base_params.update({
             "due_count": str(len(mine)),
             "recruiter_count": str(len({e["recruiter_user_id"] for e in mine})),

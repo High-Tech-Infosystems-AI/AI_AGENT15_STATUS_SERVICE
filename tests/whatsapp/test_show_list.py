@@ -205,3 +205,33 @@ def test_today_gives_progress_and_days_pending(org):
     assert ravi["joined_at"] == "2026-10-19" and ravi["cooling_period_days"] == 90
     assert ravi["days_pending"] == 83 and ravi["progress_percent"] == 8
     assert ravi["completion_date"] == "2027-01-17"
+
+
+def test_reminder_link_is_for_that_day(org):
+    E.evaluate_org_reminders(org, ORG, [_item(1, 7, "Ravi Kumar")], NOW, dispatch=lambda _i: None)
+    assert org.query(L).one().params["app_link"] == \
+        "https://hrmis.example.test/clawback/today?date=2026-10-26"
+
+
+def test_a_past_day_shows_that_days_candidates_and_their_status(org):
+    from app.whatsapp_layer.models import ClawbackHealthCheck as H
+    TL.build_today(org, ORG, None)                       # creates the 26 Oct checks
+    done = org.query(H).filter(H.candidate_job_id == 1).one()
+    done.status, done.outcome = "done", "at_risk"
+    org.commit()
+    monkeypatched = TL.E.local_now
+    TL.E.local_now = lambda _tz, _n=None: datetime(2026, 10, 28, 10, 0)
+    try:
+        data = TL.build_today(org, ORG, None, date(2026, 10, 26), date(2026, 10, 26))
+    finally:
+        TL.E.local_now = monkeypatched
+    cands = {c["candidate_name"]: c for g in data["groups"] for c in g["candidates"]}
+    assert set(cands) == {"Ravi Kumar", "Priya Shah", "Imran Ali"}
+    assert cands["Ravi Kumar"]["outcome"] == "at_risk" and not cands["Ravi Kumar"]["overdue"]
+    assert cands["Priya Shah"]["status"] == "pending" and cands["Priya Shah"]["overdue"]
+    assert data["date_from"] == "2026-10-26"
+
+
+def test_a_past_day_leaves_out_other_days(org):
+    TL.build_today(org, ORG, None)
+    assert TL.build_today(org, ORG, None, date(2026, 10, 20), date(2026, 10, 21))["groups"] == []

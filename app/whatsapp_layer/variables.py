@@ -106,6 +106,12 @@ def sample_for(key: str) -> Optional[str]:
     return v["sample"] if v else None
 
 
+def day_link(base_url: Optional[str], purpose: str, day) -> str:
+    """The check-ins screen for one day: a reminder keeps showing that day's
+    candidates and their status, however late it is opened."""
+    return f"{app_link(base_url, purpose)}?date={day.isoformat()}"
+
+
 def app_link(base_url: Optional[str], purpose: str, *,
              health_check_id: Optional[int] = None,
              job_id: Optional[int] = None) -> str:
