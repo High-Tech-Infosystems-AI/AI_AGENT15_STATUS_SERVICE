@@ -77,7 +77,9 @@ def build_case(row: Dict[str, Any], check: Optional[Dict[str, Any]], today: date
         "recruiter_user_id": int(rid) if rid else None,
         "recruiter_name": names.get(int(rid), "Unassigned") if rid else "Unassigned",
         "case_status": status,
-        "day_number": (today - joined).days + 1 if joined else None,
+        # Stops at the end of the period, however long a case stays open after it.
+        "day_number": (min((today - joined).days + 1, progress["cooling_period_days"] or 10 ** 6)
+                       if joined else None),
         "progress": f"joined {joined.strftime('%d %b')}" if joined else "-",
         "check_id": check.get("id"), "status": check.get("status"),
         "outcome": check.get("outcome"), "notes": check.get("notes"),
