@@ -42,14 +42,20 @@ VARIABLES: List[Dict] = [
     _v("stage_label", "Stage", "Progress", "Days 8–30", _REMINDER),
     _v("days_pending", "Days pending", "Progress", "76", _REMINDER),
     _v("progress_percent", "Progress %", "Progress", "15", _REMINDER),
-    # Batch
-    _v("due_count", "Checks due", "Batch", "5",
+    _v("check_action", "What to do", "Progress", "Weekly check-in call", _REMINDER),
+    # Lists (recruiter list + team summary)
+    _v("due_count", "Checks due", "Lists", "5",
        sorted(set(_BATCH + _DIGEST), key=PURPOSES.index)),
-    _v("overdue_count", "Checks overdue", "Batch", "2", _BATCH),
-    _v("candidate_count", "Candidates due today", "Batch", "2", _BATCH),
-    _v("candidate_list", "Candidates due today (list)", "Batch",
-       "1) Ravi K – Sales Executive, Acme (day 14 of 90) · "
-       "2) Neha P – Store Manager, Acme (offer accepted 20 Oct)", _BATCH),
+    _v("overdue_count", "Checks overdue", "Lists", "2", _BATCH),
+    _v("candidate_count", "Candidates due today", "Lists", "2", _BATCH),
+    _v("part_label", "Count and part", "Lists", "3 candidates",
+       sorted(set(_BATCH + _DIGEST), key=PURPOSES.index)),
+    _v("candidate_list", "Candidates due today (list)", "Lists",
+       "1) Ravi K – Acme – joined 12 Oct, day 14 of 90 – Weekly check-in call – "
+       "https://hrmis.example.com/hc/101 · 2) Neha P – Zen Foods – offer accepted 20 Oct, "
+       "not joined yet – Call to confirm joining – https://hrmis.example.com/hc/102",
+       sorted(set(_BATCH + _DIGEST), key=PURPOSES.index)),
+    _v("recruiter_count", "Recruiters in the list", "Lists", "3", _DIGEST),
     # Digest
     _v("scope_label", "Scope", "Digest", "Your team (12 recruiters)", _DIGEST),
     _v("period_label", "Period", "Digest", "today", _DIGEST),
@@ -103,11 +109,15 @@ def app_link(base_url: Optional[str], purpose: str, *,
 
 
 # ---------------------------------------------------------------------------
-# candidate_list (contract §6.1)
+# candidate_list (contract §6.4): one line per message, split into parts
 # ---------------------------------------------------------------------------
-CANDIDATE_LIST_MAX_ENTRIES = 8
-CANDIDATE_LIST_MAX_CHARS = 600
+# A WhatsApp body is at most 1024 characters with the variables filled in,
+# and a variable can't hold line breaks, so a list is one line and long lists
+# go out as several messages ("part 1 of 3"). 700 leaves room for the
+# template's own text.
+CANDIDATE_LIST_MAX_CHARS = 700
 CANDIDATE_LIST_SEPARATOR = " · "
+GROUP_SEPARATOR = " | "
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 _WS_RE = re.compile(r"\s+")
 
@@ -130,45 +140,86 @@ def short_date(value: Optional[date]) -> str:
     return f"{value.day} {_MONTHS[value.month - 1]}"
 
 
-def candidate_list_entry(n: int, *, candidate_name: Any, job_title: Any, company_name: Any,
-                         pre_joining: bool = False, day_number: Any = None,
-                         cooling_period_days: Any = None,
-                         offer_accepted_date: Optional[date] = None) -> str:
-    """doj / cooling: "1) Ravi K – Sales Executive, Acme (day 14 of 90)"
-    pre-joining:  "1) Ravi K – Sales Executive, Acme (offer accepted 20 Oct)."""
-    head = (f"{n}) {sanitize_text(candidate_name)} – {sanitize_text(job_title)}, "
-            f"{sanitize_text(company_name)}")
-    if pre_joining:
-        return f"{head} (offer accepted {short_date(offer_accepted_date)})"
-    return f"{head} (day {sanitize_text(day_number)} of {sanitize_text(cooling_period_days)})"
+def check_link(base_url: Optional[str], health_check_id: Optional[int]) -> str:
+    """Short link to one health check (`/hc/<id>` redirects to the check);
+    without a check, the health-check list."""
+    base = (base_url or "").rstrip("/")
+    if health_check_id:
+        return f"{base}/hc/{int(health_check_id)}"
+    return f"{base}/clawback/health-checks"
 
 
-def _join_entries(shown: Sequence[str], more: int) -> str:
-    value = CANDIDATE_LIST_SEPARATOR.join(shown)
-    if more > 0:
-        value = (value + CANDIDATE_LIST_SEPARATOR if value else "") + f"+{more} more"
-    return value
+def progress_text(anchor: Optional[str], *, joining_date: Optional[date] = None,
+                  day_number: Any = None, cooling_period_days: Any = None,
+                  offer_accepted_date: Optional[date] = None,
+                  completion_date: Optional[date] = None) -> str:
+    """offer_accepted: "offer accepted 20 Oct, not joined yet"
+    doj:            "joined 12 Oct, day 14 of 90"
+    cooling_end:    "joined 12 Oct, cooling period ended 10 Jan"
+    """
+    if anchor == "offer_accepted":
+        return f"offer accepted {short_date(offer_accepted_date)}, not joined yet"
+    joined = f"joined {short_date(joining_date)}"
+    if anchor == "cooling_end":
+        return f"{joined}, cooling period ended {short_date(completion_date)}"
+    return f"{joined}, day {sanitize_text(day_number)} of {sanitize_text(cooling_period_days)}"
 
 
-def format_candidate_list(entries: Sequence[str],
-                          max_entries: int = CANDIDATE_LIST_MAX_ENTRIES,
-                          max_chars: int = CANDIDATE_LIST_MAX_CHARS) -> Tuple[str, int]:
-    """Join pre-formatted entries with " · ": at most `max_entries`, then
-    " · +k more"; the whole value is capped at `max_chars` by dropping entries
-    from the end (k adjusted). Returns (value, number of entries shown).
+def candidate_list_entry(n: int, *, candidate_name: Any, company_name: Any, progress: str,
+                         link: str, action: Any = None) -> str:
+    """"1) Ravi K – Acme – joined 12 Oct, day 14 of 90 – Weekly check-in call – <link>"
+    (`action` is left out of team summaries)."""
+    parts = [f"{n}) {sanitize_text(candidate_name)}", sanitize_text(company_name),
+             sanitize_text(progress)]
+    if action:
+        parts.append(sanitize_text(action))
+    parts.append(sanitize_text(link))
+    return " – ".join(parts)
 
-    A single entry longer than the cap on its own is cut with "…" so the
-    message still names someone."""
-    entries = [sanitize_text(e) for e in entries]
-    total = len(entries)
-    shown = list(entries[:max_entries])
-    value = _join_entries(shown, total - len(shown))
-    while len(value) > max_chars and len(shown) > 1:
-        shown.pop()
-        value = _join_entries(shown, total - len(shown))
-    if len(value) > max_chars and shown:
-        tail = _join_entries([], total - 1)
-        room = max_chars - len(tail) - (len(CANDIDATE_LIST_SEPARATOR) if tail else 0) - 1
-        shown = [shown[0][:max(0, room)].rstrip() + "…"]
-        value = _join_entries(shown, total - 1)
-    return value, len(shown)
+
+def _render(groups: List[Tuple[Optional[str], List[str]]]) -> str:
+    return GROUP_SEPARATOR.join(
+        (f"{head}: " if head else "") + CANDIDATE_LIST_SEPARATOR.join(texts)
+        for head, texts in groups)
+
+
+def split_list(entries: Sequence[Tuple[Optional[str], Optional[str], str]],
+               max_chars: int = CANDIDATE_LIST_MAX_CHARS) -> List[Tuple[str, int]]:
+    """Pack entries into as few one-line parts as fit `max_chars` each.
+    Returns [(part text, number of entries in it)].
+
+    `entries` are (group header, header when continued, text); a None header
+    means an ungrouped list. A group cut between parts repeats its
+    "continued" header at the start of the next part. An entry too long on
+    its own is cut with "…" so it still goes out."""
+    parts: List[Tuple[str, int]] = []
+    groups: List[Tuple[Optional[str], List[str]]] = []
+    count = 0
+    current: Optional[Tuple[Optional[str], Optional[str]]] = None
+    for head, contd, text in entries:
+        text = sanitize_text(text)
+        new_group = (head, contd) != current
+        if new_group:
+            trial = groups + [(head, [text])]
+        else:
+            trial = groups[:-1] + [(groups[-1][0], groups[-1][1] + [text])]
+        if groups and len(_render(trial)) > max_chars:
+            parts.append((_render(groups), count))
+            groups, count = [(head if new_group else (contd or head), [text])], 0
+        else:
+            groups = trial
+        count += 1
+        if len(_render(groups)) > max_chars:   # one entry alone is too long
+            label = groups[-1][0]
+            room = max_chars - len(_render([(label, [""])])) - 1
+            groups = [(label, [text[:max(0, room)].rstrip() + "…"])]
+        current = (head, contd)
+    if groups:
+        parts.append((_render(groups), count))
+    return parts
+
+
+def part_label(count: int, part: int, total_parts: int, noun: str = "candidate") -> str:
+    """"3 candidates" / "9 candidates, part 1 of 2"."""
+    label = f"{count} {noun}{'' if count == 1 else 's'}"
+    return label if total_parts <= 1 else f"{label}, part {part} of {total_parts}"

@@ -25,100 +25,124 @@ PHONES = {7: "+919876543210", 8: "+919811112222"}
 
 
 # ---------------------------------------------------------------------------
-# candidate_list formatting (pure)
+# candidate_list formatting (pure, contract §6.4)
 # ---------------------------------------------------------------------------
-def _entry(n, name=None, **kw):
-    return V.candidate_list_entry(n, candidate_name=name or f"Cand {n}", job_title="Sales Executive",
-                                  company_name="Acme", day_number=14, cooling_period_days=90, **kw)
+LINK = "https://hrmis.example.test/hc/"
 
 
-def test_candidate_list_one_entry():
-    value, shown = V.format_candidate_list([_entry(1, "Ravi K")])
-    assert value == "1) Ravi K – Sales Executive, Acme (day 14 of 90)"
-    assert shown == 1
+def _entry(n, name=None, company="Acme"):
+    return V.candidate_list_entry(
+        n, candidate_name=name or f"Cand {n}", company_name=company,
+        progress=V.progress_text("doj", joining_date=date(2026, 10, 12), day_number=14,
+                                 cooling_period_days=90),
+        action="Weekly check-in call", link=f"{LINK}{n}")
 
 
-def test_candidate_list_two_entries():
-    value, _ = V.format_candidate_list([_entry(1, "Ravi K"), _entry(2, "Neha P")])
-    assert value == ("1) Ravi K – Sales Executive, Acme (day 14 of 90) · "
-                     "2) Neha P – Sales Executive, Acme (day 14 of 90)")
+def test_list_entry_format():
+    assert _entry(1, "Ravi K") == (
+        "1) Ravi K – Acme – joined 12 Oct, day 14 of 90 – Weekly check-in call – "
+        "https://hrmis.example.test/hc/1")
 
 
-def test_candidate_list_eight_entries_no_more_suffix():
-    value, shown = V.format_candidate_list([_entry(i) for i in range(1, 9)])
-    assert shown == 8 and "more" not in value
-    assert value.count(" · ") == 7 and value.endswith("8) Cand 8 – Sales Executive, Acme (day 14 of 90)")
-
-
-def test_candidate_list_twelve_entries_capped_at_eight():
-    value, shown = V.format_candidate_list([_entry(i) for i in range(1, 13)])
-    assert shown == 8
-    assert value.endswith("8) Cand 8 – Sales Executive, Acme (day 14 of 90) · +4 more")
-    assert "9) Cand 9" not in value
-    assert len(value) <= 600
-
-
-def test_candidate_list_600_char_cap_adjusts_more_count():
-    long_name = "Candidate With A Rather Long Name " * 2         # ~68 chars
-    entries = [_entry(i, f"{long_name}{i}") for i in range(1, 13)]
-    value, shown = V.format_candidate_list(entries)
-    assert len(value) <= 600
-    assert shown < 8
-    assert value.endswith(f" · +{12 - shown} more")
-    # Adding the next entry back would break the cap.
-    longer = " · ".join(entries[:shown + 1]) + f" · +{12 - shown - 1} more"
-    assert len(longer) > 600
-
-
-def test_candidate_list_single_huge_entry_is_cut():
-    value, shown = V.format_candidate_list([_entry(1, "X" * 900), _entry(2)])
-    assert len(value) <= 600 and shown == 1
-    assert value.endswith("… · +1 more")
-
-
-def test_candidate_list_sanitises_names():
-    e = V.candidate_list_entry(1, candidate_name="Ravi\nK\t  Kumar     X\x07",
-                               job_title="Sales\r\nExec", company_name="  Acme    Ltd ",
-                               day_number=3, cooling_period_days=90)
-    value, _ = V.format_candidate_list([e])
-    assert value == "1) Ravi K Kumar X – Sales Exec, Acme Ltd (day 3 of 90)"
-    assert "\n" not in value and "\t" not in value and "  " not in value
-
-
-def test_candidate_list_pre_joining_entry():
-    e = V.candidate_list_entry(2, candidate_name="Neha P", job_title="Store Manager",
-                               company_name="Acme", pre_joining=True,
-                               offer_accepted_date=date(2026, 10, 20))
-    assert e == "2) Neha P – Store Manager, Acme (offer accepted 20 Oct)"
+def test_progress_text_per_anchor():
+    assert V.progress_text("offer_accepted", offer_accepted_date=date(2026, 10, 20)) == \
+        "offer accepted 20 Oct, not joined yet"
+    assert V.progress_text("cooling_end", joining_date=date(2026, 10, 12),
+                           completion_date=date(2027, 1, 10)) == \
+        "joined 12 Oct, cooling period ended 10 Jan"
     assert V.short_date(date(2026, 1, 5)) == "5 Jan"
 
 
-def test_candidate_list_params_keeps_full_list():
+def test_team_entry_has_no_action():
+    e = V.candidate_list_entry(2, candidate_name="Neha P", company_name="Zen", progress="p",
+                               link="L")
+    assert e == "2) Neha P – Zen – p – L"
+
+
+def test_check_link():
+    assert V.check_link("https://x/", 5) == "https://x/hc/5"
+    assert V.check_link("https://x", None) == "https://x/clawback/health-checks"
+
+
+def test_split_short_list_is_one_part():
+    parts = V.split_list([(None, None, _entry(i)) for i in range(1, 4)])
+    assert len(parts) == 1 and parts[0][1] == 3
+    assert parts[0][0].count(" · ") == 2
+
+
+def test_split_long_list_into_parts_under_cap():
+    entries = [(None, None, _entry(i)) for i in range(1, 21)]
+    parts = V.split_list(entries)
+    assert len(parts) > 1
+    assert sum(n for _t, n in parts) == 20
+    assert all(len(t) <= V.CANDIDATE_LIST_MAX_CHARS for t, _n in parts)
+    assert parts[1][0].startswith(f"{parts[0][1] + 1}) Cand")
+
+
+def test_split_grouped_list_repeats_header_when_continued():
+    rows = [("Asha (8)", "Asha (contd.)", _entry(i)) for i in range(1, 9)]
+    rows += [("Vikram (1)", "Vikram (contd.)", _entry(1, "Neha"))]
+    parts = V.split_list(rows, max_chars=500)
+    assert parts[0][0].startswith("Asha (8): 1) Cand 1")
+    assert parts[1][0].startswith("Asha (contd.): ")
+    assert " | Vikram (1): 1) Neha" in parts[-1][0] or parts[-1][0].startswith("Vikram (1): ")
+
+
+def test_split_huge_entry_is_cut():
+    parts = V.split_list([(None, None, _entry(1, "X" * 900)), (None, None, _entry(2))])
+    assert len(parts) == 2 and parts[0][0].endswith("…") and parts[0][1] == 1
+    assert len(parts[0][0]) <= V.CANDIDATE_LIST_MAX_CHARS
+
+
+def test_split_sanitises_text():
+    e = V.candidate_list_entry(1, candidate_name="Ravi\nK\t  Kumar     X\x07",
+                               company_name="  Acme    Ltd ", progress="p", link="L")
+    (value, _n), = V.split_list([(None, None, e)])
+    assert value == "1) Ravi K Kumar X – Acme Ltd – p – L"
+
+
+def test_part_label():
+    assert V.part_label(1, 1, 1) == "1 candidate"
+    assert V.part_label(9, 2, 3) == "9 candidates, part 2 of 3"
+
+
+def test_candidate_list_parts_keeps_records():
     entries = [{"item": {"candidate_job_id": i, "candidate_name": f"Cand {i}",
-                         "job_title": "SE", "company_name": "Acme", "cooling_period_days": 90},
-                "anchor": "doj", "day": 10, "check": None} for i in range(1, 13)]
-    p = E.candidate_list_params(entries)
-    assert p["candidate_count"] == "12"
-    assert p["candidate_list"].endswith("+4 more")
-    assert len(p["candidates"]) == 12 and p["candidates"][11]["candidate_job_id"] == 12
-    assert p["candidates"][11]["entry"] == "12) Cand 12 – SE, Acme (day 10 of 90)"
+                         "job_title": "SE", "company_name": "Acme", "cooling_period_days": 90,
+                         "joined_at": "2026-10-12"},
+                "anchor": "doj", "day": 10, "check": None, "rule": None} for i in range(1, 13)]
+    parts = E.candidate_list_parts(entries, "https://x")
+    assert sum(len(p["candidates"]) for p in parts) == 12
+    assert all(p["candidate_count"] == "12" for p in parts)
+    assert parts[-1]["candidates"][-1]["candidate_job_id"] == 12
 
 
-def test_catalogue_has_new_batch_variables():
-    for key in ("candidate_count", "candidate_list"):
-        assert V.VARIABLES_BY_KEY[key]["purposes"] == ["recruiter_batch", "generic"]
-    batch = next(t for t in seeds.DEFAULT_TEMPLATES if t["name"] == "clawback_health_checks_batch")
-    assert batch["body_text"] == (
-        "Hi {{recruiter_name}}, you have {{candidate_count}} clawback health checks due today: "
-        "{{candidate_list}}. Also pending from earlier days: {{overdue_count}}. Please record "
-        "each outcome here: {{app_link}}.")
+def test_catalogue_has_list_variables():
+    for key in ("candidate_list", "part_label", "due_count"):
+        assert V.VARIABLES_BY_KEY[key]["purposes"] == ["recruiter_batch", "team_digest", "generic"]
+    assert "check_action" in V.allowed_keys("recruiter_reminder")
+    for name in ("clawback_daily_checklist", "clawback_team_checklist"):
+        spec = next(t for t in seeds.DEFAULT_TEMPLATES if t["name"] == name)
+        assert "{{candidate_list}}" in spec["body_text"] and spec["header_text"]
+
+
+def test_seed_list_templates_pass_validation():
+    from app.whatsapp_layer import templates_service as ts
+    for spec in seeds.DEFAULT_TEMPLATES:
+        data = {"name": spec["name"], "language": "en_US", "category": "UTILITY",
+                "purpose": spec["purpose"],
+                "header_format": "TEXT" if spec.get("header_text") else "NONE",
+                "header_text": spec.get("header_text"), "body_text": spec["body_text"],
+                "footer_text": None, "buttons": [],
+                "sample_values": {k: V.sample_for(k) for k in ts.extract_keys(spec["body_text"])}}
+        assert ts.validate_template(data, for_submit=True) == [], spec["name"]
 
 
 def test_plan_combine_flag():
     es = [{"recruiter_user_id": 7, "kind": "reminder", "item": {"candidate_job_id": i}}
           for i in range(2)]
-    assert [m.kind for m in E.plan_recruiter_messages(es, 1)] == ["batch_reminder"]
-    assert [m.kind for m in E.plan_recruiter_messages(es, 1, combine=False)] == ["reminder"] * 2
+    assert [m.kind for m in E.plan_recruiter_messages(es, 0)] == ["batch_reminder"]
+    assert [m.kind for m in E.plan_recruiter_messages(es, 0, combine=False)] == ["reminder"] * 2
     assert [m.kind for m in E.plan_recruiter_messages(es[:1], 1)] == ["reminder"]
 
 
@@ -188,31 +212,33 @@ def org(wa_db, monkeypatch):
     return db
 
 
-def test_default_threshold_is_one(org):
-    assert E.get_settings(org, ORG).recruiter_batch_threshold == 1
+def test_default_threshold_is_zero(org):
+    assert E.get_settings(org, ORG).recruiter_batch_threshold == 0
     assert EV.system_enabled(E.get_settings(org, ORG), EV.RECRUITER_SUMMARY)
 
 
-def test_one_due_uses_rule_template(org):
+def test_one_due_still_gets_the_list(org):
     E.evaluate_org_reminders(org, ORG, [_item(1, 7)], NOW)
     log = org.query(L).one()
-    assert log.kind == "reminder" and log.template_name == "clawback_health_check_due"
+    assert log.kind == "batch_reminder" and log.template_name == "clawback_daily_checklist"
 
 
-def test_two_due_one_batch_message(org):
+def test_two_due_one_list_message(org):
     E.evaluate_org_reminders(org, ORG, [_item(1, 8, name="Ravi\nK"), _pre_joining(2, 8)], NOW)
     log = org.query(L).one()
-    assert log.kind == "batch_reminder" and log.template_name == "clawback_health_checks_batch"
-    check_ids = {c.id for c in org.query(H).all()}
-    assert len(check_ids) == 2 and set(log.health_check_ids) == check_ids
+    assert log.kind == "batch_reminder" and log.template_name == "clawback_daily_checklist"
+    checks = {c.candidate_job_id: c.id for c in org.query(H).all()}
+    assert len(checks) == 2 and set(log.health_check_ids) == set(checks.values())
     assert log.params["candidate_count"] == "2" and log.params["due_count"] == "2"
+    assert log.params["part_label"] == "2 candidates"
     assert log.params["candidate_list"] == (
-        "1) Ravi K – Sales Executive, Acme (day 8 of 90) · "
-        "2) Pre 2 – Sales Executive, Acme (offer accepted 24 Oct)")
+        f"1) Ravi K – Acme – joined 19 Oct, day 8 of 90 – Weekly check-in call – {LINK}{checks[1]} · "
+        f"2) Pre 2 – Acme – offer accepted 24 Oct, not joined yet – Call to confirm joining – "
+        f"{LINK}{checks[2]}")
     assert len(log.params["candidates"]) == 2
     assert log.rendered_body.startswith(
-        "Hi User 8, you have 2 clawback health checks due today: 1) Ravi K – Sales Executive")
-    assert "Also pending from earlier days: 0." in log.rendered_body
+        "Hi User 8, here are your clawback check-ins for today (2 candidates):\n\n1) Ravi K – Acme")
+    assert "Still pending from earlier days: 0." in log.rendered_body
 
 
 def test_recruiter_summary_off_sends_individual_messages(org):
@@ -255,7 +281,7 @@ def test_events_listing(org):
     assert [e["key"] for e in final] == [f"rule:{rules['Cooling completed']}"]
     assert final[0]["schedule_summary"] == "Once · 10:00"
     digests = [e for e in data if e["group"] == "team_summaries"]
-    assert {e["schedule_summary"] for e in digests} == {"Daily · 09:30", "Weekly on Mon · 09:30"}
+    assert {e["schedule_summary"] for e in digests} == {"Daily · 09:30"}
     assert all(e["key"].startswith("digest:") for e in digests)
     system = [e for e in data if e["type"] == "system"]
     assert [e["key"] for e in system] == [
@@ -263,7 +289,7 @@ def test_events_listing(org):
         "system:alert_template_rejected", "system:alert_account_error"]
     assert all(e["enabled"] for e in system)
     summary = system[0]
-    assert summary["template"]["name"] == "clawback_health_checks_batch"
+    assert summary["template"]["name"] == "clawback_daily_checklist"
     assert summary["recipients"] == "Recruiter"
     assert all(e["recipients"] == "Org admins (in-app)" for e in system[1:])
     assert all(set(e) == {"key", "type", "ref_id", "group", "label", "description", "enabled",

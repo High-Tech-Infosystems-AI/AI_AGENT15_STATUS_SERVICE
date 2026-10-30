@@ -284,15 +284,22 @@ def test_batch_threshold_grouping():
     assert len(by_rec[8][0].entries) == 4
 
 
-def test_final_validation_never_batched():
-    msgs = E.plan_recruiter_messages(_entries(7, 5) + _entries(7, 2, "final_validation"), threshold=3)
-    kinds = sorted(m.kind for m in msgs)
-    assert kinds == ["batch_reminder", "final_validation", "final_validation"]
+def test_final_validation_joins_the_list():
+    msgs = E.plan_recruiter_messages(_entries(7, 5) + _entries(7, 2, "final_validation"), threshold=0)
+    assert len(msgs) == 1 and msgs[0].kind == "batch_reminder" and len(msgs[0].entries) == 7
 
 
-def test_zero_threshold_disables_batching():
-    msgs = E.plan_recruiter_messages(_entries(7, 10), threshold=0)
-    assert len(msgs) == 10 and {m.kind for m in msgs} == {"reminder"}
+def test_zero_threshold_lists_even_one_candidate():
+    msgs = E.plan_recruiter_messages(_entries(7, 1), threshold=0)
+    assert [m.kind for m in msgs] == ["batch_reminder"]
+    assert [m.kind for m in E.plan_recruiter_messages(_entries(7, 1), threshold=None)] == \
+        ["batch_reminder"]
+
+
+def test_combine_off_keeps_each_kind():
+    msgs = E.plan_recruiter_messages(_entries(7, 1) + _entries(7, 1, "final_validation"),
+                                     threshold=0, combine=False)
+    assert sorted(m.kind for m in msgs) == ["final_validation", "reminder"]
 
 
 def test_reminder_params():

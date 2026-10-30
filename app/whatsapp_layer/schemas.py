@@ -97,6 +97,7 @@ class SettingsUpdate(_Body):
 class RuleWrite(_Body):
     name: str = Field(..., min_length=1, max_length=255)
     stage_label: Optional[str] = Field(None, max_length=255)
+    action_text: Optional[str] = Field(None, max_length=120)
     anchor: str
     start_day: int
     end_day: Optional[int] = None

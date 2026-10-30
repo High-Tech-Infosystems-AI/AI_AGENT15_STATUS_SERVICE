@@ -105,7 +105,7 @@ class ClawbackNotificationSettings(Base):
     quiet_hours_start = Column(String(5), nullable=True, server_default="21:00")
     quiet_hours_end = Column(String(5), nullable=True, server_default="08:00")
     working_days = Column(JSON, nullable=True)
-    recruiter_batch_threshold = Column(Integer, nullable=False, server_default="1")
+    recruiter_batch_threshold = Column(Integer, nullable=False, server_default="0")
     missed_check_cutoff_time = Column(String(5), nullable=False, server_default="23:00")
     fallback_to_created_by = Column(Integer, nullable=False, server_default="1")
     digest_skip_if_empty = Column(Integer, nullable=False, server_default="1")
@@ -127,6 +127,8 @@ class ClawbackNotificationRule(Base):
     organization_id = Column(Integer, nullable=False)
     name = Column(String(255), nullable=False)
     stage_label = Column(String(255), nullable=True)
+    # What the recruiter should do ("Weekly check-in call"), shown in the list.
+    action_text = Column(String(120), nullable=True)
     anchor = Column(String(20), nullable=False)  # offer_accepted | doj | cooling_end
     start_day = Column(Integer, nullable=False)
     end_day = Column(Integer, nullable=True)

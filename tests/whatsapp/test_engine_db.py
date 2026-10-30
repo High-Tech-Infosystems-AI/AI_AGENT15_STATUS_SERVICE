@@ -49,23 +49,28 @@ def org(wa_db, monkeypatch):
     return db
 
 
-def test_reminders_batching_and_idempotent_rerun(org):
+def test_reminders_list_per_recruiter_and_idempotent_rerun(org):
     db = org
     items = [_item(1, 7)] + [_item(10 + i, 8) for i in range(4)]   # day 8 → "Days 8–30"
     stats = E.evaluate_org_reminders(db, ORG, items, NOW)
     assert stats == {"checks": 5, "queued": 2, "skipped": 0}
     assert db.query(H).count() == 5
     logs = db.query(L).order_by(L.id).all()
+    # Even a single candidate goes out as that recruiter's list.
     assert [(l.kind, l.recipient_user_id, l.status) for l in logs] == [
-        ("reminder", 7, "submitted"), ("batch_reminder", 8, "submitted")]
+        ("batch_reminder", 7, "submitted"), ("batch_reminder", 8, "submitted")]
     single, batch = logs
     chk = db.query(H).filter(H.candidate_job_id == 1).one()
-    assert single.params["app_link"] == f"https://hrmis.example.test/clawback/health-checks?check={chk.id}"
-    assert single.params["day_number"] == "8" and single.rule_name == "Days 8–30"
-    assert single.rendered_body.startswith("Hi User 7, a health check is due today for Cand 1")
+    joined = (TODAY - timedelta(days=7))
+    assert single.params["candidate_list"] == (
+        f"1) Cand 1 – Acme – joined {joined.day} Oct, day 8 of 90 – Weekly check-in call – "
+        f"https://hrmis.example.test/hc/{chk.id}")
+    assert single.params["part_label"] == "1 candidate"
+    assert single.rendered_body.startswith("Hi User 7, here are your clawback check-ins for today")
     assert single.provider_ref and single.correlation_id == f"cbk_{single.id}"
     assert batch.params["due_count"] == "4" and len(batch.health_check_ids) == 4
-    assert batch.template_name == "clawback_health_checks_batch"
+    assert batch.params["candidate_list"].count("/hc/") == 4
+    assert batch.template_name == "clawback_daily_checklist"
 
     # Re-running the same day creates nothing new.
     assert E.evaluate_org_reminders(db, ORG, items, NOW + timedelta(minutes=15)) == \
@@ -117,7 +122,7 @@ def test_template_not_approved_and_account_inactive(org):
     db.query(A).update({A.status: "disabled"})
     db.commit()
     E.evaluate_org_reminders(db, ORG, [_item(2, 8)], NOW)
-    assert db.query(L).filter(L.candidate_job_id == 2).one().skip_reason == "account_inactive"
+    assert db.query(L).filter(L.recipient_user_id == 8).one().skip_reason == "account_inactive"
 
 
 def test_poll_marks_sent(org):
@@ -135,9 +140,10 @@ def test_final_validation_and_cancel_on_state_change(org, monkeypatch):
     final_item = _item(5, 7, joined_days_ago=90)     # completion date = today
     E.evaluate_org_reminders(db, ORG, [final_item], NOW)
     log = db.query(L).one()
-    assert log.kind == "final_validation"
-    assert log.params["app_link"] == "https://hrmis.example.test/job-pipeline/9?tab=clawback"
     chk = db.query(H).one()
+    assert log.kind == "batch_reminder"
+    assert log.params["candidate_list"].endswith(
+        f"cooling period ended 26 Oct – Final status validation – https://hrmis.example.test/hc/{chk.id}")
     assert chk.anchor == "cooling_end" and chk.day_number == 0 and chk.status == "pending"
 
     res = E.handle_clawback_state_changed(db, {"candidate_job_id": 5, "organization_id": ORG,
@@ -165,6 +171,36 @@ def test_reset_defaults_replaces_rules(org):
     db = org
     rules, digests = seeds.seed_defaults(db, ORG, user_id=1, replace=True)
     db.commit()
-    assert len(rules) == 7 and len(digests) == 2
+    assert len(rules) == 7 and len(digests) == 3
     assert len(E.active_rules(db, ORG)) == 7
     assert db.query(T).filter(T.deleted_at.is_(None)).count() == 4   # templates not duplicated
+
+
+def test_long_list_split_into_parts(org):
+    db = org
+    items = [_item(100 + i, 8) for i in range(12)]
+    for it in items:
+        it["candidate_name"] = f"Candidate With A Long Name {it['candidate_job_id']}"
+        it["company_name"] = "Acme Retail Private Limited"
+    E.evaluate_org_reminders(db, ORG, items, NOW)
+    logs = db.query(L).order_by(L.id).all()
+    assert len(logs) > 1 and all(l.kind == "batch_reminder" for l in logs)
+    assert logs[0].params["part_label"] == f"12 candidates, part 1 of {len(logs)}"
+    assert sum(len(l.health_check_ids) for l in logs) == 12
+    assert all(len(l.params["candidate_list"]) <= 700 for l in logs)
+    assert all(len(l.rendered_body) <= 1024 for l in logs)
+    assert logs[1].params["candidate_list"].startswith(f"{len(logs[0].health_check_ids) + 1}) ")
+    # Re-running sends no part twice.
+    E.evaluate_org_reminders(db, ORG, items, NOW + timedelta(minutes=15))
+    assert db.query(L).count() == len(logs)
+
+
+def test_list_off_sends_one_message_per_candidate(org):
+    db = org
+    st = E.get_settings(db, ORG)
+    st.event_toggles = {"recruiter_summary": False}
+    db.commit()
+    E.evaluate_org_reminders(db, ORG, [_item(1, 7), _item(2, 7)], NOW)
+    logs = db.query(L).order_by(L.id).all()
+    assert [l.kind for l in logs] == ["reminder", "reminder"]
+    assert logs[0].params["check_action"] == "Weekly check-in call"
