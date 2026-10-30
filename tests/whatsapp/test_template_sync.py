@@ -121,3 +121,26 @@ def test_sync_backfills_format_on_existing_template(wa_db, account, monkeypatch)
     _use(monkeypatch, FakeProvider([{**DAILY, "parameterFormat": "NAMED"}]))
     ts.sync_templates(wa_db, ORG)
     assert wa_db.query(T).one().parameter_format == "NAMED"
+
+
+def test_multi_variable_send_matches_the_portal_payload(wa_db, account, monkeypatch):
+    """Values and order as captured from the BroadNet portal for this template."""
+    from app.whatsapp_layer.providers.base import TemplateRef
+    listing = ("1) Ravi Kumar – Acme Retail – joined 12 Oct, day 14 of 90 – Weekly check-in call – "
+               "https://devai.htinfosystems.com/hc/101 · 2) Priya Shah – Zen Foods – joined 27 Oct, "
+               "day 3 of 90 – First-week call – https://devai.htinfosystems.com/hc/102 · 3) Imran Ali "
+               "– Acme Retail – offer accepted 20 Oct, not joined yet – Call to confirm joining – "
+               "https://devai.htinfosystems.com/hc/103")
+    _use(monkeypatch, FakeProvider([{**DAILY, "parameterFormat": "NAMED"}]))
+    ts.sync_templates(wa_db, ORG)
+    tpl = wa_db.query(T).one()
+    _, body = ts.send_variables(tpl.variable_map, {
+        "recruiter_name": "Asha Rao", "part_label": "3 candidates",
+        "candidate_list": listing, "overdue_count": "2"})
+    fields = dict((k, v[1]) for k, v in OmnichannelProvider.build_send_fields(
+        "916304457168", TemplateRef(tpl.name, tpl.language, ts.body_param_names(tpl)), [], body, "cbk_1"))
+    assert fields["bodyTemplateVariables[0]"] == '{"parameter_name":"recruiter_name","text":"Asha Rao"}'
+    assert fields["bodyTemplateVariables[1]"] == '{"parameter_name":"part_label","text":"3 candidates"}'
+    assert fields["bodyTemplateVariables[2]"] == '{"parameter_name":"candidate_list","text":"%s"}' % listing
+    assert fields["bodyTemplateVariables[3]"] == '{"parameter_name":"overdue_count","text":"2"}'
+    assert "bodyTemplateVariables[4]" not in fields
