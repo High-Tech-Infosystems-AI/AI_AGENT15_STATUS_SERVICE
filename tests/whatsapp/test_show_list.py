@@ -196,3 +196,11 @@ def test_unverified_call_is_kept_but_not_acted_on(org):
     ev = org.query(W).one()
     assert ev.processed == 0 and ev.error == "unverified" and ev.account_id is None
     assert "authorization" not in ev.headers and org.query(L).count() == 0
+
+
+def test_today_gives_progress_and_days_pending(org):
+    data = TL.build_today(org, ORG, {7})
+    ravi = data["groups"][0]["candidates"][0]
+    assert ravi["joined_at"] == "2026-10-19" and ravi["cooling_period_days"] == 90
+    assert ravi["days_pending"] == 83 and ravi["progress_percent"] == 8
+    assert ravi["completion_date"] == "2027-01-17"
