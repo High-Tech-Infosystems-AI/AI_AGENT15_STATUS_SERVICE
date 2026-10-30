@@ -22,7 +22,7 @@ from app.whatsapp_layer import clawback_engine as E
 from app.whatsapp_layer import digest_engine as D
 from app.whatsapp_layer.api.common import get_scoped, paginate, read_org, unprocessable
 from app.whatsapp_layer.models import ClawbackHealthCheck as H, WhatsAppMessageLog as L
-from app.whatsapp_layer import sender, today as today_list
+from app.whatsapp_layer import clawback_dashboard as dashboard_data, sender, today as today_list
 from app.whatsapp_layer.schemas import HealthCheckRecord, TodayMessage, TodayNotify
 
 logger = logging.getLogger("app_logger")
@@ -152,6 +152,18 @@ def today_checkins(organization_id: Optional[int] = Query(None),
         rid = g["recruiter_user_id"]
         g["can_message"] = bool(rid) and (visible is None or (rid != ctx.user_id and rid in visible))
     return data
+
+
+@router.get("/dashboard")
+def clawback_dashboard(organization_id: Optional[int] = Query(None),
+                       ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
+    """Every clawback case the viewer may see, with alerts (contract §6.8)."""
+    ctx.require(VIEW)
+    org = read_org(organization_id, ctx)
+    try:
+        return dashboard_data.build_dashboard(db, org, visible_recruiters(ctx, org))
+    except clients.ServiceClientError as exc:
+        raise HTTPException(502, str(exc))
 
 
 @router.post("/today/notify")
