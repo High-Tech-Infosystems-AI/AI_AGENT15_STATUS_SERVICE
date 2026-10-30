@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
@@ -69,6 +69,24 @@ def get_users(db: Session, user_ids: Iterable[int]) -> Dict[int, Dict]:
             "enabled": (enable is None or int(enable) == 1) and r[7] is None,
         }
     return out
+
+
+# Platform super admins have no organisation; they get every org's summary.
+_ADMINS_SQL = text(
+    "SELECT u.id, u.name FROM users u JOIN roles r ON r.id = u.role_id "
+    "WHERE ((u.organization_id = :org AND r.role_type IN ('admin', 'super_admin')) "
+    "OR (u.organization_id IS NULL AND r.role_type = 'super_admin')) "
+    "AND u.deleted_at IS NULL AND r.deleted_at IS NULL ORDER BY u.id"
+)
+
+
+def admin_users(db: Session, organization_id: int) -> List[Dict]:
+    """The org's admins and super admins, plus platform super admins (by role
+    type), as digest recipients:
+    [{user_id, name, subordinate_user_ids, direct_team_user_ids}]."""
+    rows = db.execute(_ADMINS_SQL, {"org": organization_id}).fetchall()
+    return [{"user_id": int(r[0]), "name": r[1], "subordinate_user_ids": [],
+             "direct_team_user_ids": []} for r in rows]
 
 
 def user_names(db: Session, user_ids: Iterable[int]) -> Dict[int, str]:

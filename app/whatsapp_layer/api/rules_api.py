@@ -54,7 +54,8 @@ def _templates_by_id(db: Session, ids) -> Dict[int, T]:
 
 def serialize_rule(r: ClawbackNotificationRule, tpl: Optional[T]) -> Dict[str, Any]:
     return {
-        "id": r.id, "name": r.name, "stage_label": r.stage_label, "anchor": r.anchor,
+        "id": r.id, "name": r.name, "stage_label": r.stage_label,
+        "action_text": r.action_text, "anchor": r.anchor,
         "start_day": r.start_day, "end_day": r.end_day, "frequency_type": r.frequency_type,
         "frequency_value": r.frequency_value or {}, "send_time": r.send_time,
         "recipient_type": r.recipient_type, "template_id": r.template_id,
@@ -246,6 +247,7 @@ def _apply_rule(r: ClawbackNotificationRule, data: Dict[str, Any]) -> None:
               "send_time", "recipient_type", "template_id", "priority"):
         setattr(r, f, data[f])
     r.stage_label = data.get("stage_label") or data["name"]
+    r.action_text = (data.get("action_text") or "").strip() or None
     r.send_time = E.parse_hhmm(data["send_time"]).strftime("%H:%M")
     r.creates_health_check = 1 if data["creates_health_check"] else 0
     r.is_active = 1 if data["is_active"] else 0

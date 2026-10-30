@@ -152,12 +152,14 @@ def test_seed_templates_are_submittable(spec):
 
 
 def test_variable_catalogue_matches_contract():
-    assert set(V.allowed_keys("recruiter_batch")) == {"recruiter_name", "due_count", "overdue_count",
-                                                   "candidate_count", "candidate_list", "app_link"}
+    assert set(V.allowed_keys("recruiter_batch")) == {
+        "recruiter_name", "due_count", "overdue_count", "candidate_count", "part_label",
+        "candidate_list", "app_link"}
     assert set(V.allowed_keys("team_digest")) == {
         "recipient_name", "scope_label", "period_label", "active_count", "due_count", "done_count",
-        "missed_count", "at_risk_count", "ending_soon_count", "final_pending_count", "app_link"}
-    assert len(V.allowed_keys("recruiter_reminder")) == 13
+        "missed_count", "at_risk_count", "ending_soon_count", "final_pending_count",
+        "part_label", "candidate_list", "recruiter_count", "app_link"}
+    assert len(V.allowed_keys("recruiter_reminder")) == 14
     assert set(V.allowed_keys("generic")) == set(V.VARIABLES_BY_KEY)
 
 

@@ -103,6 +103,7 @@ class RuleSpec:
     template_id: Optional[int] = None
     creates_health_check: bool = True
     stage_label: Optional[str] = None
+    action_text: Optional[str] = None
 
 
 def as_rule_spec(obj) -> RuleSpec:
@@ -120,7 +121,15 @@ def as_rule_spec(obj) -> RuleSpec:
         template_id=g("template_id"),
         creates_health_check=bool(g("creates_health_check", True)),
         stage_label=g("stage_label"),
+        action_text=g("action_text"),
     )
+
+
+def action_for(rule: Optional[RuleSpec]) -> str:
+    """What the recruiter should do for this rule ("Weekly check-in call")."""
+    if rule is None:
+        return "-"
+    return rule.action_text or rule.stage_label or rule.name or "-"
 
 
 def in_window(rule: RuleSpec, day: int) -> bool:
@@ -300,6 +309,13 @@ def idempotency_key(kind: str, rule_id: Optional[int], subject_id: Optional[int]
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def batch_key(recruiter_user_id: Optional[int], local_date: date, part: int = 1) -> str:
+    """Part 1 keeps the pre-split key, so a list sent before a deploy is
+    still recognised as today's."""
+    return idempotency_key("batch_reminder", 0 if part == 1 else part, 0,
+                           recruiter_user_id, local_date)
+
+
 @dataclass
 class PlannedMessage:
     kind: str                       # reminder | batch_reminder | final_validation
@@ -310,25 +326,22 @@ class PlannedMessage:
 def plan_recruiter_messages(entries: List[Dict[str, Any]],
                             threshold: Optional[int],
                             combine: bool = True) -> List[PlannedMessage]:
-    """Group a run's due entries per recruiter (plan §6.3 step 3, contract §6.1).
+    """Group a run's due entries per recruiter (plan §6.3 step 3, contract §6.4).
 
-    final_validation entries are always individual. For reminders: up to
-    `threshold` per recruiter → one message each; more → one batch_reminder
-    (default threshold 1: 2+ due → one combined message).
-    threshold None/≤0, or `combine` False (system:recruiter_summary off),
-    disables batching."""
+    A recruiter with more than `threshold` entries due (default 0: any) gets
+    one batch_reminder listing all of them, final validations included.
+    Otherwise, or with `combine` False (system:recruiter_summary off), each
+    entry is its own reminder / final_validation message."""
     out: List[PlannedMessage] = []
     by_rec: Dict[Optional[int], List[Dict[str, Any]]] = defaultdict(list)
     for e in entries:
-        if e.get("kind") == "final_validation":
-            out.append(PlannedMessage("final_validation", e.get("recruiter_user_id"), [e]))
-        else:
-            by_rec[e.get("recruiter_user_id")].append(e)
+        by_rec[e.get("recruiter_user_id")].append(e)
+    limit = max(0, int(threshold or 0))
     for rec, es in by_rec.items():
-        if combine and threshold and threshold > 0 and len(es) > threshold:
+        if combine and len(es) > limit:
             out.append(PlannedMessage("batch_reminder", rec, es))
         else:
-            out.extend(PlannedMessage("reminder", rec, [e]) for e in es)
+            out.extend(PlannedMessage(e.get("kind") or "reminder", rec, [e]) for e in es)
     return out
 
 
@@ -383,35 +396,60 @@ def reminder_params(item: Dict[str, Any], rule: RuleSpec, day: int,
         "day_number": str(day),
         "cooling_period_days": str(cp) if cp > 0 else "-",
         "stage_label": rule.stage_label or rule.name or "-",
+        "check_action": action_for(rule),
         "days_pending": str(max(0, (comp - today).days)) if comp else "-",
         "progress_percent": str(progress),
         "app_link": app_link,
     }
 
 
-def candidate_list_params(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """`candidate_count` / `candidate_list` for a batch_reminder (contract
-    §6.1), plus `candidates`: the full list (the message may show "+k more")."""
+def list_entry_text(n: int, e: Dict[str, Any], base_url: Optional[str],
+                    with_action: bool = True) -> str:
+    """One candidate in a list: name – company – progress – action – link."""
     from app.whatsapp_layer import variables as V
-    lines, full = [], []
-    for n, e in enumerate(entries, start=1):
-        item, anchor = e["item"], e.get("anchor")
-        cp = cooling_days(item)
-        oa = parse_date(item.get("offer_accepted_at"))
-        line = V.candidate_list_entry(
-            n, candidate_name=item.get("candidate_name"), job_title=item.get("job_title"),
-            company_name=item.get("company_name"), pre_joining=anchor == "offer_accepted",
-            day_number=e.get("day"), cooling_period_days=str(cp) if cp > 0 else "-",
-            offer_accepted_date=oa)
-        lines.append(line)
-        chk = e.get("check")
-        full.append({"candidate_job_id": item.get("candidate_job_id"),
-                     "health_check_id": chk.id if chk is not None else None,
-                     "candidate_name": item.get("candidate_name"),
-                     "job_title": item.get("job_title"), "company_name": item.get("company_name"),
-                     "anchor": anchor, "day_number": e.get("day"), "entry": line})
-    value, _shown = V.format_candidate_list(lines)
-    return {"candidate_count": str(len(entries)), "candidate_list": value, "candidates": full}
+    item, anchor = e["item"], e.get("anchor")
+    cp = cooling_days(item)
+    chk = e.get("check")
+    progress = V.progress_text(
+        anchor, joining_date=parse_date(item.get("joined_at")), day_number=e.get("day"),
+        cooling_period_days=str(cp) if cp > 0 else "-",
+        offer_accepted_date=parse_date(item.get("offer_accepted_at")),
+        completion_date=completion_date_of(item))
+    return V.candidate_list_entry(
+        n, candidate_name=item.get("candidate_name"), company_name=item.get("company_name"),
+        progress=progress, action=action_for(e.get("rule")) if with_action else None,
+        link=V.check_link(base_url, chk.id if chk is not None else None))
+
+
+def _list_record(e: Dict[str, Any], text: str) -> Dict[str, Any]:
+    item, chk = e["item"], e.get("check")
+    return {"candidate_job_id": item.get("candidate_job_id"),
+            "health_check_id": chk.id if chk is not None else None,
+            "candidate_name": item.get("candidate_name"), "job_title": item.get("job_title"),
+            "company_name": item.get("company_name"), "anchor": e.get("anchor"),
+            "day_number": e.get("day"), "entry": text}
+
+
+def candidate_list_parts(entries: List[Dict[str, Any]],
+                         base_url: Optional[str]) -> List[Dict[str, Any]]:
+    """The recruiter's list split into messages (contract §6.4). One dict
+    per part: `candidate_count`, `part_label`, `candidate_list`, plus
+    `candidates` (that part's records) and `health_check_ids`."""
+    from app.whatsapp_layer import variables as V
+    texts = [list_entry_text(n, e, base_url) for n, e in enumerate(entries, start=1)]
+    parts = V.split_list([(None, None, t) for t in texts])
+    out, i = [], 0
+    for k, (value, shown) in enumerate(parts, start=1):
+        chunk = entries[i:i + shown]
+        out.append({
+            "candidate_count": str(len(entries)),
+            "part_label": V.part_label(len(entries), k, len(parts)),
+            "candidate_list": value,
+            "candidates": [_list_record(e, t) for e, t in zip(chunk, texts[i:i + shown])],
+            "health_check_ids": [e["check"].id for e in chunk if e.get("check") is not None],
+        })
+        i += shown
+    return out
 
 
 # ===========================================================================
@@ -442,7 +480,7 @@ def get_settings(db: Session, organization_id: int, create: bool = True):
     from app.core import settings as app_settings
     st = S(organization_id=organization_id, enabled=0, timezone=DEFAULT_TIMEZONE,
            quiet_hours_start="21:00", quiet_hours_end="08:00",
-           working_days=list(DEFAULT_WORKING_DAYS), recruiter_batch_threshold=1,
+           working_days=list(DEFAULT_WORKING_DAYS), recruiter_batch_threshold=0,
            missed_check_cutoff_time="23:00", fallback_to_created_by=1,
            digest_skip_if_empty=1,
            app_base_url=(getattr(app_settings, "WEB_PUSH_FRONTEND_BASE_URL", "") or None))
@@ -562,15 +600,15 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
     db.commit()
 
     # Drop entries already handled today (re-runs), and whole recruiters
-    # who already got today's batch.
+    # who already got today's list.
     keys = {id(e): idempotency_key(e["kind"], e["rule"].id, e["item"]["candidate_job_id"],
                                    e["recruiter_user_id"], today) for e in entries}
-    batch_keys = {rec: idempotency_key("batch_reminder", 0, 0, rec, today)
+    batch_keys = {rec: batch_key(rec, today, 1)
                   for rec in {e["recruiter_user_id"] for e in entries}}
     existing = {k for (k,) in db.query(L.idempotency_key).filter(
         L.idempotency_key.in_(list(keys.values()) + list(batch_keys.values()))).all()}
     fresh = [e for e in entries if keys[id(e)] not in existing
-             and not (e["kind"] == "reminder" and batch_keys[e["recruiter_user_id"]] in existing)]
+             and batch_keys[e["recruiter_user_id"]] not in existing]
 
     from app.whatsapp_layer import events as EV
     combine = EV.system_enabled(st, EV.RECRUITER_SUMMARY)
@@ -578,25 +616,37 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
     for msg in plan_recruiter_messages(fresh, st.recruiter_batch_threshold, combine):
         rid = msg.recruiter_user_id
         if not rid:
-            logger.warning("Clawback reminder for candidate_job %s has no recruiter; not sent",
-                           msg.entries[0]["item"].get("candidate_job_id"))
+            # Nobody to send to: logged (skipped) per candidate so it shows in the logs.
+            for e in msg.entries:
+                log, created = sender.create_log(db, **_log_fields(
+                    organization_id, e["kind"], keys[id(e)], e["item"], e["rule"], e["day"],
+                    None, recipients, account, None, now_utc))
+                if created:
+                    sender.mark_skipped(log, "no_recruiter")
+                    stats["skipped"] += 1
+            db.commit()
             continue
         user = recipients.get(rid) or {}
+        outgoing: List[Tuple[Dict[str, Any], Any]] = []
         if msg.kind == "batch_reminder":
             template = sender.approved_template_for_purpose(db, organization_id, "recruiter_batch")
             overdue = (db.query(H).filter(H.organization_id == organization_id,
                                           H.recruiter_user_id == rid, H.status == "pending",
                                           H.due_date < today).count())
-            params = {"recruiter_name": user.get("name") or "-",
-                      "due_count": str(len(msg.entries)), "overdue_count": str(overdue),
-                      **candidate_list_params(msg.entries),
-                      "app_link": V.app_link(base, "recruiter_batch")}
-            fields = _log_fields(organization_id, "batch_reminder",
-                                 batch_keys[rid], None, None, None, rid, recipients,
-                                 account, template, now_utc)
-            fields["health_check_ids"] = [e["check"].id for e in msg.entries if e["check"] is not None]
-            fields["scheduled_for"] = local_to_utc_naive(
-                today, parse_hhmm(msg.entries[0]["rule"].send_time, time(10, 0)), st.timezone)
+            send_at = local_to_utc_naive(
+                today, parse_hhmm(min(e["rule"].send_time for e in msg.entries), time(10, 0)),
+                st.timezone)
+            for n, part in enumerate(candidate_list_parts(msg.entries, base), start=1):
+                fields = _log_fields(organization_id, "batch_reminder", batch_key(rid, today, n),
+                                     None, None, None, rid, recipients, account, template,
+                                     now_utc)
+                fields["health_check_ids"] = part.pop("health_check_ids")
+                fields["scheduled_for"] = send_at
+                fields["params"] = {"recruiter_name": user.get("name") or "-",
+                                    "due_count": str(len(msg.entries)),
+                                    "overdue_count": str(overdue), **part,
+                                    "app_link": V.app_link(base, "recruiter_batch")}
+                outgoing.append((fields, template))
         else:
             e = msg.entries[0]
             rule, item = e["rule"], e["item"]
@@ -604,24 +654,25 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
             purpose = "final_validation" if msg.kind == "final_validation" else "recruiter_reminder"
             link = V.app_link(base, purpose, health_check_id=e["check"].id if e["check"] else None,
                               job_id=item.get("job_id"))
-            params = reminder_params(item, rule, e["day"], user.get("name"), link, today)
             fields = _log_fields(organization_id, msg.kind, keys[id(e)], item, rule, e["day"],
                                  rid, recipients, account, template, now_utc)
             fields["health_check_ids"] = [e["check"].id] if e["check"] else None
             fields["scheduled_for"] = local_to_utc_naive(
                 today, parse_hhmm(rule.send_time, time(10, 0)), st.timezone)
-        fields["params"] = params
-        log, created = sender.create_log(db, **fields)
-        if not created:
-            continue
-        sender.apply_prechecks(db, log, settings=st, account=account, template=template,
-                               user=user)
-        if log.status == "queued":
-            stats["queued"] += 1
-            to_dispatch.append(log.id)
-        else:
-            stats["skipped"] += 1
-        db.commit()
+            fields["params"] = reminder_params(item, rule, e["day"], user.get("name"), link, today)
+            outgoing.append((fields, template))
+        for fields, template in outgoing:
+            log, created = sender.create_log(db, **fields)
+            if not created:
+                continue
+            sender.apply_prechecks(db, log, settings=st, account=account, template=template,
+                                   user=user)
+            if log.status == "queued":
+                stats["queued"] += 1
+                to_dispatch.append(log.id)
+            else:
+                stats["skipped"] += 1
+            db.commit()
 
     sender.dispatch_many(db, to_dispatch, dispatch)
     return stats

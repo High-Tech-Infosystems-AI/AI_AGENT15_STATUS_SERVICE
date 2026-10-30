@@ -3,8 +3,11 @@ team-health API (contract §2.9).
 
 Each person gets at most one digest per day: among the digest rules
 scheduled for today whose audience includes them, the highest `priority`
-wins (ties → lowest id). The digest is counts plus a link, never a
-candidate list (WhatsApp body ≤ 1024 chars, no newlines in variables).
+wins (ties → lowest id). The digest lists the candidates due today under
+each recruiter in scope (contract §6.4), one line per message, split into
+parts when it is longer than one WhatsApp message holds.
+Nobody is messaged on a day with no candidate due in their scope, and
+nobody without a phone number is ever messaged (sender prechecks).
 """
 from __future__ import annotations
 
@@ -20,8 +23,9 @@ from app.whatsapp_layer import clawback_engine as E
 
 logger = logging.getLogger("app_logger")
 
-AUDIENCE_TYPES = ("team_managers", "has_subordinate_managers", "designation_levels", "roles", "users")
-SCOPES = ("direct_team", "full_subtree")
+AUDIENCE_TYPES = ("team_managers", "has_subordinate_managers", "designation_levels", "roles", "users",
+                  "admins")
+SCOPES = ("direct_team", "full_subtree", "organisation")
 DIGEST_FREQUENCIES = ("daily", "weekly", "weekdays")
 SECTIONS = ("active", "due", "done", "missed", "at_risk", "ending_soon", "final_pending")
 ENDING_SOON_DAYS = 7
@@ -114,9 +118,10 @@ def digest_period(rule: DigestRuleSpec, today: date) -> Tuple[date, str]:
 
 
 def audience_request(rule: DigestRuleSpec) -> Dict[str, Any]:
-    """Digest audience → org-service request (contract §3.2)."""
+    """Digest audience → org-service request (contract §3.2). `admins` is
+    resolved locally from users.role_id → roles.role_type."""
     av = rule.audience_value or {}
-    if rule.audience_type in ("team_managers", "has_subordinate_managers"):
+    if rule.audience_type in ("team_managers", "has_subordinate_managers", "admins"):
         return {"audience": rule.audience_type}
     if rule.audience_type == "designation_levels":
         return {"audience": "all_managers", "min_level": av.get("min_level"),
@@ -217,8 +222,72 @@ def is_empty(totals: Dict[str, int]) -> bool:
     return not any(totals.get(k) for k in ("active", "due", "done", "missed", "final_pending"))
 
 
+def team_list_parts(entries: List[Dict[str, Any]], recruiter_names: Dict[int, str],
+                    base_url: Optional[str]) -> List[Dict[str, Any]]:
+    """Today's due candidates grouped by recruiter, split into messages:
+    "Asha R (2): 1) Ravi K – Acme – joined 12 Oct, day 14 of 90 – <link> · 2) …
+    | Vikram D (1): 1) …". One dict per part: `part_label`, `candidate_list`,
+    `candidates`."""
+    from app.whatsapp_layer import variables as V
+    by_rec: Dict[Optional[int], List[Dict[str, Any]]] = defaultdict(list)
+    for e in entries:
+        by_rec[e.get("recruiter_user_id")].append(e)
+
+    def name_of(rid):
+        return V.sanitize_text(recruiter_names.get(rid) if rid else "No recruiter")
+
+    rows = []
+    for rid in sorted(by_rec, key=lambda r: (name_of(r).lower(), r or 0)):
+        es, name = by_rec[rid], name_of(rid)
+        for n, e in enumerate(es, start=1):
+            text = E.list_entry_text(n, e, base_url, with_action=False)
+            rows.append((f"{name} ({len(es)})", f"{name} (contd.)", text, e, rid))
+    parts = V.split_list([(h, c, t) for h, c, t, _e, _r in rows])
+    out, i = [], 0
+    for k, (value, shown) in enumerate(parts, start=1):
+        chunk = rows[i:i + shown]
+        out.append({
+            "part_label": V.part_label(len(entries), k, len(parts)),
+            "candidate_list": value,
+            "candidates": [{"recruiter_user_id": r, "entry": t,
+                            "candidate_job_id": e["item"].get("candidate_job_id"),
+                            "health_check_id": e["check"].id if e.get("check") is not None else None}
+                           for _h, _c, t, e, r in chunk],
+        })
+        i += shown
+    return out
+
+
+def due_today(db: Session, organization_id: int, items: List[Dict[str, Any]],
+              rules: List[E.RuleSpec], today: date,
+              fallback_to_created_by: bool) -> List[Dict[str, Any]]:
+    """Candidates a rule makes due today (the recruiters' list for today).
+    Their health checks are created now if the rule makes one, so the
+    summary can link to them even when it goes out before the recruiters'
+    reminders."""
+    wd = E.weekday_code(today)
+    out = []
+    for item in items:
+        anchor, day = E.anchor_and_day(item, today)
+        if anchor is None or E.cooling_days(item) <= 0:
+            continue
+        rule = E.match_rule(rules, anchor, day, wd)
+        if rule is None:
+            continue
+        rid = E.recruiter_for(item, fallback_to_created_by)
+        check = None
+        if rule.creates_health_check:
+            check = E.ensure_health_check(db, organization_id, item, rule, anchor, day, today, rid)
+            if check is not None and check.status == "cancelled":
+                continue
+        out.append({"item": item, "rule": rule, "anchor": anchor, "day": day,
+                    "recruiter_user_id": rid, "check": check})
+    return out
+
+
 def digest_params(totals: Dict[str, int], recipient_name: Optional[str], scope_label: str,
                   period_label: str, app_link: str) -> Dict[str, str]:
+    """Count variables (kept for templates written before the list)."""
     return {
         "recipient_name": recipient_name or "-",
         "scope_label": scope_label,
@@ -283,17 +352,20 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
         try:
             req = audience_request(rule)
             audience = req.pop("audience")
-            users = clients.fetch_subordinates(organization_id, audience, **req)
+            users = (people.admin_users(db, organization_id) if audience == "admins"
+                     else clients.fetch_subordinates(organization_id, audience, **req))
             rule_audiences.append((rule, users))
         except Exception as exc:
+            db.rollback()
             logger.error("Digest rule %s audience lookup failed: %s", rule.id, exc)
     assignment = assign_recipients(rule_audiences)
     ready = {uid: ru for uid, ru in assignment.items() if E.time_reached(now_local, ru[0].send_time)}
     if not ready:
         return stats
 
-    # Already sent today? (one digest per person per day)
-    keys = {uid: E.idempotency_key("digest", 0, 0, uid, today) for uid in ready}
+    # Already sent today? (one digest per person per org per day; platform
+    # super admins get one from every org)
+    keys = {uid: E.idempotency_key("digest", 0, organization_id, uid, today) for uid in ready}
     done_keys = {k for (k,) in db.query(L.idempotency_key)
                  .filter(L.idempotency_key.in_(list(keys.values()))).all()}
     ready = {uid: ru for uid, ru in ready.items() if keys[uid] not in done_keys}
@@ -308,47 +380,67 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
     recipients = people.get_users(db, list(ready))
     to_dispatch: List[int] = []
 
+    due = due_today(db, organization_id, items, rules, today, bool(st.fallback_to_created_by))
+    db.commit()
+    rec_names = people.get_users(db, list({e["recruiter_user_id"] for e in due
+                                            if e["recruiter_user_id"]}))
+    rec_names = {uid: u.get("name") for uid, u in rec_names.items()}
+
     for uid, (rule, record) in ready.items():
-        scope = scope_user_ids(rule.scope, record) | {uid}
+        org_wide = rule.scope == "organisation" or rule.audience_type == "admins"
+        scope = None if org_wide else scope_user_ids(rule.scope, record) | {uid}
         start, plabel = digest_period(rule, today)
         agg = aggregate(scope, items, checks, rules, today, start)
         totals = agg["totals"]
-        if rule.skip_if_empty and is_empty(totals):
+        mine = [e for e in due if scope is None
+                or (e["recruiter_user_id"] is not None and int(e["recruiter_user_id"]) in scope)]
+        # No candidate to follow up today: no message, whatever the rule says.
+        if not mine:
             stats["empty"] += 1
             continue
         user = recipients.get(uid) or {}
         template = (sender.rule_template(db, rule.template_id) if rule.template_id
                     else sender.approved_template_for_purpose(db, organization_id, "team_digest"))
-        n_rec = len(scope - {uid})
-        params = digest_params(totals, user.get("name") or record.get("name"),
-                               scope_label(n_rec), plabel,
-                               V.app_link(st.app_base_url, "team_digest"))
+        n_rec = (len({i_rec for i_rec in (E.recruiter_for(i, True) for i in items) if i_rec})
+                 if scope is None else len(scope - {uid}))
+        base_params = digest_params(totals, user.get("name") or record.get("name"),
+                                    scope_label(n_rec), plabel,
+                                    V.app_link(st.app_base_url, "team_digest"))
+        base_params.update({
+            "due_count": str(len(mine)),
+            "recruiter_count": str(len({e["recruiter_user_id"] for e in mine})),
+        })
+        parts = team_list_parts(mine, rec_names, st.app_base_url)
         snapshot = {"period_start": start.isoformat(), "period_end": today.isoformat(),
                     "scope": rule.scope, "scope_user_count": n_rec, "totals": totals,
                     "by_stage": agg["by_stage"],
                     "top_missed_recruiter_ids": agg["top_missed_recruiter_ids"]}
-        log, created = sender.create_log(
-            db, organization_id=organization_id, kind="digest", idempotency_key=keys[uid],
-            account_id=account.id if account else None,
-            provider=account.provider if account else None,
-            digest_rule_id=rule.id, rule_name=rule.name,
-            template_id=template.id if template else rule.template_id,
-            template_name=template.name if template else None,
-            recipient_user_id=uid, recipient_name=user.get("name") or record.get("name"),
-            recipient_type="manager", phone_e164=user.get("phone_e164"),
-            scheduled_for=E.local_to_utc_naive(today, E.parse_hhmm(rule.send_time, time(9, 30)),
-                                               st.timezone),
-            params=params, digest_snapshot=snapshot)
-        if not created:
-            continue
-        sender.apply_prechecks(db, log, settings=st, account=account, template=template,
-                               user=user or None)
-        if log.status == "queued":
-            to_dispatch.append(log.id)
-            stats["queued"] += 1
-        else:
-            stats["skipped"] += 1
-        db.commit()
+        for n, part in enumerate(parts, start=1):
+            key = keys[uid] if n == 1 else E.idempotency_key("digest", n, organization_id, uid, today)
+            log, created = sender.create_log(
+                db, organization_id=organization_id, kind="digest", idempotency_key=key,
+                account_id=account.id if account else None,
+                provider=account.provider if account else None,
+                digest_rule_id=rule.id, rule_name=rule.name,
+                template_id=template.id if template else rule.template_id,
+                template_name=template.name if template else None,
+                recipient_user_id=uid, recipient_name=user.get("name") or record.get("name"),
+                recipient_type="manager", phone_e164=user.get("phone_e164"),
+                scheduled_for=E.local_to_utc_naive(
+                    today, E.parse_hhmm(rule.send_time, time(9, 30)), st.timezone),
+                health_check_ids=[c["health_check_id"] for c in part["candidates"]
+                                  if c["health_check_id"]] or None,
+                params={**base_params, **part}, digest_snapshot=snapshot)
+            if not created:
+                continue
+            sender.apply_prechecks(db, log, settings=st, account=account, template=template,
+                                   user=user or None)
+            if log.status == "queued":
+                to_dispatch.append(log.id)
+                stats["queued"] += 1
+            else:
+                stats["skipped"] += 1
+            db.commit()
 
     sender.dispatch_many(db, to_dispatch, dispatch)
     return stats

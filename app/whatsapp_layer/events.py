@@ -55,6 +55,7 @@ AUDIENCE_LABELS = {
     "designation_levels": "Designation levels",
     "roles": "Selected roles",
     "users": "Selected users",
+    "admins": "Admins and super admins",
 }
 
 
@@ -222,9 +223,14 @@ def digest_description(audience_type: str, audience_value: Optional[Dict[str, An
         who = "selected roles"
     elif audience_type == "users":
         who = "selected users"
+    elif audience_type == "admins":
+        who = "admins and super admins"
     else:
         who = str(audience_type or "managers")
-    covering = "their direct team" if scope == "direct_team" else "their whole team"
+    if scope == "organisation" or audience_type == "admins":
+        covering = "the whole organisation"
+    else:
+        covering = "their direct team" if scope == "direct_team" else "their whole team"
     return f"Clawback summary to {who}, covering {covering}"
 
 
@@ -269,16 +275,15 @@ def digest_event(r, tpl) -> Dict[str, Any]:
 
 
 def recruiter_summary_event(settings, tpl, send_times: List[str]) -> Dict[str, Any]:
-    threshold = getattr(settings, "recruiter_batch_threshold", None)
-    if threshold is None:
-        threshold = 1
-    when = ("2 or more" if int(threshold) <= 1 else f"more than {int(threshold)}")
+    threshold = max(0, int(getattr(settings, "recruiter_batch_threshold", None) or 0))
+    when = ("" if threshold == 0 else f" when more than {threshold} are due")
     times = sorted({t for t in send_times if t})
     return {
         "key": f"system:{RECRUITER_SUMMARY}", "type": "system", "ref_id": None,
-        "group": "recruiter_summary", "label": "Combined daily message",
-        "description": ("One message per recruiter listing every health check due that day, "
-                        f"sent instead of separate reminders when {when} are due"),
+        "group": "recruiter_summary", "label": "Daily candidate list",
+        "description": ("One message per recruiter listing every candidate due that day, with "
+                        "company, joining date, day count, what to do and a link to each "
+                        f"health check{when}. Turned off, each candidate gets its own message"),
         "enabled": system_enabled(settings, RECRUITER_SUMMARY), "template": _template_ref(tpl),
         "schedule_summary": f"Daily · {times[0]}" if times else "Daily",
         "recipients": "Recruiter",

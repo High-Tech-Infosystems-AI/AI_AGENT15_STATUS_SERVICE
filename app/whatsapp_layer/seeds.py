@@ -4,6 +4,8 @@ clawback notifications with no rules, or by reset-defaults.
 Templates are created as drafts (en_US, UTILITY); the engine skips with
 `template_not_approved` until each is approved.
 
+The list templates (contract §6.4) carry a text header; the others have none.
+
 Deviation: the contract's template bodies end with `{{app_link}}`, but the
 same contract (and Meta) forbid a body ending with a variable, so the seeds
 end with "{{app_link}}." — wording otherwise unchanged.
@@ -30,11 +32,13 @@ DEFAULT_TEMPLATES: List[Dict] = [
                       "here: {{app_link}}."),
     },
     {
-        "name": "clawback_health_checks_batch", "purpose": "recruiter_batch",
-        # Contract §6.1: one combined message per recruiter per day.
-        "body_text": ("Hi {{recruiter_name}}, you have {{candidate_count}} clawback health checks "
-                      "due today: {{candidate_list}}. Also pending from earlier days: "
-                      "{{overdue_count}}. Please record each outcome here: {{app_link}}."),
+        "name": "clawback_daily_checklist", "purpose": "recruiter_batch",
+        # Contract §6.4: one list per recruiter per day (split into parts).
+        "header_text": "Today's clawback check-ins",
+        "body_text": ("Hi {{recruiter_name}}, here are your clawback check-ins for today "
+                      "({{part_label}}):\n\n{{candidate_list}}\n\nStill pending from earlier "
+                      "days: {{overdue_count}}. Open each link to see the candidate's details "
+                      "and record how the check-in went."),
     },
     {
         "name": "clawback_final_validation_due", "purpose": "final_validation",
@@ -43,31 +47,38 @@ DEFAULT_TEMPLATES: List[Dict] = [
                       "Please complete the final status and eligibility validation: {{app_link}}."),
     },
     {
-        "name": "clawback_team_digest", "purpose": "team_digest",
-        "body_text": ("Hi {{recipient_name}}, clawback summary for {{scope_label}} "
-                      "({{period_label}}): {{active_count}} active, {{due_count}} checks due, "
-                      "{{done_count}} done, {{missed_count}} missed, {{at_risk_count}} at risk, "
-                      "{{ending_soon_count}} cooling periods ending within 7 days. "
-                      "Details: {{app_link}}."),
+        "name": "clawback_team_checklist", "purpose": "team_digest",
+        "header_text": "Team clawback check-ins",
+        "body_text": ("Hi {{recipient_name}}, here are today's clawback check-ins for your team "
+                      "({{part_label}}), grouped by recruiter. Checks missed "
+                      "({{period_label}}): {{missed_count}}.\n\n{{candidate_list}}\n\n"
+                      "Each link opens that candidate's health check."),
     },
 ]
 
 _FINAL = "final_validation"
 
 DEFAULT_RULES: List[Dict] = [
-    {"name": "Offer accepted, pre-joining", "anchor": "offer_accepted", "start_day": 1,
+    {"name": "Offer accepted, pre-joining", "action_text": "Call to confirm joining",
+     "anchor": "offer_accepted", "start_day": 1,
      "end_day": None, "frequency_type": "every_n_days", "frequency_value": {"n": 2}},
-    {"name": "DOJ to Day 7", "anchor": "doj", "start_day": 1, "end_day": 7,
+    {"name": "DOJ to Day 7", "action_text": "First-week call",
+     "anchor": "doj", "start_day": 1, "end_day": 7,
      "frequency_type": "specific_days", "frequency_value": {"days": [1, 3, 7]}},
-    {"name": "Days 8–30", "anchor": "doj", "start_day": 8, "end_day": 30,
+    {"name": "Days 8–30", "action_text": "Weekly check-in call",
+     "anchor": "doj", "start_day": 8, "end_day": 30,
      "frequency_type": "weekly", "frequency_value": {}},
-    {"name": "Days 31–60", "anchor": "doj", "start_day": 31, "end_day": 60,
+    {"name": "Days 31–60", "action_text": "Weekly check-in call",
+     "anchor": "doj", "start_day": 31, "end_day": 60,
      "frequency_type": "weekly", "frequency_value": {}},
-    {"name": "Days 61–75", "anchor": "doj", "start_day": 61, "end_day": 75,
+    {"name": "Days 61–75", "action_text": "Twice-weekly check-in",
+     "anchor": "doj", "start_day": 61, "end_day": 75,
      "frequency_type": "weekdays", "frequency_value": {"weekdays": ["MON", "THU"]}},
-    {"name": "Days 76–90", "anchor": "doj", "start_day": 76, "end_day": 90,
+    {"name": "Days 76–90", "action_text": "Close follow-up call",
+     "anchor": "doj", "start_day": 76, "end_day": 90,
      "frequency_type": "every_n_days", "frequency_value": {"n": 2}},
-    {"name": "Cooling completed", "anchor": "cooling_end", "start_day": 0, "end_day": 0,
+    {"name": "Cooling completed", "action_text": "Final status validation",
+     "anchor": "cooling_end", "start_day": 0, "end_day": 0,
      "frequency_type": "once", "frequency_value": {}, "template_purpose": _FINAL},
 ]
 
@@ -75,9 +86,12 @@ DEFAULT_DIGEST_RULES: List[Dict] = [
     {"name": "Team leads – daily", "audience_type": "team_managers", "audience_value": {},
      "scope": "full_subtree", "frequency_type": "daily", "frequency_value": {},
      "send_time": "09:30", "priority": 10},
-    {"name": "Senior managers – weekly", "audience_type": "has_subordinate_managers",
-     "audience_value": {}, "scope": "full_subtree", "frequency_type": "weekly",
-     "frequency_value": {"weekday": "MON"}, "send_time": "09:30", "priority": 20},
+    {"name": "Senior managers – daily", "audience_type": "has_subordinate_managers",
+     "audience_value": {}, "scope": "full_subtree", "frequency_type": "daily",
+     "frequency_value": {}, "send_time": "09:30", "priority": 20},
+    {"name": "Admins – daily", "audience_type": "admins", "audience_value": {},
+     "scope": "organisation", "frequency_type": "daily", "frequency_value": {},
+     "send_time": "09:30", "priority": 30},
 ]
 
 
@@ -110,8 +124,9 @@ def ensure_default_templates(db: Session, organization_id: int,
                          is_active=1, version=1, base_name=spec["name"],
                          created_by=user_id, updated_by=user_id)
             ts.apply_fields(existing, {
-                "name": spec["name"], "purpose": purpose, "header_format": "NONE",
-                "header_text": None, "body_text": spec["body_text"], "footer_text": None,
+                "name": spec["name"], "purpose": purpose,
+                "header_format": "TEXT" if spec.get("header_text") else "NONE",
+                "header_text": spec.get("header_text"), "body_text": spec["body_text"], "footer_text": None,
                 "buttons": [], "sample_values": _sample_values(spec["body_text"]),
             })
             db.add(existing)
@@ -139,6 +154,7 @@ def seed_defaults(db: Session, organization_id: int, user_id: Optional[int],
     for spec in DEFAULT_RULES:
         purpose = spec.get("template_purpose", "recruiter_reminder")
         r = R(organization_id=organization_id, name=spec["name"], stage_label=spec["name"],
+              action_text=spec.get("action_text"),
               anchor=spec["anchor"], start_day=spec["start_day"], end_day=spec["end_day"],
               frequency_type=spec["frequency_type"], frequency_value=spec["frequency_value"],
               send_time="10:00", recipient_type="recruiter", template_id=tpl.get(purpose),

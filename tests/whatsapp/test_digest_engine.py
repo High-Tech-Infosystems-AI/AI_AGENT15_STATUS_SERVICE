@@ -14,12 +14,15 @@ def _rules():
 
 
 def test_digest_priority_dedup_one_per_person():
-    tl, senior = _rules()   # priority 10 daily, priority 20 weekly MON
-    tl_users = [{"user_id": 9, "subordinate_user_ids": [7]}, {"user_id": 20, "subordinate_user_ids": [9, 7]}]
+    tl, senior, admins = _rules()   # priority 10, 20, 30 — all daily
+    tl_users = [{"user_id": 9, "subordinate_user_ids": [7]}, {"user_id": 20, "subordinate_user_ids": [9, 7]},
+                {"user_id": 1, "subordinate_user_ids": [5]}]
     senior_users = [{"user_id": 20, "subordinate_user_ids": [9, 7, 11]}]
-    out = D.assign_recipients([(tl, tl_users), (senior, senior_users)])
-    assert set(out) == {9, 20}
-    assert out[20][0].name == "Senior managers – weekly"
+    admin_users = [{"user_id": 1, "subordinate_user_ids": []}]
+    out = D.assign_recipients([(tl, tl_users), (senior, senior_users), (admins, admin_users)])
+    assert set(out) == {1, 9, 20}
+    assert out[1][0].name == "Admins – daily" and out[1][0].scope == "organisation"
+    assert out[20][0].name == "Senior managers – daily"
     assert out[20][1]["subordinate_user_ids"] == [9, 7, 11]
     assert out[9][0].name == "Team leads – daily"
 
@@ -32,18 +35,23 @@ def test_digest_priority_tie_lowest_id_wins():
 
 
 def test_digest_schedule():
-    tl, senior = _rules()
-    assert D.is_digest_due(tl, MONDAY) and D.is_digest_due(tl, MONDAY + timedelta(days=1))
-    assert D.is_digest_due(senior, MONDAY) and not D.is_digest_due(senior, MONDAY + timedelta(days=1))
+    tl, senior, admins = _rules()
+    for r in (tl, senior, admins):
+        assert D.is_digest_due(r, MONDAY) and D.is_digest_due(r, MONDAY + timedelta(days=1))
+    weekly = D.as_digest_spec({"id": 9, "name": "w", "audience_type": "users", "frequency_type": "weekly",
+                               "frequency_value": {"weekday": "MON"}})
+    assert D.is_digest_due(weekly, MONDAY) and not D.is_digest_due(weekly, MONDAY + timedelta(days=1))
     wd = D.as_digest_spec({"id": 1, "name": "x", "audience_type": "users",
                            "frequency_type": "weekdays", "frequency_value": {"weekdays": ["MON", "THU"]}})
     assert D.is_digest_due(wd, MONDAY + timedelta(days=3)) and not D.is_digest_due(wd, MONDAY + timedelta(days=2))
 
 
 def test_digest_period():
-    tl, senior = _rules()
+    tl = _rules()[0]
     assert D.digest_period(tl, MONDAY) == (MONDAY, "today")
-    assert D.digest_period(senior, MONDAY) == (MONDAY - timedelta(days=6), "last 7 days")
+    weekly = D.as_digest_spec({"id": 9, "name": "w", "audience_type": "users", "frequency_type": "weekly",
+                               "frequency_value": {"weekday": "MON"}})
+    assert D.digest_period(weekly, MONDAY) == (MONDAY - timedelta(days=6), "last 7 days")
     wd = D.as_digest_spec({"id": 1, "name": "x", "audience_type": "users",
                            "frequency_type": "weekdays", "frequency_value": {"weekdays": ["MON", "THU"]}})
     start, _ = D.digest_period(wd, MONDAY)   # previous scheduled day = THU → period FRI..MON
@@ -57,6 +65,7 @@ def test_audience_request_mapping():
         {"audience": "all_managers", "min_level": 2, "max_level": 3}
     assert D.audience_request(mk("roles", {"role_ids": [4]})) == {"audience": "all_managers", "role_ids": [4]}
     assert D.audience_request(mk("users", {"user_ids": [7, 9]})) == {"audience": "users", "user_ids": [7, 9]}
+    assert D.audience_request(mk("admins", {})) == {"audience": "admins"}
 
 
 def test_validate_digest_fields():
