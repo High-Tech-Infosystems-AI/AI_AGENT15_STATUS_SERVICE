@@ -144,3 +144,21 @@ def test_multi_variable_send_matches_the_portal_payload(wa_db, account, monkeypa
     assert fields["bodyTemplateVariables[2]"] == '{"parameter_name":"candidate_list","text":"%s"}' % listing
     assert fields["bodyTemplateVariables[3]"] == '{"parameter_name":"overdue_count","text":"2"}'
     assert "bodyTemplateVariables[4]" not in fields
+
+
+def test_prompt_template_keeps_its_recruiter_purpose(wa_db, account, monkeypatch):
+    body = ("Hi {{recruiter_name}}, you have {{due_count}} check-ins and {{overdue_count}} pending.\r\n\r\n"
+            "Tap Show list or open {{app_link}}.\r\n")
+    prompt = {**DAILY, "name": "clawback_daily_prompt", "parameterFormat": "NAMED", "bodyText": body}
+    _use(monkeypatch, FakeProvider([prompt]))
+    ts.sync_templates(wa_db, ORG)
+    assert wa_db.query(T).one().purpose == "recruiter_batch"
+    wa_db.query(T).one().purpose = "team_digest"
+    wa_db.commit()
+    _use(monkeypatch, FakeProvider([{**prompt, "bodyText": body + "Edited."}]))
+    ts.sync_templates(wa_db, ORG)
+    assert wa_db.query(T).one().purpose == "team_digest"
+
+
+def test_note_template_stays_generic():
+    assert ts.purpose_for_import("clawback_manager_note", "Hi {{recruiter_name}}: {{note}} {{app_link}}.") == "generic"

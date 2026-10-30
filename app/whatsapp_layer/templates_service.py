@@ -431,6 +431,8 @@ def purpose_for_import(name: str, body_text: str) -> str:
         return "team_digest" if "recipient_name" in keys else "recruiter_batch"
     if "missed_count" in keys or "recipient_name" in keys:
         return "team_digest"
+    if "due_count" in keys:
+        return "recruiter_batch"
     if "candidate_name" in keys:
         return "final_validation" if "final_validation" in name else "recruiter_reminder"
     return "generic"
@@ -439,7 +441,9 @@ def purpose_for_import(name: str, body_text: str) -> str:
 def copy_provider_content(tpl, ptpl) -> None:
     """Make a template match what the provider holds, so the variables we
     send line up with the approved body."""
-    tpl.purpose = purpose_for_import(tpl.name, clean_provider_body(ptpl.body_text))
+    # A purpose already chosen stays; only unassigned templates are worked out.
+    if not tpl.purpose or tpl.purpose == "generic":
+        tpl.purpose = purpose_for_import(tpl.name, clean_provider_body(ptpl.body_text))
     apply_fields(tpl, {
         "header_format": "TEXT" if ptpl.header_text else "NONE",
         "header_text": ptpl.header_text,
