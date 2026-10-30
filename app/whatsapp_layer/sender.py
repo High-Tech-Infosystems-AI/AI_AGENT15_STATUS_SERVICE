@@ -133,6 +133,17 @@ def _fail(log: L, code: Optional[str], message: Optional[str], now: datetime) ->
     log.next_attempt_at = None
 
 
+def apply_send_result(log: L, result, now: datetime, correlation: str) -> None:
+    """Record a provider answer for a message sent outside `send_log`."""
+    log.attempts = (log.attempts or 0) + 1
+    log.correlation_id = correlation
+    log.provider_ref = result.provider_ref
+    if result.accepted:
+        log.status, log.submitted_at = "submitted", now
+    else:
+        _fail(log, result.error_code, result.error_message, now)
+
+
 def send_log(db: Session, log_id: int, now: Optional[datetime] = None) -> Optional[L]:
     """Send one queued log through the org's provider and record the result."""
     from app.whatsapp_layer import accounts as acct_svc, templates_service as ts

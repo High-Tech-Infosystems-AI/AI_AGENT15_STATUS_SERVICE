@@ -65,6 +65,9 @@ VARIABLES: List[Dict] = [
     _v("at_risk_count", "At risk", "Digest", "2", _DIGEST),
     _v("ending_soon_count", "Ending within 7 days", "Digest", "5", _DIGEST),
     _v("final_pending_count", "Final validations pending", "Digest", "2", _DIGEST),
+    # Manager notes (Today's check-ins page)
+    _v("sender_name", "Sent by", "Notes", "Meera Iyer", ["generic"]),
+    _v("note", "Message", "Notes", "Please finish today's calls before 5 pm", ["generic"]),
     # Links
     _v("app_link", "Link to the HRMIS", "Links",
        "https://hrmis.example.com/clawback/health-checks", list(PURPOSES)),
@@ -75,9 +78,9 @@ VARIABLES_BY_KEY: Dict[str, Dict] = {v["key"]: v for v in VARIABLES}
 # app_link path per purpose (contract §2.3). `generic` has no fixed target.
 APP_LINK_PATHS = {
     "recruiter_reminder": "/clawback/health-checks?check={health_check_id}",
-    "recruiter_batch": "/clawback/health-checks",
+    "recruiter_batch": "/clawback/today",
     "final_validation": "/job-pipeline/{job_id}?tab=clawback",
-    "team_digest": "/clawback/team-health",
+    "team_digest": "/clawback/today",
 }
 
 

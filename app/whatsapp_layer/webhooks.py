@@ -90,7 +90,12 @@ def apply_events(db: Session, account: A, events: List[WebhookEvent]) -> List[in
     changed: List[int] = []
     now = datetime.utcnow()
     for ev in events:
-        if ev.kind == "message_status":
+        if ev.kind == "inbound":
+            from app.whatsapp_layer import today as today_list
+            if ev.recipient and (ev.text or "").strip().lower() in today_list.SHOW_LIST_WORDS:
+                changed.extend(today_list.send_list_reply(db, account, ev.recipient,
+                                                          ev.provider_message_id))
+        elif ev.kind == "message_status":
             at = datetime.utcfromtimestamp(ev.timestamp) if ev.timestamp else now
             log = _match_log(db, account, ev, at)
             if log is None or not ev.status:

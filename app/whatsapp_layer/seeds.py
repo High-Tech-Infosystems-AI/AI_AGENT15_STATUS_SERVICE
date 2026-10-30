@@ -58,6 +58,32 @@ DEFAULT_TEMPLATES: List[Dict] = [
 
 _FINAL = "final_validation"
 
+# Short reminders with a "Show list" button (contract §6.7): the formatted list
+# is sent as the reply. Used in place of the list templates once approved.
+SHOW_LIST_BUTTON = [{"type": "QUICK_REPLY", "label": "Show list"}]
+DEFAULT_TEMPLATES += [
+    {
+        "name": "clawback_daily_prompt", "purpose": "recruiter_batch",
+        "header_text": "Today's clawback check-ins", "buttons": SHOW_LIST_BUTTON,
+        "body_text": ("Hi {{recruiter_name}}, you have {{due_count}} clawback check-ins for today "
+                      "and {{overdue_count}} pending from earlier days.\n\nTap Show list to see "
+                      "them here, or open and update them at {{app_link}}."),
+    },
+    {
+        "name": "clawback_team_prompt", "purpose": "team_digest",
+        "header_text": "Team clawback check-ins", "buttons": SHOW_LIST_BUTTON,
+        "body_text": ("Hi {{recipient_name}}, your team has {{due_count}} clawback check-ins for "
+                      "today across {{recruiter_count}} recruiters, and {{missed_count}} missed "
+                      "({{period_label}}).\n\nTap Show list to see them here, or open them at "
+                      "{{app_link}}."),
+    },
+    {
+        "name": "clawback_manager_note", "purpose": "generic",
+        "body_text": ("Hi {{recruiter_name}}, {{sender_name}} sent you a note about your clawback "
+                      "check-ins: {{note}}\n\nOpen your list at {{app_link}}."),
+    },
+]
+
 DEFAULT_RULES: List[Dict] = [
     {"name": "Offer accepted, pre-joining", "action_text": "Call to confirm joining",
      "anchor": "offer_accepted", "start_day": 1,
@@ -127,7 +153,7 @@ def ensure_default_templates(db: Session, organization_id: int,
                 "name": spec["name"], "purpose": purpose,
                 "header_format": "TEXT" if spec.get("header_text") else "NONE",
                 "header_text": spec.get("header_text"), "body_text": spec["body_text"], "footer_text": None,
-                "buttons": [], "sample_values": _sample_values(spec["body_text"]),
+                "buttons": spec.get("buttons") or [], "sample_values": _sample_values(spec["body_text"]),
             })
             db.add(existing)
             db.flush()

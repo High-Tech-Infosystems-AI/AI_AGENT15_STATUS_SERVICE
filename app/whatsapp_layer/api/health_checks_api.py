@@ -22,7 +22,8 @@ from app.whatsapp_layer import clawback_engine as E
 from app.whatsapp_layer import digest_engine as D
 from app.whatsapp_layer.api.common import get_scoped, paginate, read_org, unprocessable
 from app.whatsapp_layer.models import ClawbackHealthCheck as H, WhatsAppMessageLog as L
-from app.whatsapp_layer.schemas import HealthCheckRecord
+from app.whatsapp_layer import sender, today as today_list
+from app.whatsapp_layer.schemas import HealthCheckRecord, TodayMessage, TodayNotify
 
 logger = logging.getLogger("app_logger")
 router = APIRouter()
@@ -128,6 +129,54 @@ def record_health_check(check_id: int, body: HealthCheckRecord,
     db.commit()
     db.refresh(chk)
     return serialize_checks(db, [chk])[0]
+
+
+def _require_manager_of(ctx: AuthCtx, org: int, recruiter_user_id: int) -> None:
+    visible = visible_recruiters(ctx, org)
+    if visible is not None and (recruiter_user_id == ctx.user_id or recruiter_user_id not in visible):
+        raise HTTPException(403, "Only this recruiter's managers or an admin can do this")
+
+
+@router.get("/today")
+def today_checkins(organization_id: Optional[int] = Query(None),
+                   ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
+    """Today's check-ins and earlier open ones, grouped by recruiter (contract §6.7)."""
+    ctx.require(VIEW)
+    org = read_org(organization_id, ctx)
+    visible = visible_recruiters(ctx, org)
+    try:
+        data = today_list.build_today(db, org, visible)
+    except clients.ServiceClientError as exc:
+        raise HTTPException(502, str(exc))
+    for g in data["groups"]:
+        rid = g["recruiter_user_id"]
+        g["can_message"] = bool(rid) and (visible is None or (rid != ctx.user_id and rid in visible))
+    return data
+
+
+@router.post("/today/notify")
+def today_notify(body: TodayNotify, organization_id: Optional[int] = Query(None),
+                 ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
+    ctx.require(RECORD)
+    org = read_org(organization_id, ctx)
+    _require_manager_of(ctx, org, body.recruiter_user_id)
+    try:
+        log = today_list.send_prompt(db, org, body.recruiter_user_id, ctx.user_id)
+    except clients.ServiceClientError as exc:
+        raise HTTPException(502, str(exc))
+    if log is None:
+        raise HTTPException(409, "This recruiter has nothing open today")
+    return sender.serialize_log(log)
+
+
+@router.post("/today/message")
+def today_message(body: TodayMessage, organization_id: Optional[int] = Query(None),
+                  ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
+    ctx.require(RECORD)
+    org = read_org(organization_id, ctx)
+    _require_manager_of(ctx, org, body.recruiter_user_id)
+    return sender.serialize_log(
+        today_list.send_note(db, org, body.recruiter_user_id, ctx.user_id, body.message))
 
 
 @router.get("/clawback-summary")

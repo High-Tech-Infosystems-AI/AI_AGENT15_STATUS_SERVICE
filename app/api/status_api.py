@@ -25,6 +25,7 @@ NO_AUTH_PATHS = [
     "/notifications/event",
     "/status/notifications/event",
     # WhatsApp provider webhooks — token in the path identifies the account.
+    "/status/whatsapp/webhooks/omnichannel",
     "/status/whatsapp/webhooks/omnichannel/{webhook_token}",
     "/test",
     "/test/",

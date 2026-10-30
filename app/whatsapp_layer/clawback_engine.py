@@ -430,6 +430,20 @@ def _list_record(e: Dict[str, Any], text: str) -> Dict[str, Any]:
             "day_number": e.get("day"), "entry": text}
 
 
+def message_parts(template, parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A short reminder template (no {{candidate_list}}, the list comes on "Show
+    list") goes out once, covering every candidate; a list template per part."""
+    from app.whatsapp_layer import templates_service as ts
+    from app.whatsapp_layer import variables as V
+    if not parts or template is None or \
+            "candidate_list" in ts.extract_keys(template.body_text_named):
+        return parts
+    merged = {**parts[0], "part_label": V.part_label(int(parts[0]["candidate_count"]), 1, 1)}
+    merged["candidates"] = [c for p in parts for c in p["candidates"]]
+    merged["health_check_ids"] = [i for p in parts for i in p.get("health_check_ids") or []] or None
+    return [merged]
+
+
 def candidate_list_parts(entries: List[Dict[str, Any]],
                          base_url: Optional[str]) -> List[Dict[str, Any]]:
     """The recruiter's list split into messages (contract §6.4). One dict
@@ -636,7 +650,8 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
             send_at = local_to_utc_naive(
                 today, parse_hhmm(min(e["rule"].send_time for e in msg.entries), time(10, 0)),
                 st.timezone)
-            for n, part in enumerate(candidate_list_parts(msg.entries, base), start=1):
+            parts = message_parts(template, candidate_list_parts(msg.entries, base))
+            for n, part in enumerate(parts, start=1):
                 fields = _log_fields(organization_id, "batch_reminder", batch_key(rid, today, n),
                                      None, None, None, rid, recipients, account, template,
                                      now_utc)

@@ -140,6 +140,15 @@ class SendNow(_Body):
     candidate_job_id: int
 
 
+class TodayNotify(_Body):
+    recruiter_user_id: int
+
+
+class TodayMessage(_Body):
+    recruiter_user_id: int
+    message: str = Field(..., min_length=1, max_length=500)
+
+
 class HealthCheckRecord(_Body):
     outcome: str
     notes: Optional[str] = Field(None, max_length=5000)
