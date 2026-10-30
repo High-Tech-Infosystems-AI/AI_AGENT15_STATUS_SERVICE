@@ -224,7 +224,10 @@ def send_prompt(db: Session, org: int, recruiter_user_id: int, ctx_user_id: int)
     part.pop("health_check_ids", None)
     return _send_manual(db, org, st, account, template, recruiter_user_id, user, ctx_user_id, "notify", {
         "recruiter_name": user.get("name") or "-", "due_count": str(len(due)),
-        "overdue_count": str(overdue), **part, "app_link": V.app_link(st.app_base_url, "recruiter_batch")})
+        "overdue_count": str(overdue), **part,
+        "candidate_names": V.names_list([c["candidate_name"] for g in data["groups"]
+                                         for c in g["candidates"] if not c["overdue"]]),
+        "app_link": V.app_link(st.app_base_url, "recruiter_batch")})
 
 
 def send_note(db: Session, org: int, recruiter_user_id: int, ctx_user_id: int, note: str):

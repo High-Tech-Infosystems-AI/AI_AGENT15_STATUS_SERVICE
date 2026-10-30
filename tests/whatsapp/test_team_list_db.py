@@ -54,7 +54,7 @@ def org(wa_db, monkeypatch):
     db.flush()
     seeds.seed_defaults(db, ORG, user_id=1)
     for tpl in db.query(T).all():
-        tpl.approval_status = "draft" if tpl.name.endswith("_prompt") else "approved"
+        tpl.approval_status = "draft" if tpl.name.endswith(("_prompt", "_names")) else "approved"
     list_tpl = db.query(T).filter(T.name == "clawback_team_checklist").one()
     for rule in db.query(DR).all():
         rule.template_id = list_tpl.id

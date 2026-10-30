@@ -44,7 +44,7 @@ def org(wa_db, monkeypatch):
     db.flush()
     seeds.seed_defaults(db, ORG, user_id=1)
     for tpl in db.query(T).all():
-        tpl.approval_status = "draft" if tpl.name.endswith("_prompt") else "approved"
+        tpl.approval_status = "draft" if tpl.name.endswith(("_prompt", "_names")) else "approved"
     db.commit()
     return db
 
@@ -118,7 +118,7 @@ def test_template_not_approved_and_account_inactive(org):
     assert db.query(L).one().skip_reason == "template_not_approved"
 
     for tpl in db.query(T).all():
-        tpl.approval_status = "draft" if tpl.name.endswith("_prompt") else "approved"
+        tpl.approval_status = "draft" if tpl.name.endswith(("_prompt", "_names")) else "approved"
     db.query(A).update({A.status: "disabled"})
     db.commit()
     E.evaluate_org_reminders(db, ORG, [_item(2, 8)], NOW)
@@ -173,7 +173,7 @@ def test_reset_defaults_replaces_rules(org):
     db.commit()
     assert len(rules) == 7 and len(digests) == 3
     assert len(E.active_rules(db, ORG)) == 7
-    assert db.query(T).filter(T.deleted_at.is_(None)).count() == 7   # templates not duplicated
+    assert db.query(T).filter(T.deleted_at.is_(None)).count() == 10   # templates not duplicated
 
 
 def test_long_list_split_into_parts(org):

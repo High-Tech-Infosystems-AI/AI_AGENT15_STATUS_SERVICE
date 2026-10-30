@@ -88,9 +88,10 @@ def test_reminder_prompt_is_one_message_whatever_the_list_size(org):
     items = [_item(100 + i, 7, f"Candidate With A Long Name {i}") for i in range(14)]
     E.evaluate_org_reminders(org, ORG, items, NOW, dispatch=lambda _i: None)
     log = org.query(L).one()
-    assert log.template_name == "clawback_daily_prompt" and log.params["due_count"] == "14"
+    assert log.template_name == "clawback_daily_names" and log.params["due_count"] == "14"
+    assert log.params["candidate_names"].startswith("Candidate With A Long Name 0, ")
     assert len(log.health_check_ids) == 14
-    assert "Tap Show list" in log.rendered_body and "/clawback/today" in log.rendered_body
+    assert "tap Show list" in log.rendered_body and "/clawback/today" in log.rendered_body
 
 
 def test_team_prompt_is_one_message(org, monkeypatch):

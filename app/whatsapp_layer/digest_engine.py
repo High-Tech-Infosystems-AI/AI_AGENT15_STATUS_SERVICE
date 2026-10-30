@@ -410,6 +410,9 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
         base_params.update({
             "due_count": str(len(mine)),
             "recruiter_count": str(len({e["recruiter_user_id"] for e in mine})),
+            "recruiter_summary": V.names_list(sorted(
+                f"{rec_names.get(rid) or 'Unassigned'} ({n})" for rid, n in
+                Counter(e["recruiter_user_id"] for e in mine).items())),
         })
         parts = team_list_parts(mine, rec_names, st.app_base_url)
         if template is not None and parts and \
@@ -454,10 +457,13 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
 def run_digests(db: Session, now_utc: Optional[datetime] = None,
                 dispatch: Optional[Callable[[int], None]] = None) -> Dict[str, int]:
     """evaluate_clawback_digests: every enabled org."""
+    from app.whatsapp_layer import eod_report
     totals = {"orgs": 0, "queued": 0, "skipped": 0, "empty": 0}
     for org_id in E.enabled_org_ids(db):
         try:
             stats = run_org_digests(db, org_id, now_utc, dispatch)
+            eod = eod_report.run_org_eod(db, org_id, now_utc, dispatch)
+            stats = {k: stats[k] + eod[k] for k in stats}
             totals["orgs"] += 1
             for k in ("queued", "skipped", "empty"):
                 totals[k] += stats[k]
