@@ -48,3 +48,7 @@ def test_check_alerts():
     assert _case(_row(), {"id": 6, "status": "pending", "due_date": TODAY})["alerts"] == ["due_today"]
     assert _case(_row(), {"id": 7, "status": "done", "outcome": "at_risk", "due_date": TODAY})["alerts"] == ["at_risk"]
     assert _case(_row(), {"id": 8, "status": "done", "outcome": "engaged", "due_date": TODAY})["alerts"] == []
+
+
+def test_day_number_stops_at_the_end_of_the_period():
+    assert _case(_row(ago=200, cooling=30))["day_number"] == 30
