@@ -478,7 +478,10 @@ def import_from_provider(db: Session, account) -> Dict[str, int]:
                         account.organization_id, tpl.approval_status)
             continue
         changed = False
-        if tpl.approval_status == "draft":
+        # Numbered bodies on the provider stay as they are: HRMIS keeps the named form.
+        edited = ((ptpl.parameter_format or "").upper() == "NAMED"
+                  and clean_provider_body(ptpl.body_text) != tpl.body_text_named)
+        if tpl.approval_status == "draft" or edited:
             copy_provider_content(tpl, ptpl)
             changed = True
         tpl.account_id = tpl.account_id or account.id

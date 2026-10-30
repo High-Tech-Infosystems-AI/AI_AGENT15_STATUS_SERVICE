@@ -89,6 +89,19 @@ def admin_users(db: Session, organization_id: int) -> List[Dict]:
              "direct_team_user_ids": []} for r in rows]
 
 
+def find_by_phone(db: Session, organization_id: int, phone_digits: str) -> Optional[Dict]:
+    """The org's (or a platform super admin's) user with this WhatsApp number."""
+    rows = db.execute(text(
+        "SELECT id FROM users WHERE phone_number LIKE :tail AND deleted_at IS NULL "
+        "AND (organization_id = :org OR organization_id IS NULL)"),
+        {"tail": f"%{phone_digits[-8:]}", "org": organization_id}).fetchall()
+    users = get_users(db, [r[0] for r in rows])
+    for u in users.values():
+        if u["enabled"] and (u["phone_e164"] or "").lstrip("+") == phone_digits:
+            return u
+    return None
+
+
 def user_names(db: Session, user_ids: Iterable[int]) -> Dict[int, str]:
     ids = sorted({int(i) for i in user_ids if i})
     if not ids:

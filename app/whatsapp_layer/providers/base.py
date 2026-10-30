@@ -125,7 +125,8 @@ class AccountHealth:
 @dataclass
 class WebhookEvent:
     """One status change understood from a webhook payload."""
-    kind: str                                 # message_status | template_status
+    kind: str                                 # message_status | template_status | inbound
+    text: Optional[str] = None                # inbound: button label or message text
     status: Optional[str] = None              # sent|delivered|read|failed (message) / approval status (template)
     provider_message_id: Optional[str] = None
     recipient: Optional[str] = None           # digits, no '+'
@@ -165,6 +166,11 @@ class WhatsAppProvider:
         raise NotImplementedError
 
     def delete_template(self, creds: ProviderCredentials, name: str) -> None:
+        raise NotImplementedError
+
+    def send_text(self, creds: ProviderCredentials, to_digits: str, text: str,
+                  correlation_id: str) -> SendResult:
+        """Free-form text; only delivered within 24 hours of the person's last message."""
         raise NotImplementedError
 
     def get_send_status(self, creds: ProviderCredentials,

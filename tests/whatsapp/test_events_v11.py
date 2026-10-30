@@ -207,7 +207,7 @@ def org(wa_db, monkeypatch):
     db.flush()
     seeds.seed_defaults(db, ORG, user_id=1)
     for tpl in db.query(T).all():
-        tpl.approval_status = "approved"
+        tpl.approval_status = "draft" if tpl.name.endswith("_prompt") else "approved"
     db.commit()
     return db
 

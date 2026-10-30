@@ -330,6 +330,7 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
                     dispatch: Optional[Callable[[int], None]] = None,
                     items: Optional[List[Dict[str, Any]]] = None) -> Dict[str, int]:
     from app.whatsapp_layer import accounts as acct_svc, clients, people, sender
+    from app.whatsapp_layer import templates_service as ts
     from app.whatsapp_layer import variables as V
     from app.whatsapp_layer.models import WhatsAppMessageLog as L
 
@@ -411,6 +412,10 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
             "recruiter_count": str(len({e["recruiter_user_id"] for e in mine})),
         })
         parts = team_list_parts(mine, rec_names, st.app_base_url)
+        if template is not None and parts and \
+                "candidate_list" not in ts.extract_keys(template.body_text_named):
+            parts = [{**parts[0], "part_label": V.part_label(len(mine), 1, 1),
+                      "candidates": [c for p in parts for c in p["candidates"]]}]
         snapshot = {"period_start": start.isoformat(), "period_end": today.isoformat(),
                     "scope": rule.scope, "scope_user_count": n_rec, "totals": totals,
                     "by_stage": agg["by_stage"],

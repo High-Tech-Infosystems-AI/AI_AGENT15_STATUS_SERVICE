@@ -52,6 +52,9 @@ class MockProvider(WhatsAppProvider):
                           raw={"totalNumbersSuccess": 1, "totalNumbersFailed": 0,
                                "totalNumbersDuplicate": 0, "batchId": batch})
 
+    def send_text(self, creds, to_digits, text, correlation_id) -> SendResult:
+        return self.send_template(creds, to_digits, None, [], [], correlation_id)
+
     def create_template(self, creds, spec) -> ProviderTemplate:
         return ProviderTemplate(name=spec.name, language=spec.language,
                                 provider_template_id=f"mock-{next(_counter)}",

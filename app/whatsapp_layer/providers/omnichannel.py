@@ -231,6 +231,17 @@ class OmnichannelProvider(WhatsAppProvider):
                               error_message=exc.message, retryable=exc.retryable)
         return self.parse_send_response(resp.status_code, self._json(resp), resp.text or "")
 
+    def send_text(self, creds, to_digits, text, correlation_id) -> SendResult:
+        fields = [(k, (None, v)) for k, v in (
+            ("messageType", "TEXT"), ("destinationNo", to_digits), ("content", text),
+            ("batchId", "0"), ("campaignName", correlation_id), ("allowDuplicate", "true"))]
+        try:
+            resp = self._request("POST", creds, "/whatsapp/message/sendbulk", files=fields)
+        except ProviderError as exc:
+            return SendResult(accepted=False, error_code="network",
+                              error_message=exc.message, retryable=exc.retryable)
+        return self.parse_send_response(resp.status_code, self._json(resp), resp.text or "")
+
     # ------------------------------------------------------------------
     # Templates
     # ------------------------------------------------------------------
@@ -456,6 +467,17 @@ class OmnichannelProvider(WhatsAppProvider):
                         raw=value,
                     ))
                     continue
+                for msg in value.get("messages") or []:
+                    # A reply: Meta's `button` (template quick reply),
+                    # `interactive` or `text` message shapes.
+                    if not isinstance(msg, dict):
+                        continue
+                    reply = (msg.get("interactive") or {}).get("button_reply") or {}
+                    text = ((msg.get("button") or {}).get("text") or reply.get("title")
+                            or (msg.get("text") or {}).get("body"))
+                    events.append(WebhookEvent(
+                        kind="inbound", text=text, provider_message_id=msg.get("id"),
+                        recipient=str(msg.get("from") or "") or None, raw=msg))
                 for st in value.get("statuses") or []:
                     if not isinstance(st, dict):
                         continue
