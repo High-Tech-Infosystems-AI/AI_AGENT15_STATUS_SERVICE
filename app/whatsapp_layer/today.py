@@ -24,10 +24,27 @@ SHOW_LIST_WORDS = {"show list", "show my list", "list"}
 TEXT_MAX_CHARS = 3900   # WhatsApp allows 4096 for a text message
 
 
-def _candidate(e: Dict[str, Any], base_url: Optional[str]) -> Dict[str, Any]:
+def _progress(item: Optional[Dict[str, Any]], today: date) -> Dict[str, Any]:
+    """Where the clawback period stands: joining date, completion, days left, %."""
+    if not item:
+        return {"joined_at": None, "offer_accepted_at": None, "completion_date": None,
+                "cooling_period_days": None, "days_pending": None, "progress_percent": None}
+    joined, comp, cp = E.parse_date(item.get("joined_at")), E.completion_date_of(item), E.cooling_days(item)
+    percent = None
+    if joined and cp > 0:
+        percent = max(0, min(100, round((today - joined).days / cp * 100)))
+    return {"joined_at": item.get("joined_at"), "offer_accepted_at": item.get("offer_accepted_at"),
+            "completion_date": comp.isoformat() if comp else None,
+            "cooling_period_days": cp if cp > 0 else None,
+            "days_pending": max(0, (comp - today).days) if comp else None,
+            "progress_percent": percent}
+
+
+def _candidate(e: Dict[str, Any], base_url: Optional[str], today: date) -> Dict[str, Any]:
     item, chk = e["item"], e.get("check")
     cp = E.cooling_days(item)
     return {
+        **_progress(item, today),
         "check_id": chk.id if chk is not None else None,
         "candidate_job_id": item.get("candidate_job_id"),
         "candidate_id": item.get("candidate_id"),
@@ -35,10 +52,7 @@ def _candidate(e: Dict[str, Any], base_url: Optional[str]) -> Dict[str, Any]:
         "company_name": item.get("company_name") or "-",
         "job_id": item.get("job_id"),
         "job_title": item.get("job_title") or "-",
-        "joined_at": item.get("joined_at"),
-        "offer_accepted_at": item.get("offer_accepted_at"),
         "day_number": e.get("day"),
-        "cooling_period_days": cp if cp > 0 else None,
         "progress": V.progress_text(
             e.get("anchor"), joining_date=E.parse_date(item.get("joined_at")),
             day_number=e.get("day"), cooling_period_days=str(cp) if cp > 0 else "-",
@@ -55,17 +69,17 @@ def _candidate(e: Dict[str, Any], base_url: Optional[str]) -> Dict[str, Any]:
 
 
 def _overdue(db: Session, org: int, today: date, base_url: Optional[str],
-             scope: Optional[Set[int]]) -> List[Dict[str, Any]]:
+             scope: Optional[Set[int]], items_by_cj: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
     from app.whatsapp_layer.models import ClawbackHealthCheck as H
     q = db.query(H).filter(H.organization_id == org, H.status.in_(("pending", "missed")),
                            H.due_date < today)
     if scope is not None:
         q = q.filter(H.recruiter_user_id.in_(list(scope)))
     return [{
+        **_progress(items_by_cj.get(c.candidate_job_id), today),
         "check_id": c.id, "candidate_job_id": c.candidate_job_id, "candidate_id": c.candidate_id,
         "candidate_name": c.candidate_name or "-", "company_name": c.company_name or "-",
-        "job_id": c.job_id, "job_title": c.job_title or "-", "joined_at": None,
-        "offer_accepted_at": None, "day_number": c.day_number, "cooling_period_days": None,
+        "job_id": c.job_id, "job_title": c.job_title or "-", "day_number": c.day_number,
         "progress": f"was due {c.due_date.strftime('%d %b')}", "action": c.stage_label or "Check-in",
         "status": c.status, "outcome": c.outcome, "notes": c.notes,
         "due_date": c.due_date.isoformat(), "overdue": True,
@@ -88,8 +102,9 @@ def build_today(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[str, A
     for e in due:
         rid = e["recruiter_user_id"]
         if scope is None or (rid is not None and int(rid) in scope):
-            by_rec.setdefault(rid, []).append(_candidate(e, base))
-    for c in _overdue(db, org, today, base, scope):
+            by_rec.setdefault(rid, []).append(_candidate(e, base, today))
+    items_by_cj = {int(i["candidate_job_id"]): i for i in items if i.get("candidate_job_id")}
+    for c in _overdue(db, org, today, base, scope, items_by_cj):
         by_rec.setdefault(c.pop("recruiter_user_id"), []).append(c)
     users = people.get_users(db, [r for r in by_rec if r])
     groups = []
