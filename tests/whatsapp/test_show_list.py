@@ -175,3 +175,24 @@ def test_webhook_token_found_in_header_or_query_only_if_correct(org):
     assert webhook_api._token_account(org, _request(query=f"hub.verify_token={good}".encode())) is not None
     assert webhook_api._token_account(org, _request([("x-webhook-token", "b" * 43)])) is None
     assert webhook_api._token_account(org, _request()) is None
+
+
+def test_signed_webhook_needs_a_signature_made_with_the_token(org):
+    import hashlib, hmac
+    raw = b'{"entry": []}'
+    good = hmac.new(b"a" * 43, raw, hashlib.sha256).hexdigest()
+    assert webhook_api._signed_account(org, f"sha256={good}", raw) is not None
+    assert webhook_api._signed_account(org, good.upper(), raw) is not None
+    bad = hmac.new(b"wrong", raw, hashlib.sha256).hexdigest()
+    assert webhook_api._signed_account(org, f"sha256={bad}", raw) is None
+    assert webhook_api._signed_account(org, "", raw) is None
+    assert webhook_api._signed_account(org, f"sha256={good}", b"changed") is None
+
+
+def test_unverified_call_is_kept_but_not_acted_on(org):
+    from app.whatsapp_layer.models import WhatsAppWebhookEvent as W
+    webhook_api._store_unverified(org, {"x-hub-signature-256": "sha256=x", "authorization": "secret"},
+                                  json.dumps(_inbound("919876543210")).encode())
+    ev = org.query(W).one()
+    assert ev.processed == 0 and ev.error == "unverified" and ev.account_id is None
+    assert "authorization" not in ev.headers and org.query(L).count() == 0
