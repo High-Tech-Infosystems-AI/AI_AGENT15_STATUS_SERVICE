@@ -409,9 +409,78 @@ def apply_provider_status(tpl, ptpl) -> bool:
     return changed
 
 
+def clean_provider_body(text: Optional[str]) -> str:
+    """BroadNet returns CRLF line ends and a trailing line break."""
+    return (text or "").replace("\r\n", "\n").strip()
+
+
+def purpose_for_import(name: str, body_text: str) -> str:
+    """Which messages an imported template can carry, from its variables."""
+    keys = set(extract_keys(body_text))
+    if "candidate_list" in keys:
+        return "team_digest" if "recipient_name" in keys else "recruiter_batch"
+    if "missed_count" in keys or "recipient_name" in keys:
+        return "team_digest"
+    if "candidate_name" in keys:
+        return "final_validation" if "final_validation" in name else "recruiter_reminder"
+    return "generic"
+
+
+def copy_provider_content(tpl, ptpl) -> None:
+    """Make a template match what the provider holds, so the variables we
+    send line up with the approved body."""
+    tpl.purpose = purpose_for_import(tpl.name, clean_provider_body(ptpl.body_text))
+    apply_fields(tpl, {
+        "header_format": "TEXT" if ptpl.header_text else "NONE",
+        "header_text": ptpl.header_text,
+        "body_text": clean_provider_body(ptpl.body_text),
+        "footer_text": ptpl.footer_text,
+        "sample_values": ptpl.sample_values or None,
+    })
+
+
+def import_from_provider(db: Session, account) -> Dict[str, int]:
+    """Bring the account's provider templates into HRMIS: add the missing ones,
+    refresh the content of local drafts with the same name, update statuses."""
+    from app.whatsapp_layer import accounts as acct_svc
+    from app.whatsapp_layer.models import WhatsAppTemplate as T
+    from app.whatsapp_layer.providers.registry import get_provider
+
+    imported = updated = 0
+    for ptpl in get_provider(account.provider).list_templates(acct_svc.credentials(account)):
+        if not ptpl.name or not ptpl.body_text:
+            continue
+        language = ptpl.language or "en_US"
+        tpl = (db.query(T).filter(T.organization_id == account.organization_id, T.name == ptpl.name,
+                                  T.language == language, T.deleted_at.is_(None)).first())
+        if tpl is None:
+            if ptpl.category not in CATEGORIES:
+                logger.info("Skipping provider template %s: category %s", ptpl.name, ptpl.category)
+                continue
+            tpl = T(organization_id=account.organization_id, account_id=account.id, name=ptpl.name,
+                    language=language, category=ptpl.category, approval_status="pending",
+                    provider_template_id=ptpl.provider_template_id)
+            copy_provider_content(tpl, ptpl)
+            db.add(tpl)
+            apply_provider_status(tpl, ptpl)
+            imported += 1
+            logger.info("Imported template %s for org %s (%s)", tpl.name,
+                        account.organization_id, tpl.approval_status)
+            continue
+        changed = False
+        if tpl.approval_status == "draft":
+            copy_provider_content(tpl, ptpl)
+            changed = True
+        tpl.account_id = tpl.account_id or account.id
+        if tpl.approval_status != "disabled" and apply_provider_status(tpl, ptpl):
+            changed = True
+        updated += 1 if changed else 0
+    return {"imported": imported, "updated": updated}
+
+
 def sync_templates(db: Session, organization_id: Optional[int] = None) -> Dict[str, int]:
-    """Poll `pending` templates through the provider. Providers without a
-    template read API (Omnichannel today, UNCONFIRMED) are skipped quietly."""
+    """Import the provider's templates, then poll any still `pending`. Providers
+    without a template read API are skipped quietly."""
     from app.whatsapp_layer import accounts as acct_svc
     from app.whatsapp_layer.models import WhatsAppProviderAccount as A, WhatsAppTemplate as T
     from app.whatsapp_layer.providers.base import ProviderError, ProviderUnsupported
@@ -421,7 +490,29 @@ def sync_templates(db: Session, organization_id: Optional[int] = None) -> Dict[s
                            T.account_id.isnot(None))
     if organization_id is not None:
         q = q.filter(T.organization_id == organization_id)
-    checked = updated = 0
+    checked = updated = imported = failed = 0
+    accounts = db.query(A).filter(A.status == "active")
+    if organization_id is not None:
+        accounts = accounts.filter(A.organization_id == organization_id)
+    for account in accounts.all():
+        try:
+            res = import_from_provider(db, account)
+            imported += res["imported"]
+            updated += res["updated"]
+            db.commit()
+        except ProviderUnsupported:
+            db.rollback()
+            logger.info("Template list API unavailable for account %s", account.id)
+        except ProviderError as exc:
+            db.rollback()
+            failed += 1
+            logger.warning("Template import failed for account %s: %s", account.id, exc.message)
+            if exc.auth_error:
+                acct_svc.mark_auth_error(db, account, exc.message)
+        except Exception as exc:
+            db.rollback()
+            failed += 1
+            logger.warning("Template import failed for account %s: %s", account.id, exc)
     unsupported_accounts = set()
     for tpl in q.all():
         if tpl.account_id in unsupported_accounts:
@@ -449,4 +540,4 @@ def sync_templates(db: Session, organization_id: Optional[int] = None) -> Dict[s
             updated += 1
             logger.info("Template %s (%s) is now %s", tpl.id, tpl.name, tpl.approval_status)
     db.commit()
-    return {"checked": checked, "updated": updated}
+    return {"checked": checked, "updated": updated, "imported": imported, "failed": failed}

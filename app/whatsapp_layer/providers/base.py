@@ -72,6 +72,11 @@ class ProviderTemplate:
     category: Optional[str] = None
     previous_category: Optional[str] = None
     rejection_reason: Optional[str] = None
+    # Template content, when the provider returns it (used to import).
+    header_text: Optional[str] = None
+    body_text: Optional[str] = None
+    footer_text: Optional[str] = None
+    sample_values: Dict[str, str] = field(default_factory=dict)
     raw: Any = None
 
 

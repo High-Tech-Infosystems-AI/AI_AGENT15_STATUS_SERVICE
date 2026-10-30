@@ -47,10 +47,24 @@ _TEMPLATE_STATUS_MAP = {
 }
 
 
+LIST_PAGE_SIZE = 50
+LIST_MAX_PAGES = 100
+
+
 def normalise_template_status(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     return _TEMPLATE_STATUS_MAP.get(str(value).strip().upper())
+
+
+def _json_field(value: Any) -> Any:
+    """BroadNet returns some template fields as JSON inside a string."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return None
+    return value
 
 
 def _int(value: Any) -> int:
@@ -251,6 +265,11 @@ class OmnichannelProvider(WhatsAppProvider):
         if not reason and body.get("rejectionInfoJson"):
             reason = str(body.get("rejectionInfoJson"))[:500]
         pid = body.get("id")
+        header = _json_field(body.get("headerContentJson"))
+        examples = _json_field(body.get("bodyExampleJson"))
+        samples = {e["param_name"]: str(e.get("example") or "")
+                   for e in (examples if isinstance(examples, list) else [])
+                   if isinstance(e, dict) and e.get("param_name")}
         return ProviderTemplate(
             name=body.get("name"),
             language=body.get("language") or body.get("languageType"),
@@ -259,6 +278,10 @@ class OmnichannelProvider(WhatsAppProvider):
             category=body.get("category"),
             previous_category=body.get("previousCategory"),
             rejection_reason=reason,
+            header_text=header.get("text") if isinstance(header, dict) else None,
+            body_text=body.get("bodyText"),
+            footer_text=body.get("footerText"),
+            sample_values=samples,
             raw=body,
         )
 
@@ -268,13 +291,13 @@ class OmnichannelProvider(WhatsAppProvider):
         self._raise_for_status(resp)
         return self.parse_template(self._json(resp))
 
-    # --- UNCONFIRMED: vendor doc §3.24–3.27 missing ---------------------
-    # Paths below are guesses modelled on the documented create endpoint.
-    # A 404 / 405 surfaces as ProviderUnsupported so the sync task can treat
-    # "no status API" as a no-op instead of an error.
+    # Read endpoints are missing from the vendor doc (§3.24–3.27); confirmed
+    # against the live API. A bare 404 / 405 surfaces as ProviderUnsupported
+    # so the sync task can treat "no status API" as a no-op.
     def get_template(self, creds, name, language) -> Optional[ProviderTemplate]:
-        # UNCONFIRMED: vendor doc §3.24–3.27 missing
-        resp = self._request("GET", creds, f"/whatsapp/template/{name}")
+        resp = self._request("GET", creds, "/whatsapp/template", params={"name": name})
+        if resp.status_code == 404 and self._error_code(resp) == "NOT_FOUND":
+            return None
         if resp.status_code in (404, 405, 501):
             raise ProviderUnsupported("Template read API not available",
                                       status_code=resp.status_code)
@@ -289,18 +312,29 @@ class OmnichannelProvider(WhatsAppProvider):
                 return tpl
         return None
 
-    def list_templates(self, creds, category=None) -> List[ProviderTemplate]:
-        # UNCONFIRMED: vendor doc §3.24–3.27 missing
-        params = {"category": category} if category else None
-        resp = self._request("GET", creds, "/whatsapp/template", params=params)
-        if resp.status_code in (404, 405, 501):
-            raise ProviderUnsupported("Template list API not available",
-                                      status_code=resp.status_code)
-        self._raise_for_status(resp)
+    def _error_code(self, resp) -> Optional[str]:
         body = self._json(resp)
-        items = body if isinstance(body, list) else (
-            (body.get("data") or body.get("content") or []) if isinstance(body, dict) else [])
-        return [self.parse_template(i) for i in items if isinstance(i, dict)]
+        return body.get("errorCode") if isinstance(body, dict) else None
+
+    def list_templates(self, creds, category=None) -> List[ProviderTemplate]:
+        """Every page of GET /whatsapp/template/list (`page` is 0-based)."""
+        out: List[ProviderTemplate] = []
+        for page in range(LIST_MAX_PAGES):
+            params = {"page": page, "size": LIST_PAGE_SIZE}
+            if category:
+                params["category"] = category
+            resp = self._request("GET", creds, "/whatsapp/template/list", params=params)
+            if resp.status_code in (404, 405, 501):
+                raise ProviderUnsupported("Template list API not available",
+                                          status_code=resp.status_code)
+            self._raise_for_status(resp)
+            body = self._json(resp)
+            items = body if isinstance(body, list) else (
+                (body.get("data") or body.get("content") or []) if isinstance(body, dict) else [])
+            out.extend(self.parse_template(i) for i in items if isinstance(i, dict))
+            if not items or not isinstance(body, dict) or body.get("lastPage", True):
+                break
+        return out
 
     def delete_template(self, creds, name) -> None:
         # UNCONFIRMED: vendor doc §3.24–3.27 missing

@@ -225,3 +225,19 @@ def test_create_template_401_raises_auth_error():
     with pytest.raises(ProviderError) as exc:
         provider.create_template(CREDS, TemplateSpec(name="x", language="en_US", body_text="hi"))
     assert exc.value.auth_error
+
+
+def test_get_template_uses_name_param_and_not_found_is_none():
+    provider, http = _provider(FakeResponse(404, {"message": "Template Not fount", "errorCode": "NOT_FOUND"}))
+    assert provider.get_template(CREDS, "x", "en_US") is None
+    call = http.calls[0]
+    assert call["url"].endswith("/whatsapp/template") and call["params"] == {"name": "x"}
+
+
+def test_list_templates_reads_every_page():
+    provider, http = _provider(
+        FakeResponse(200, {"data": [{"name": "a"}], "lastPage": False}),
+        FakeResponse(200, {"data": [{"name": "b"}], "lastPage": True}))
+    assert [t.name for t in provider.list_templates(CREDS)] == ["a", "b"]
+    assert [c["params"]["page"] for c in http.calls] == [0, 1]
+    assert http.calls[0]["url"].endswith("/whatsapp/template/list")
