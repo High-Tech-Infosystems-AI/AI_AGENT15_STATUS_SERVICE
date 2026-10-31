@@ -210,10 +210,14 @@ def build_dashboard(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[st
     buckets = [UNDER_A_DAY, *(label for _, label in PERIOD_BUCKETS)]
     if any(c["period_bucket"] == OVER_90 for c in cases):    # only when someone is in it
         buckets.append(OVER_90)
-    offer_names = people.user_names(db, {int(E.recruiter_for(i, True)) for i in offers
-                                         if E.recruiter_for(i, True)})
+    offer_owners = {int(E.recruiter_for(i, True)) for i in offers if E.recruiter_for(i, True)}
+    offer_names = people.user_names(db, offer_owners)
+    offer_rows = [build_offer(i, today, offer_names) for i in offers]
+    teams = people.teams_of_users(db, org, {c["recruiter_user_id"] for c in cases} | offer_owners)
+    for row in cases + offer_rows:
+        row["teams"] = teams.get(row["recruiter_user_id"], [])
     return {"date": today.isoformat(), "offer_accepted_count": len(offers),
-            "offers": [build_offer(i, today, offer_names) for i in offers],
+            "offers": offer_rows,
             "cases": cases,
             "period_buckets": buckets,
             "truncated": len(rows) >= MAX_CASES}

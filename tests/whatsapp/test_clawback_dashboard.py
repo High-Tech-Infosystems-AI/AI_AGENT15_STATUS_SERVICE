@@ -1,7 +1,10 @@
 """Clawback dashboard: case status, progress and alerts (contract §6.8)."""
 from datetime import date, datetime, timedelta
 
+from sqlalchemy import text
+
 from app.whatsapp_layer import clawback_dashboard as CD
+from app.whatsapp_layer import people
 
 TODAY = date(2026, 10, 30)
 
@@ -98,3 +101,17 @@ def test_finished_at_is_when_the_case_finished():
     dropped = {**_row(ended="dropped"), "ended_at": datetime(2026, 10, 20, 9)}
     assert _case(dropped)["finished_at"] == "2026-10-20"
     assert _case(_row())["finished_at"] is None
+
+
+def test_teams_of_users_uses_active_rank_placements(wa_db):
+    wa_db.execute(text("CREATE TABLE teams (id INT, name TEXT, deleted_at TEXT)"))
+    wa_db.execute(text("CREATE TABLE user_org_assignment (organization_id INT, user_id INT, "
+                       "unit_type TEXT, unit_id INT, deleted_at TEXT)"))
+    wa_db.execute(text("INSERT INTO teams VALUES (1,'Alpha',NULL),(2,'Beta',NULL),(3,'Gone','x')"))
+    wa_db.execute(text("INSERT INTO user_org_assignment VALUES "
+                       "(9,7,'team',2,NULL),(9,7,'team',1,NULL),(9,7,'team',1,NULL),"   # Asha: two teams
+                       "(9,7,'team',3,NULL),(9,7,'branch',2,NULL),"                     # deleted team, not a team
+                       "(9,8,'team',1,'x'),(5,8,'team',1,NULL)"))                       # removed, other org
+    assert people.teams_of_users(wa_db, 9, [7, 8]) == {
+        7: [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}]}
+    assert people.teams_of_users(wa_db, 9, []) == {}
