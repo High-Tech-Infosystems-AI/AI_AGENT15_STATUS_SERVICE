@@ -102,6 +102,27 @@ def find_by_phone(db: Session, organization_id: int, phone_digits: str) -> Optio
     return None
 
 
+def teams_of_users(db: Session, organization_id: int,
+                   user_ids: Iterable[int]) -> Dict[int, List[Dict]]:
+    """{user_id: [{id, name}]}: rank placements, as the dashboard's team views use
+    (user_org_assignment, not the team_members roster). A user can be in several."""
+    ids = sorted({int(i) for i in user_ids if i})
+    if not ids:
+        return {}
+    rows = db.execute(text(
+        "SELECT a.user_id, t.id, t.name FROM user_org_assignment a "
+        "JOIN teams t ON t.id = a.unit_id "
+        "WHERE a.unit_type = 'team' AND a.deleted_at IS NULL AND t.deleted_at IS NULL "
+        "AND a.organization_id = :org AND a.user_id IN :ids ORDER BY t.name"
+    ).bindparams(bindparam("ids", expanding=True)), {"org": organization_id, "ids": ids}).fetchall()
+    out: Dict[int, List[Dict]] = {}
+    for uid, tid, name in rows:
+        teams = out.setdefault(int(uid), [])
+        if all(t["id"] != int(tid) for t in teams):    # placed twice in one team
+            teams.append({"id": int(tid), "name": name})
+    return out
+
+
 def user_names(db: Session, user_ids: Iterable[int]) -> Dict[int, str]:
     ids = sorted({int(i) for i in user_ids if i})
     if not ids:
