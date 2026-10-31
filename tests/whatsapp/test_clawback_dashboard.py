@@ -71,6 +71,16 @@ def test_period_buckets():
     assert _case(_row(cooling=45))["period_bucket"] == "41-50 days"
 
 
+def test_drop_day_counts_from_joining():
+    joined = datetime(2026, 10, 1)
+    row = {**_row(ended="dropped"), "joined_at": joined, "ended_at": datetime(2026, 10, 15, 9)}
+    c = _case(row)
+    assert (c["drop_day"], c["drop_day_bucket"]) == (15, "11-20 days")
+    assert _case({**row, "ended_at": joined})["drop_day"] == 1
+    assert _case({**row, "ended_at": datetime(2026, 9, 1)})["drop_day"] == 1
+    assert _case(_row())["drop_day"] is None
+
+
 def test_finished_at_is_when_the_case_finished():
     done = _case(_row(ago=90, closed=datetime(2026, 10, 1, 5)))
     assert done["finished_at"] == "2026-10-01"
