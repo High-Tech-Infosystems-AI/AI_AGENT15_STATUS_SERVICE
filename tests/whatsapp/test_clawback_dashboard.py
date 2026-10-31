@@ -81,6 +81,17 @@ def test_drop_day_counts_from_joining():
     assert _case(_row())["drop_day"] is None
 
 
+def test_offer_has_the_shape_of_a_case():
+    item = {"candidate_job_id": 5, "candidate_id": "C5", "candidate_name": "Ravi", "job_id": 9,
+            "job_title": "Sales", "company_name": "Acme", "status": "pre_joining", "assigned_to": 7,
+            "recruiter_user_id": 7, "offer_accepted_at": "2026-10-20", "cooling_period_days": 45}
+    offer = CD.build_offer(item, TODAY, {7: "Asha"})
+    assert set(_case(_row())) - set(offer) == set()
+    assert (offer["case_status"], offer["recruiter_name"]) == ("offer_accepted", "Asha")
+    assert offer["offer_accepted_at"] == "2026-10-20" and offer["period_bucket"] == "41-50 days"
+    assert offer["alerts"] == []
+
+
 def test_finished_at_is_when_the_case_finished():
     done = _case(_row(ago=90, closed=datetime(2026, 10, 1, 5)))
     assert done["finished_at"] == "2026-10-01"

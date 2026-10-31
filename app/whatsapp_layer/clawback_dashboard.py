@@ -129,6 +129,26 @@ def build_case(row: Dict[str, Any], check: Optional[Dict[str, Any]], today: date
     }
 
 
+def build_offer(item: Dict[str, Any], today: date, names: Dict[int, str]) -> Dict[str, Any]:
+    """An accepted offer not yet joined, in the same shape as a case."""
+    rid = E.recruiter_for(item, True)
+    return {
+        **TL._progress(item, today),
+        "candidate_job_id": item.get("candidate_job_id"), "candidate_id": item.get("candidate_id"),
+        "candidate_name": item.get("candidate_name") or "-", "job_id": item.get("job_id"),
+        "job_title": item.get("job_title") or "-", "company_id": item.get("company_id"),
+        "company_name": item.get("company_name") or "-",
+        "recruiter_user_id": int(rid) if rid else None,
+        "recruiter_name": names.get(int(rid), "Unassigned") if rid else "Unassigned",
+        "case_status": "offer_accepted",
+        "period_bucket": period_bucket(float(item.get("cooling_period_days") or 0)),
+        "drop_day": None, "drop_day_bucket": None, "finished_at": None, "day_number": None,
+        "progress": "offer accepted", "check_id": None, "status": None, "outcome": None,
+        "notes": None, "due_date": None, "overdue": False, "action": "Offer accepted", "link": "",
+        "alerts": [],
+    }
+
+
 def alerts_for(case: Dict[str, Any], today: date) -> List[str]:
     """Why a case needs attention. Finished cases never alert."""
     if case["case_status"] in ("dropped", "completed"):
@@ -190,10 +210,10 @@ def build_dashboard(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[st
     buckets = [UNDER_A_DAY, *(label for _, label in PERIOD_BUCKETS)]
     if any(c["period_bucket"] == OVER_90 for c in cases):    # only when someone is in it
         buckets.append(OVER_90)
+    offer_names = people.user_names(db, {int(E.recruiter_for(i, True)) for i in offers
+                                         if E.recruiter_for(i, True)})
     return {"date": today.isoformat(), "offer_accepted_count": len(offers),
-            # What the dashboard's company, recruiter and job filters match on.
-            "offers": [{"job_id": i.get("job_id"), "company_name": i.get("company_name") or "-",
-                        "recruiter_user_id": E.recruiter_for(i, True)} for i in offers],
+            "offers": [build_offer(i, today, offer_names) for i in offers],
             "cases": cases,
             "period_buckets": buckets,
             "truncated": len(rows) >= MAX_CASES}
