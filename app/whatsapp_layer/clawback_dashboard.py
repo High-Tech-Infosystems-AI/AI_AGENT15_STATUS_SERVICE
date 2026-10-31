@@ -18,6 +18,12 @@ from app.whatsapp_layer import today as TL
 MAX_CASES = 5000
 ENDING_SOON_DAYS = 7
 ALERT_KINDS = ("overdue", "due_today", "at_risk", "ending_soon", "final_pending")
+# Period length buckets, shortest first: (longest period in days, label).
+PERIOD_BUCKETS = ((1, "1 day"), (10, "2-10 days"), (20, "11-20 days"), (30, "21-30 days"),
+                  (40, "31-40 days"), (50, "41-50 days"), (60, "51-60 days"), (70, "61-70 days"),
+                  (80, "71-80 days"), (85, "81-85 days"), (90, "86-90 days"))
+UNDER_A_DAY = "<1 day"
+OVER_90 = "90+ days"
 
 _CASES_SQL = text("""
     SELECT cj.id, cj.job_id, c.candidate_id, c.candidate_name, c.assigned_to, c.created_by,
@@ -48,6 +54,14 @@ def fetch_case_rows(db: Session, org: int) -> List[Dict[str, Any]]:
             seen.add(r["id"])
             out.append(dict(r))
     return out
+
+
+def period_bucket(days: float) -> str:
+    """Bucket for a period length; part days go up (10.5 is in 11-20 days)."""
+    if days < 1:
+        return UNDER_A_DAY
+    span = math.ceil(days)
+    return next((label for top, label in PERIOD_BUCKETS if span <= top), OVER_90)
 
 
 def _iso_date(value: Any) -> Optional[str]:
@@ -92,6 +106,7 @@ def build_case(row: Dict[str, Any], check: Optional[Dict[str, Any]], today: date
         "recruiter_user_id": int(rid) if rid else None,
         "recruiter_name": names.get(int(rid), "Unassigned") if rid else "Unassigned",
         "case_status": status,
+        "period_bucket": period_bucket(item["cooling_period_days"]),
         # When the case finished, for the dashboard's date filter.
         "finished_at": _iso_date(row.get("ended_at") if status == "dropped"
                                  else row.get("cooling_period_closed") if status == "completed" else None),
@@ -167,5 +182,9 @@ def build_dashboard(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[st
         cases.append(case)
     offers = [i for i in items if i.get("status") == "pre_joining"
               and (scope is None or (E.recruiter_for(i, True) or 0) in scope)]
+    buckets = [UNDER_A_DAY, *(label for _, label in PERIOD_BUCKETS)]
+    if any(c["period_bucket"] == OVER_90 for c in cases):    # only when someone is in it
+        buckets.append(OVER_90)
     return {"date": today.isoformat(), "offer_accepted_count": len(offers), "cases": cases,
+            "period_buckets": buckets,
             "truncated": len(rows) >= MAX_CASES}
