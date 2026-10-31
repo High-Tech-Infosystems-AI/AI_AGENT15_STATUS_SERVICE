@@ -5,7 +5,8 @@ shares the database, so cases are read directly, like `people`.
 """
 from __future__ import annotations
 
-from datetime import date
+import math
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from sqlalchemy import text
@@ -68,7 +69,13 @@ def build_case(row: Dict[str, Any], check: Optional[Dict[str, Any]], today: date
     item = {"joined_at": joined.isoformat() if joined else None,
             "cooling_period_days": float(row["cooling_period"] or 0),
             "offer_accepted_at": None, "clawback_completion_date": None}
+    # Periods can be part of a day (0.5); they still end, on the next calendar day.
+    span = math.ceil(item["cooling_period_days"])
+    if joined and span > 0:
+        item["clawback_completion_date"] = (joined + timedelta(days=span)).isoformat()
     progress = TL._progress(item, today)
+    if progress["progress_percent"] is None and joined and span > 0:
+        progress["progress_percent"] = 100 if progress["days_pending"] == 0 else 0
     status = _case_status(row, progress["days_pending"])
     if status in ("dropped", "completed"):
         progress["days_pending"] = 0 if status == "completed" else progress["days_pending"]
@@ -89,7 +96,7 @@ def build_case(row: Dict[str, Any], check: Optional[Dict[str, Any]], today: date
         "finished_at": _iso_date(row.get("ended_at") if status == "dropped"
                                  else row.get("cooling_period_closed") if status == "completed" else None),
         # Stops at the end of the period, however long a case stays open after it.
-        "day_number": (min((today - joined).days + 1, progress["cooling_period_days"] or 10 ** 6)
+        "day_number": (min((today - joined).days + 1, span or 10 ** 6)
                        if joined else None),
         "progress": f"joined {joined.strftime('%d %b')}" if joined else "-",
         "check_id": check.get("id"), "status": check.get("status"),

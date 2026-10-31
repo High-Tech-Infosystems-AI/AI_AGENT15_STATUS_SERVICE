@@ -54,6 +54,14 @@ def test_day_number_stops_at_the_end_of_the_period():
     assert _case(_row(ago=200, cooling=30))["day_number"] == 30
 
 
+def test_part_day_period_ends_instead_of_staying_in_cooling():
+    c = _case(_row(ago=200, cooling=0.5))
+    assert (c["case_status"], c["days_pending"], c["progress_percent"]) == ("cooling_ended", 0, 100)
+    assert c["completion_date"] == (TODAY - timedelta(days=199)).isoformat()
+    assert c["day_number"] == 1 and c["alerts"] == ["final_pending"]
+    assert _case(_row(ago=0, cooling=0.5))["case_status"] == "in_cooling"
+
+
 def test_finished_at_is_when_the_case_finished():
     done = _case(_row(ago=90, closed=datetime(2026, 10, 1, 5)))
     assert done["finished_at"] == "2026-10-01"
