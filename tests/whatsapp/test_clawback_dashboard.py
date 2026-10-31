@@ -62,6 +62,15 @@ def test_part_day_period_ends_instead_of_staying_in_cooling():
     assert _case(_row(ago=0, cooling=0.5))["case_status"] == "in_cooling"
 
 
+def test_period_buckets():
+    expected = {0.5: "<1 day", 1: "1 day", 1.5: "2-10 days", 2: "2-10 days", 10: "2-10 days",
+                10.5: "11-20 days", 11: "11-20 days", 30: "21-30 days", 45: "41-50 days",
+                80: "71-80 days", 81: "81-85 days", 85: "81-85 days", 86: "86-90 days",
+                90: "86-90 days", 91: "90+ days", 365: "90+ days"}
+    assert {d: CD.period_bucket(d) for d in expected} == expected
+    assert _case(_row(cooling=45))["period_bucket"] == "41-50 days"
+
+
 def test_finished_at_is_when_the_case_finished():
     done = _case(_row(ago=90, closed=datetime(2026, 10, 1, 5)))
     assert done["finished_at"] == "2026-10-01"
