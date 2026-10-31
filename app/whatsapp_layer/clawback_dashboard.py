@@ -97,6 +97,8 @@ def build_case(row: Dict[str, Any], check: Optional[Dict[str, Any]], today: date
         progress["progress_percent"] = 100
     rid = row.get("assigned_to") or row.get("created_by")
     check = check or {}
+    ended = E.parse_date(row.get("ended_at")) if status == "dropped" else None
+    drop_day = max((ended - joined).days + 1, 1) if ended and joined else None
     return {
         **progress,
         "candidate_job_id": row["id"], "candidate_id": row.get("candidate_id"),
@@ -107,6 +109,9 @@ def build_case(row: Dict[str, Any], check: Optional[Dict[str, Any]], today: date
         "recruiter_name": names.get(int(rid), "Unassigned") if rid else "Unassigned",
         "case_status": status,
         "period_bucket": period_bucket(item["cooling_period_days"]),
+        # Which day after joining a dropped case ended on (joining date is day 1).
+        "drop_day": drop_day,
+        "drop_day_bucket": period_bucket(drop_day) if drop_day else None,
         # When the case finished, for the dashboard's date filter.
         "finished_at": _iso_date(row.get("ended_at") if status == "dropped"
                                  else row.get("cooling_period_closed") if status == "completed" else None),
@@ -185,6 +190,10 @@ def build_dashboard(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[st
     buckets = [UNDER_A_DAY, *(label for _, label in PERIOD_BUCKETS)]
     if any(c["period_bucket"] == OVER_90 for c in cases):    # only when someone is in it
         buckets.append(OVER_90)
-    return {"date": today.isoformat(), "offer_accepted_count": len(offers), "cases": cases,
+    return {"date": today.isoformat(), "offer_accepted_count": len(offers),
+            # What the dashboard's company, recruiter and job filters match on.
+            "offers": [{"job_id": i.get("job_id"), "company_name": i.get("company_name") or "-",
+                        "recruiter_user_id": E.recruiter_for(i, True)} for i in offers],
+            "cases": cases,
             "period_buckets": buckets,
             "truncated": len(rows) >= MAX_CASES}
