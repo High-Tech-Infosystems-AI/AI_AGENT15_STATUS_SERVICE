@@ -83,14 +83,14 @@ VARIABLES: List[Dict] = [
     _v("note", "Message", "Notes", "Please finish today's calls before 5 pm", ["generic"]),
     # Links
     _v("app_link", "Link to the HRMIS", "Links",
-       "https://hrmis.example.com/clawback/health-checks", list(PURPOSES)),
+       "https://hrmis.example.com/clawback/today", list(PURPOSES)),
 ]
 
 VARIABLES_BY_KEY: Dict[str, Dict] = {v["key"]: v for v in VARIABLES}
 
 # app_link path per purpose (contract §2.3). `generic` has no fixed target.
 APP_LINK_PATHS = {
-    "recruiter_reminder": "/clawback/health-checks?check={health_check_id}",
+    "recruiter_reminder": "/clawback/today?check={health_check_id}",
     "recruiter_batch": "/clawback/today",
     "final_validation": "/job-pipeline/{job_id}?tab=clawback",
     "team_digest": "/clawback/today",
@@ -118,14 +118,14 @@ def app_link(base_url: Optional[str], purpose: str, *,
     """Build `app_link` = settings.app_base_url + the purpose's path.
 
     recruiter_reminder without a health check (e.g. send-now with no check
-    for today) falls back to the health-check list."""
+    for today) falls back to the check-ins screen."""
     base = (base_url or "").rstrip("/")
     if purpose == "recruiter_reminder" and not health_check_id:
-        path = "/clawback/health-checks"
+        path = "/clawback/today"
     elif purpose == "final_validation" and not job_id:
-        path = "/clawback/health-checks"
+        path = "/clawback/today"
     else:
-        path = APP_LINK_PATHS.get(purpose, "/clawback/health-checks")
+        path = APP_LINK_PATHS.get(purpose, "/clawback/today")
         path = path.format(health_check_id=health_check_id, job_id=job_id)
     return f"{base}{path}"
 
@@ -180,12 +180,12 @@ def short_date(value: Optional[date]) -> str:
 
 
 def check_link(base_url: Optional[str], health_check_id: Optional[int]) -> str:
-    """Short link to one health check (`/hc/<id>` redirects to the check);
-    without a check, the health-check list."""
+    """Short link to one health check (`/hc/<id>` opens it in check-ins);
+    without a check, the check-ins screen."""
     base = (base_url or "").rstrip("/")
     if health_check_id:
         return f"{base}/hc/{int(health_check_id)}"
-    return f"{base}/clawback/health-checks"
+    return f"{base}/clawback/today"
 
 
 def progress_text(anchor: Optional[str], *, joining_date: Optional[date] = None,

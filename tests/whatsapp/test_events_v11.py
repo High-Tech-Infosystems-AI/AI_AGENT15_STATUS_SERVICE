@@ -61,7 +61,7 @@ def test_team_entry_has_no_action():
 
 def test_check_link():
     assert V.check_link("https://x/", 5) == "https://x/hc/5"
-    assert V.check_link("https://x", None) == "https://x/clawback/health-checks"
+    assert V.check_link("https://x", None) == "https://x/clawback/today"
 
 
 def test_split_short_list_is_one_part():

@@ -185,6 +185,17 @@ def _latest_checks(db: Session, org: int, today: date) -> Dict[int, Dict[str, An
     return out
 
 
+def check_history(db: Session, org: int) -> Dict[int, List[Dict[str, str]]]:
+    """Per candidate_job: every done or missed check, for counts by date."""
+    from app.whatsapp_layer.models import ClawbackHealthCheck as H
+    out: Dict[int, List[Dict[str, str]]] = {}
+    rows = (db.query(H.candidate_job_id, H.due_date, H.status)
+            .filter(H.organization_id == org, H.status.in_(("done", "missed"))).all())
+    for cj, due, status in rows:
+        out.setdefault(cj, []).append({"due_date": due.isoformat(), "status": status})
+    return out
+
+
 def build_dashboard(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[str, Any]:
     """Cases in `scope` (None = whole org), offers waiting to join, and alerts."""
     from app.whatsapp_layer import clients, people
@@ -214,8 +225,10 @@ def build_dashboard(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[st
     offer_names = people.user_names(db, offer_owners)
     offer_rows = [build_offer(i, today, offer_names) for i in offers]
     teams = people.teams_of_users(db, org, {c["recruiter_user_id"] for c in cases} | offer_owners)
+    history = check_history(db, org)
     for row in cases + offer_rows:
         row["teams"] = teams.get(row["recruiter_user_id"], [])
+        row["checks"] = history.get(row["candidate_job_id"], [])
     return {"date": today.isoformat(), "offer_accepted_count": len(offers),
             "offers": offer_rows,
             "cases": cases,

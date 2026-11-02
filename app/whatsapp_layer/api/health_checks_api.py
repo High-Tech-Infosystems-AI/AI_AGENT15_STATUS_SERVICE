@@ -109,6 +109,17 @@ def list_health_checks(status: Optional[str] = Query(None),
     return {"data": serialize_checks(db, rows), "pagination": pagination}
 
 
+@router.get("/health-checks/{check_id}")
+def get_health_check(check_id: int, ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
+    """One check, for a link that opens it in check-ins."""
+    ctx.require(VIEW)
+    chk = get_scoped(db, H, check_id, ctx, soft_delete=False)
+    visible = visible_recruiters(ctx, chk.organization_id)
+    if visible is not None and chk.recruiter_user_id not in visible:
+        raise HTTPException(403, "This check belongs to someone outside your team")
+    return serialize_checks(db, [chk])[0]
+
+
 @router.put("/health-checks/{check_id}")
 def record_health_check(check_id: int, body: HealthCheckRecord,
                         ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
