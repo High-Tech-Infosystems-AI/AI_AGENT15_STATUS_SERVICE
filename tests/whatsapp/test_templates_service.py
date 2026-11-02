@@ -166,7 +166,7 @@ def test_variable_catalogue_matches_contract():
 def test_app_links():
     base = "https://hrmis.example.com/"
     assert V.app_link(base, "recruiter_reminder", health_check_id=301) == \
-        "https://hrmis.example.com/clawback/health-checks?check=301"
+        "https://hrmis.example.com/clawback/today?check=301"
     assert V.app_link(base, "recruiter_batch") == "https://hrmis.example.com/clawback/today"
     assert V.app_link(base, "final_validation", job_id=9) == \
         "https://hrmis.example.com/job-pipeline/9?tab=clawback"
