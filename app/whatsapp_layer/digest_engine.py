@@ -260,18 +260,18 @@ def team_list_parts(entries: List[Dict[str, Any]], recruiter_names: Dict[int, st
 
 def due_today(db: Session, organization_id: int, items: List[Dict[str, Any]],
               rules: List[E.RuleSpec], today: date,
-              fallback_to_created_by: bool) -> List[Dict[str, Any]]:
+              fallback_to_created_by: bool,
+              working_days: Optional[List[str]]) -> List[Dict[str, Any]]:
     """Candidates a rule makes due today (the recruiters' list for today).
     Their health checks are created now if the rule makes one, so the
     summary can link to them even when it goes out before the recruiters'
     reminders."""
-    wd = E.weekday_code(today)
     out = []
     for item in items:
         anchor, day = E.anchor_and_day(item, today)
         if anchor is None or E.cooling_days(item) <= 0:
             continue
-        rule = E.match_rule(rules, anchor, day, wd)
+        rule = E.rule_due(rules, item, today, working_days)
         if rule is None:
             continue
         rid = E.recruiter_for(item, fallback_to_created_by)
@@ -381,7 +381,8 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
     recipients = people.get_users(db, list(ready))
     to_dispatch: List[int] = []
 
-    due = due_today(db, organization_id, items, rules, today, bool(st.fallback_to_created_by))
+    due = due_today(db, organization_id, items, rules, today, bool(st.fallback_to_created_by),
+                    st.working_days)
     db.commit()
     rec_names = people.get_users(db, list({e["recruiter_user_id"] for e in due
                                             if e["recruiter_user_id"]}))

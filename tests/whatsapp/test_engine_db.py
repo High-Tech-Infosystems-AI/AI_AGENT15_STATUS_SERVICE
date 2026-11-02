@@ -84,15 +84,18 @@ def test_nothing_before_send_time(org):
     assert org.query(H).count() == 0
 
 
-def test_non_working_day_creates_checks_but_sends_nothing(org):
-    # Sunday 25 Oct (not in the default MON–SAT working days), Day 8 of the clawback.
+def test_reminder_due_on_a_non_working_day_moves_to_the_next_working_day(org):
+    # Day 8 falls on Sunday 25 Oct (not in the default MON–SAT working days).
+    item = _item(1, 7)
+    item["joined_at"] = (date(2026, 10, 25) - timedelta(days=7)).isoformat()
+    item["clawback_completion_date"] = None
     sunday = datetime(2026, 10, 25, 5, 0, tzinfo=timezone.utc)
-    sunday_items = [_item(1, 7)]
-    sunday_items[0]["joined_at"] = (date(2026, 10, 25) - timedelta(days=7)).isoformat()
-    sunday_items[0]["clawback_completion_date"] = None
-    stats = E.evaluate_org_reminders(org, ORG, sunday_items, sunday)
-    assert stats["checks"] == 1 and stats["queued"] == 0
-    assert org.query(L).count() == 0
+    assert E.evaluate_org_reminders(org, ORG, [item], sunday)["checks"] == 0
+    assert org.query(H).count() == 0 and org.query(L).count() == 0
+    stats = E.evaluate_org_reminders(org, ORG, [item], NOW)
+    assert stats["checks"] == 1 and stats["queued"] == 1
+    check = org.query(H).one()
+    assert check.due_date == TODAY and check.day_number == 9
 
 
 def test_skip_reasons_and_retry(org):

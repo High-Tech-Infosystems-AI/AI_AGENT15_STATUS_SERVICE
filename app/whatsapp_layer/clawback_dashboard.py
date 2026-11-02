@@ -204,7 +204,8 @@ def build_dashboard(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[st
     items = clients.fetch_active_clawbacks(org).get("items") or []
     rules = [E.as_rule_spec(r) for r in E.active_rules(db, org)]
     from app.whatsapp_layer import digest_engine as D
-    D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by))   # today's checks
+    D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by),
+                st.working_days)   # today's checks
     db.commit()
     rows = fetch_case_rows(db, org)
     owner = lambda r: r.get("assigned_to") or r.get("created_by")

@@ -125,7 +125,8 @@ def build_today(db: Session, org: int, scope: Optional[Set[int]],
     seen: Set[int] = set()
     if includes_today:
         rules = [E.as_rule_spec(r) for r in E.active_rules(db, org)]
-        due = D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by))
+        due = D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by),
+                        st.working_days)
         db.commit()
         for e in due:
             rid = e["recruiter_user_id"]
@@ -244,7 +245,8 @@ def send_prompt(db: Session, org: int, recruiter_user_id: int, ctx_user_id: int)
     items = [i for i in clients.fetch_active_clawbacks(org).get("items") or []
              if E.recruiter_for(i, bool(st.fallback_to_created_by)) == recruiter_user_id]
     rules = [E.as_rule_spec(r) for r in E.active_rules(db, org)]
-    due = D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by))
+    due = D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by),
+                        st.working_days)
     db.commit()
     data = build_today(db, org, {recruiter_user_id})
     open_count = sum(g["open_count"] for g in data["groups"])

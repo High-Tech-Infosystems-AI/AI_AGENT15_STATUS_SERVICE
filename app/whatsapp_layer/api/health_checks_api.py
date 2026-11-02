@@ -227,6 +227,7 @@ def clawback_summary(candidate_job_ids: str = Query(...),
         logger.warning("clawback-summary: job service unavailable (%s); next_reminder_date omitted", exc)
         items = {}
     rules = [E.as_rule_spec(r) for r in E.active_rules(db, org)]
+    working_days = E.get_settings(db, org).working_days or E.DEFAULT_WORKING_DAYS
 
     logs = (db.query(L).filter(L.organization_id == org, L.candidate_job_id.in_(ids))
             .order_by(L.id.desc()).all())
@@ -249,7 +250,7 @@ def clawback_summary(candidate_job_ids: str = Query(...),
         if cj in items:
             # Today's reminder is "next" until today's check exists.
             start = today + timedelta(days=1) if cj in sent_today else today
-            d = E.next_reminder_date(rules, items[cj], start)
+            d = E.next_reminder_date(rules, items[cj], start, working_days=working_days)
             nxt = d.isoformat() if d else None
         lg, chk = last_log.get(cj), today_check.get(cj)
         out.append({
