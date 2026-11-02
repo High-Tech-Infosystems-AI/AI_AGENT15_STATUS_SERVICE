@@ -239,6 +239,24 @@ def test_quiet_hours_wrapping_midnight():
     assert not E.in_quiet_hours(time(13, 0), None, None)
 
 
+def test_rule_due_moves_over_non_working_days():
+    days = ["MON", "TUE", "WED", "THU", "FRI"]
+    item = _item(joined_at="2026-10-17", cooling_period_days=90, clawback_completion_date=None)
+    rules = _seed_rules()                                       # Sat 17 Oct is day 1
+    assert E.rule_due(rules, item, date(2026, 10, 24), days) is None          # Sat, day 8
+    assert E.rule_due(rules, item, date(2026, 10, 25), days) is None          # Sun
+    assert E.rule_due(rules, item, date(2026, 10, 26), days).name == "Days 8–30"   # Mon
+    assert E.rule_due(rules, item, date(2026, 10, 27), days) is None          # Tue, nothing moved
+
+
+def test_next_reminder_date_skips_non_working_days():
+    item = _item(joined_at="2026-10-18", cooling_period_days=90, clawback_completion_date=None)
+    rules = _seed_rules()                                       # day 8 is Sun 25 Oct
+    assert E.next_reminder_date(rules, item, date(2026, 10, 25)) == date(2026, 10, 25)
+    assert (E.next_reminder_date(rules, item, date(2026, 10, 25), working_days=E.DEFAULT_WORKING_DAYS)
+            == date(2026, 10, 26))
+
+
 def test_working_days():
     assert E.is_working_day(date(2026, 10, 26), ["MON"])        # Monday
     assert not E.is_working_day(date(2026, 10, 25), E.DEFAULT_WORKING_DAYS)  # Sunday

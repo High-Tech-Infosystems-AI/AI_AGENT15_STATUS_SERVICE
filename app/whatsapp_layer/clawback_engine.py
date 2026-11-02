@@ -166,6 +166,24 @@ def match_rule(rules: Iterable[RuleSpec], anchor: str, day: int,
     return due[0]
 
 
+def rule_due(rules: Iterable[RuleSpec], item: Dict[str, Any], today: date,
+             working_days: Optional[List[str]]) -> Optional[RuleSpec]:
+    """The rule a clawback is due on today. Nothing on a non-working day:
+    what falls due then moves to the next working day."""
+    if not is_working_day(today, working_days):
+        return None
+    d = today
+    for _ in range(7):
+        anchor, day = anchor_and_day(item, d)
+        rule = match_rule(rules, anchor, day, weekday_code(d)) if anchor else None
+        if rule:
+            return rule
+        d -= timedelta(days=1)
+        if is_working_day(d, working_days):
+            return None
+    return None
+
+
 def windows_overlap(a: RuleSpec, b: RuleSpec) -> bool:
     if a.anchor != b.anchor:
         return False
@@ -349,7 +367,7 @@ def plan_recruiter_messages(entries: List[Dict[str, Any]],
 # Pure: schedule projection (simulate / next reminder)
 # ---------------------------------------------------------------------------
 def project_schedule(rules: List[RuleSpec], item: Dict[str, Any], start: date,
-                     days: int) -> List[Dict[str, Any]]:
+                     days: int, working_days: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Every (date, anchor, day, rule) the rules would fire for `item` from
     `start` for `days` days. Pre-joining items stay on the offer_accepted
     anchor (the joining date isn't known yet)."""
@@ -359,15 +377,17 @@ def project_schedule(rules: List[RuleSpec], item: Dict[str, Any], start: date,
         anchor, day = anchor_and_day(item, d)
         if anchor is None:
             continue
-        rule = match_rule(rules, anchor, day, weekday_code(d))
+        rule = (rule_due(rules, item, d, working_days) if working_days
+                else match_rule(rules, anchor, day, weekday_code(d)))
         if rule:
             out.append({"date": d, "anchor": anchor, "day_number": day, "rule": rule})
     return out
 
 
 def next_reminder_date(rules: List[RuleSpec], item: Dict[str, Any], start: date,
-                       horizon: int = 200) -> Optional[date]:
-    events = project_schedule(rules, item, start, horizon)
+                       horizon: int = 200,
+                       working_days: Optional[List[str]] = None) -> Optional[date]:
+    events = project_schedule(rules, item, start, horizon, working_days)
     return events[0]["date"] if events else None
 
 
@@ -557,7 +577,7 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
     if not rules:
         return stats
     now_local = local_now(st.timezone, now_utc)
-    today, wd = now_local.date(), weekday_code(now_local.date())
+    today = now_local.date()
     can_send = (is_working_day(today, st.working_days)
                 and not in_quiet_hours(now_local.time(), st.quiet_hours_start, st.quiet_hours_end))
 
@@ -568,7 +588,7 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
             anchor, day = anchor_and_day(item, today)
             if anchor is None:
                 continue
-            rule = match_rule(rules, anchor, day, wd)
+            rule = rule_due(rules, item, today, st.working_days)
             if not rule or not time_reached(now_local, rule.send_time):
                 continue
             rid = recruiter_for(item, bool(st.fallback_to_created_by))
@@ -934,7 +954,8 @@ def simulate(db: Session, organization_id: int, candidate_job_id: int,
     templates: Dict[Optional[int], Any] = {}
 
     events = []
-    for ev in project_schedule(rules, item, today, days):
+    for ev in project_schedule(rules, item, today, days,
+                               (st.working_days if st else None) or DEFAULT_WORKING_DAYS):
         rule: RuleSpec = ev["rule"]
         if rule.template_id not in templates:
             templates[rule.template_id] = sender.rule_template(db, rule.template_id)
@@ -943,8 +964,6 @@ def simulate(db: Session, organization_id: int, candidate_job_id: int,
             reason = "disabled_org"
         elif cooling_days(item) <= 0:
             reason = "no_cooling_period"
-        elif not is_working_day(ev["date"], st.working_days):
-            reason = "non_working_day"
         else:
             reason = sender.skip_reason_for(settings=st, account=account, template=template,
                                             user=user, opted_out=opted_out)

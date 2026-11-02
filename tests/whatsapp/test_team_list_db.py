@@ -111,7 +111,7 @@ def test_long_team_list_split_into_parts(org):
 
 
 def test_nothing_due_and_nothing_missed_is_skipped(org):
-    stats = D.run_org_digests(org, ORG, NOW, items=[_item(1, 7, joined_days_ago=8)])  # day 9
+    stats = D.run_org_digests(org, ORG, NOW, items=[_item(1, 7, joined_days_ago=9)])  # day 10
     assert stats["empty"] == 1 and org.query(L).count() == 0
 
 
@@ -123,7 +123,7 @@ def test_nothing_due_today_is_skipped_even_with_missed_checks_and_skip_off(org):
     org.commit()
     sent = []
     stats = D.run_org_digests(org, ORG, NOW, dispatch=sent.append,
-                              items=[_item(1, 7, joined_days_ago=8)])     # day 9: nothing due
+                              items=[_item(1, 7, joined_days_ago=9)])     # day 10: nothing due
     assert stats["empty"] == 1 and stats["queued"] == 0
     assert org.query(L).count() == 0 and sent == []
 
@@ -148,7 +148,7 @@ def test_recruiter_without_phone_gets_no_message(org, monkeypatch):
 
 def test_recruiter_with_nothing_due_gets_no_message(org):
     sent = []
-    E.evaluate_org_reminders(org, ORG, [_item(1, 7, joined_days_ago=8)], NOW, dispatch=sent.append)
+    E.evaluate_org_reminders(org, ORG, [_item(1, 7, joined_days_ago=9)], NOW, dispatch=sent.append)
     assert org.query(L).count() == 0 and sent == []
 
 
