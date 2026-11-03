@@ -196,17 +196,20 @@ def check_history(db: Session, org: int) -> Dict[int, List[Dict[str, str]]]:
     return out
 
 
-def build_dashboard(db: Session, org: int, scope: Optional[Set[int]]) -> Dict[str, Any]:
-    """Cases in `scope` (None = whole org), offers waiting to join, and alerts."""
+def build_dashboard(db: Session, org: int, scope: Optional[Set[int]],
+                    refresh_checks: bool = True) -> Dict[str, Any]:
+    """Cases in `scope` (None = whole org), offers waiting to join, and alerts.
+    `refresh_checks` creates today's checks first; reads of records skip it."""
     from app.whatsapp_layer import clients, people
     st = E.get_settings(db, org)
     today = E.local_now(st.timezone).date()
     items = clients.fetch_active_clawbacks(org).get("items") or []
     rules = [E.as_rule_spec(r) for r in E.active_rules(db, org)]
     from app.whatsapp_layer import digest_engine as D
-    D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by),
-                st.working_days)   # today's checks
-    db.commit()
+    if refresh_checks:
+        D.due_today(db, org, items, rules, today, bool(st.fallback_to_created_by),
+                    st.working_days)   # today's checks
+        db.commit()
     rows = fetch_case_rows(db, org)
     owner = lambda r: r.get("assigned_to") or r.get("created_by")
     rows = [r for r in rows if scope is None or (owner(r) and int(owner(r)) in scope)]

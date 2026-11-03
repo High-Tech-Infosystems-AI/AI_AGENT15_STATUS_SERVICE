@@ -149,6 +149,20 @@ class TodayMessage(_Body):
     message: str = Field(..., min_length=1, max_length=500)
 
 
+class DashboardRecords(_Body):
+    ids: List[int] = Field(default_factory=list, max_length=10000)
+    group_by: str = "candidate"
+    search: Optional[str] = Field(None, max_length=200)
+    statuses: List[str] = Field(default_factory=list)
+    company: List[str] = Field(default_factory=list)
+    team: List[str] = Field(default_factory=list)
+    recruiter: List[str] = Field(default_factory=list)
+    job: List[str] = Field(default_factory=list)
+    sort: Optional[str] = None
+    page: int = Field(1, ge=1)
+    page_size: int = Field(10, ge=1, le=100)
+
+
 class HealthCheckRecord(_Body):
     outcome: str
     notes: Optional[str] = Field(None, max_length=5000)
