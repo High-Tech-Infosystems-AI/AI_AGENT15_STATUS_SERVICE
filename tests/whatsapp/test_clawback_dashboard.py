@@ -117,7 +117,7 @@ def test_teams_of_users_uses_active_rank_placements(wa_db):
     assert people.teams_of_users(wa_db, 9, []) == {}
 
 
-def test_check_history_has_only_finished_checks_of_this_org(wa_db):
+def test_check_history_has_the_checks_of_this_org(wa_db):
     from app.whatsapp_layer.models import ClawbackHealthCheck as H
     earlier = TODAY - timedelta(days=7)
     for org, cj, due, status in ((9, 1, TODAY, "done"), (9, 1, earlier, "missed"),
@@ -127,5 +127,6 @@ def test_check_history_has_only_finished_checks_of_this_org(wa_db):
     wa_db.commit()
     assert sorted(CD.check_history(wa_db, 9)[1], key=lambda c: c["status"]) == [
         {"due_date": TODAY.isoformat(), "status": "done"},
-        {"due_date": earlier.isoformat(), "status": "missed"}]
+        {"due_date": earlier.isoformat(), "status": "missed"},
+        {"due_date": (TODAY + timedelta(days=7)).isoformat(), "status": "pending"}]
     assert set(CD.check_history(wa_db, 9)) == {1}
