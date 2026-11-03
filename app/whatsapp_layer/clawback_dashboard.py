@@ -186,11 +186,13 @@ def _latest_checks(db: Session, org: int, today: date) -> Dict[int, Dict[str, An
 
 
 def check_history(db: Session, org: int) -> Dict[int, List[Dict[str, str]]]:
-    """Per candidate_job: every done or missed check, for counts by date."""
+    """Per candidate_job: every done, missed or still pending check, for counts
+    by date (a pending check due on a day is one not taken that day)."""
     from app.whatsapp_layer.models import ClawbackHealthCheck as H
     out: Dict[int, List[Dict[str, str]]] = {}
     rows = (db.query(H.candidate_job_id, H.due_date, H.status)
-            .filter(H.organization_id == org, H.status.in_(("done", "missed"))).all())
+            .filter(H.organization_id == org,
+                    H.status.in_(("done", "missed", "pending"))).all())
     for cj, due, status in rows:
         out.setdefault(cj, []).append({"due_date": due.isoformat(), "status": status})
     return out
