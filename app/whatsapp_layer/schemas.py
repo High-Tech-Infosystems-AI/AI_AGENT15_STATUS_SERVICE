@@ -50,6 +50,14 @@ class AccountTest(_Body):
     phone_number: Optional[str] = None
 
 
+class PhoneTest(_Body):
+    phone_country_code: Optional[str] = Field(None, max_length=8)
+    phone_number: str = Field(..., min_length=4, max_length=20)
+    template_id: Optional[int] = None
+    user_id: Optional[int] = None
+    recipient_name: Optional[str] = Field(None, max_length=255)
+
+
 # --- Templates (§2.2) -------------------------------------------------------
 class TemplateButton(BaseModel):
     model_config = ConfigDict(extra="ignore")

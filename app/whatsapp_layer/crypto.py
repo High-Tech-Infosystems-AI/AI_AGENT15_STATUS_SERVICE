@@ -8,6 +8,8 @@ the last 4 characters (``token_last4``). Tokens are never logged.
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 from typing import Optional
@@ -63,3 +65,17 @@ def decrypt(ciphertext) -> str:
 def last4(token: Optional[str]) -> Optional[str]:
     token = (token or "").strip()
     return token[-4:] if token else None
+
+
+def token_subject(token: Optional[str]) -> Optional[str]:
+    """The user a provider JWT was issued for (its `sub` claim), or None when
+    the token is not a JWT. Read without verifying: the provider does that."""
+    parts = (token or "").strip().split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, TypeError):
+        return None
+    sub = claims.get("sub") if isinstance(claims, dict) else None
+    return str(sub) if sub else None
