@@ -2,13 +2,16 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api import status_api
 from app.api import notification_api
 from app.api.endpoints.notifications import test_api as notification_test_api
+from app.whatsapp_layer.api import whatsapp_router, clawback_notifications_router
 
 from app.core import settings
 from app.core.consul_registration import consul_registry
@@ -90,6 +93,25 @@ app.include_router(notification_api.router, prefix="/status/notifications")
 
 # Include test API router (no JWT — for the test dashboard UI)
 app.include_router(notification_test_api.router, prefix="/test")
+
+# Clawback WhatsApp notifications (CLAWBACK_WHATSAPP_API_CONTRACT.md §2)
+app.include_router(whatsapp_router, prefix="/status/whatsapp")
+app.include_router(clawback_notifications_router, prefix="/status/clawback-notifications")
+
+_CONTRACT_422_PREFIXES = ("/status/whatsapp", "/status/clawback-notifications")
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """The WhatsApp / clawback APIs report 422 as [{field, message}] (contract
+    §0). Every other route keeps FastAPI's default 422 body."""
+    if not request.url.path.startswith(_CONTRACT_422_PREFIXES):
+        return await request_validation_exception_handler(request, exc)
+    detail = []
+    for err in exc.errors():
+        loc = [str(p) for p in err.get("loc", []) if p not in ("body", "query", "path")]
+        detail.append({"field": ".".join(loc) or "body", "message": err.get("msg", "Invalid value")})
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 # Health endpoints (gateway + Consul might probe these paths)

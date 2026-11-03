@@ -117,6 +117,21 @@ class Settings(BaseSettings):
     MAIL_MAX_SEND_RETRIES: int = int(os.getenv("MAIL_MAX_SEND_RETRIES", "5"))
     MAIL_DEFAULT_BACKFILL_DAYS: int = int(os.getenv("MAIL_DEFAULT_BACKFILL_DAYS", "90"))
 
+    # Clawback WhatsApp notifications (app.whatsapp_layer)
+    # Service-to-service calls: job service /api/internal/clawback/active and
+    # org service /organisation/internal/hierarchy/subordinates, authenticated
+    # with the shared X-Internal-Token.
+    JOB_SERVICE_URL: str = os.getenv("JOB_SERVICE_URL", "")
+    ORG_SERVICE_URL: str = os.getenv("ORG_SERVICE_URL", "")
+    INTERNAL_SERVICE_TOKEN: str = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+    # Fernet key for encrypting stored WhatsApp provider tokens (K8s Secret).
+    WHATSAPP_CRED_KEY: str = os.getenv("WHATSAPP_CRED_KEY", "")
+    # "live" calls the provider; "mock" simulates success/failure/duplicates.
+    WHATSAPP_PROVIDER_MODE: str = os.getenv("WHATSAPP_PROVIDER_MODE", "mock")
+    # Public gateway base URL, used to build each account's webhook URL.
+    PUBLIC_API_BASE_URL: str = os.getenv("PUBLIC_API_BASE_URL", "")
+    WHATSAPP_HTTP_TIMEOUT_SECONDS: float = float(os.getenv("WHATSAPP_HTTP_TIMEOUT_SECONDS", "15"))
+
     @property
     def DB_URI(self) -> str:
         # Use mysql+mysqlconnector as ORM dialect and driver

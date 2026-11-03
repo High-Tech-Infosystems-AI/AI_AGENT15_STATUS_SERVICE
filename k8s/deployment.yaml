@@ -6,6 +6,14 @@ metadata:
     app: status-service
 spec:
   replicas: 1
+  # __PLACEMENT_BEGIN__ staging only: worker02 runs at its pod cap,
+  # so there is no slot for a surge pod. Replace in place instead.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  # __PLACEMENT_END__
   selector:
     matchLabels:
       app: status-service
@@ -14,6 +22,11 @@ spec:
       labels:
         app: status-service
     spec:
+      # __PLACEMENT_BEGIN__ rendered by the Jenkinsfile: staging -> worker02.
+      # On main the whole block is stripped, leaving prod placement free.
+      nodeSelector:
+        kubernetes.io/hostname: __NODE_NAME__
+      # __PLACEMENT_END__
       imagePullSecrets:
         - name: harbor-creds
       containers:
@@ -81,6 +94,16 @@ spec:
                 secretKeyRef:
                   name: mail-enc
                   key: MAIL_ENCRYPTION_KEY
+            # Fernet key that encrypts stored WhatsApp provider tokens. Create with:
+            #   kubectl -n <ns> create secret generic whatsapp-cred \
+            #     --from-literal=WHATSAPP_CRED_KEY=$(python -c \
+            #     "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())")
+            - name: WHATSAPP_CRED_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: whatsapp-cred
+                  key: WHATSAPP_CRED_KEY
+                  optional: true
             # Celery worker + beat run inside this pod so AI scheduled
             # queries and anomaly subscriptions fire on the beat tick.
             - name: CELERY_ENABLED
