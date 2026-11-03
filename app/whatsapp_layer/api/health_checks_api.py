@@ -23,7 +23,8 @@ from app.whatsapp_layer import digest_engine as D
 from app.whatsapp_layer.api.common import get_scoped, paginate, read_org, unprocessable
 from app.whatsapp_layer.models import ClawbackHealthCheck as H, WhatsAppMessageLog as L
 from app.whatsapp_layer import clawback_dashboard as dashboard_data, sender, today as today_list
-from app.whatsapp_layer.schemas import HealthCheckRecord, TodayMessage, TodayNotify
+from app.whatsapp_layer import clawback_records as R
+from app.whatsapp_layer.schemas import DashboardRecords, HealthCheckRecord, TodayMessage, TodayNotify
 
 logger = logging.getLogger("app_logger")
 router = APIRouter()
@@ -176,6 +177,35 @@ def clawback_dashboard(organization_id: Optional[int] = Query(None),
         return dashboard_data.build_dashboard(db, org, visible_recruiters(ctx, org))
     except clients.ServiceClientError as exc:
         raise HTTPException(502, str(exc))
+
+
+@router.post("/dashboard/records")
+def clawback_dashboard_records(body: DashboardRecords, organization_id: Optional[int] = Query(None),
+                               ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
+    """The candidates behind a dashboard number, filtered, searched, sorted,
+    grouped and paged (contract §6.11)."""
+    ctx.require(VIEW)
+    org = read_org(body.organization_id or organization_id, ctx)
+    errs = []
+    if body.group_by not in R.GROUP_BYS:
+        errs.append({"field": "group_by", "message": f"One of {', '.join(R.GROUP_BYS)}"})
+    sorts = R.SORTS if body.group_by == "candidate" else R.GROUP_SORTS
+    if body.sort and body.sort not in sorts:
+        errs.append({"field": "sort", "message": f"One of {', '.join(sorts)}"})
+    bad = [s for s in body.statuses if s not in R.STATUSES]
+    if bad:
+        errs.append({"field": "statuses", "message": f"Unknown: {', '.join(bad)}"})
+    if errs:
+        unprocessable(errs)
+    try:
+        data = dashboard_data.build_dashboard(db, org, visible_recruiters(ctx, org),
+                                              refresh_checks=False)
+    except clients.ServiceClientError as exc:
+        raise HTTPException(502, str(exc))
+    return R.records(data["cases"] + data["offers"], body.ids,
+                     filters={d: getattr(body, d) for d in R.DIMENSIONS},
+                     statuses=body.statuses, search=body.search, group_by=body.group_by,
+                     sort=body.sort or sorts[0], page=body.page, page_size=body.page_size)
 
 
 @router.post("/today/notify")
