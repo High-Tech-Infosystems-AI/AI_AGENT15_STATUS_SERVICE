@@ -27,6 +27,19 @@ def test_digest_priority_dedup_one_per_person():
     assert out[9][0].name == "Team leads – daily"
 
 
+def test_admin_leading_a_team_under_someone_gets_their_team():
+    tl, senior, admins = _rules()
+    # 1 heads everyone; 2 is an admin too but leads 3 and 4 under 1.
+    senior_users = [{"user_id": 1, "subordinate_user_ids": [2, 3, 4, 5]},
+                    {"user_id": 2, "subordinate_user_ids": [3, 4]}]
+    admin_users = [{"user_id": 1}, {"user_id": 2}, {"user_id": 6}]
+    out = D.assign_recipients([(tl, []), (senior, senior_users), (admins, admin_users)])
+    assert out[1][0].scope == "organisation"            # top of the hierarchy
+    assert out[6][0].scope == "organisation"            # admin who leads no one
+    assert out[2][0].name == "Senior managers – daily"
+    assert D.scope_user_ids(out[2][0].scope, out[2][1]) == {3, 4}
+
+
 def test_digest_priority_tie_lowest_id_wins():
     a = D.as_digest_spec({"id": 5, "name": "a", "audience_type": "users", "priority": 1})
     b = D.as_digest_spec({"id": 3, "name": "b", "audience_type": "users", "priority": 1})

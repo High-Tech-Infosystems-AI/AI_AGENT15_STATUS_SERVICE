@@ -111,6 +111,17 @@ def test_team_prompt_is_one_message(org, monkeypatch):
     assert log.params["part_label"] == "14 candidates" and "/clawback/today" in log.rendered_body
 
 
+def test_admin_leading_a_team_under_someone_sees_their_team(monkeypatch):
+    monkeypatch.setattr("app.whatsapp_layer.people.admin_users",
+                        lambda _d, _o: [{"user_id": 1}, {"user_id": 2}, {"user_id": 6}])
+    monkeypatch.setattr("app.whatsapp_layer.clients.fetch_subordinates", lambda _o, aud, **_k: [
+        {"user_id": 1, "subordinate_user_ids": [2, 3, 4]},
+        {"user_id": 2, "subordinate_user_ids": [3]}])
+    assert TL.scope_for_user(None, 1, 2) == {2, 3}
+    assert TL.scope_for_user(None, 1, 1) is None        # top of the hierarchy
+    assert TL.scope_for_user(None, 1, 6) is None        # admin who leads no one
+
+
 def test_parse_inbound_button_and_text():
     p = OmnichannelProvider(http=object(), timeout=1)
     ev = p.parse_webhook({}, _inbound("919876543210"))[0]

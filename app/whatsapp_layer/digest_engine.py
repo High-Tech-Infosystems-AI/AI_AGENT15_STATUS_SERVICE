@@ -131,14 +131,32 @@ def audience_request(rule: DigestRuleSpec) -> Dict[str, Any]:
     return {"audience": "users", "user_ids": av.get("user_ids") or []}
 
 
+def led_under_others(records: List[Dict[str, Any]]) -> Set[int]:
+    """People who lead someone and sit in another person's subtree: a team
+    lead under a manager, as opposed to the top of the hierarchy."""
+    below: Set[int] = set()
+    for r in records:
+        below |= {int(x) for x in r.get("subordinate_user_ids") or []
+                  if int(x) != int(r.get("user_id") or 0)}
+    return {int(r["user_id"]) for r in records
+            if r.get("user_id") and r.get("subordinate_user_ids") and int(r["user_id"]) in below}
+
+
 def assign_recipients(rule_audiences: List[Tuple[DigestRuleSpec, List[Dict[str, Any]]]]
                       ) -> Dict[int, Tuple[DigestRuleSpec, Dict[str, Any]]]:
-    """One digest per person per day: the highest-priority rule wins."""
+    """One digest per person per day: the highest-priority rule wins, except
+    that an admin who leads a team under someone else gets their team's
+    digest, not the organisation's."""
+    team_records = [u for rule, users in rule_audiences if rule.audience_type != "admins"
+                    for u in users]
+    team_leads = led_under_others(team_records)
     ordered = sorted(rule_audiences, key=lambda ra: (-ra[0].priority, ra[0].id or 0))
     out: Dict[int, Tuple[DigestRuleSpec, Dict[str, Any]]] = {}
     for rule, users in ordered:
         for u in users:
             uid = int(u.get("user_id") or 0)
+            if rule.audience_type == "admins" and uid in team_leads:
+                continue
             if uid and uid not in out:
                 out[uid] = (rule, u)
     return out
