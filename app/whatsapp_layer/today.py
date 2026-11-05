@@ -192,16 +192,24 @@ def render_list(groups: List[Dict[str, Any]], show_recruiters: bool) -> List[str
 
 
 def scope_for_user(db: Session, org: int, user_id: int) -> Optional[Set[int]]:
-    """Whose list a person sees: admins everyone, others themselves and their team."""
+    """Whose list a person sees: admins everyone, others themselves and their
+    team. An admin who leads a team under someone else sees their team, as in
+    the digests."""
     from app.whatsapp_layer import clients, people
-    if any(a["user_id"] == user_id for a in people.admin_users(db, org)):
-        return None
+    from app.whatsapp_layer import digest_engine as D
+    is_admin = any(a["user_id"] == user_id for a in people.admin_users(db, org))
     try:
-        rec = clients.subordinates_of(org, user_id)
+        if is_admin:
+            managers = clients.fetch_subordinates(org, "all_managers")
+            if user_id not in D.led_under_others(managers):
+                return None
+            rec = next((m for m in managers if int(m["user_id"]) == user_id), None)
+        else:
+            rec = clients.subordinates_of(org, user_id)
         return {user_id} | {int(x) for x in (rec or {}).get("subordinate_user_ids") or []}
     except Exception as exc:
         logger.warning("Show list: hierarchy lookup failed for user %s: %s", user_id, exc)
-        return {user_id}
+        return None if is_admin else {user_id}
 
 
 def send_list_reply(db: Session, account, phone_digits: str, message_id: Optional[str]) -> List[int]:
