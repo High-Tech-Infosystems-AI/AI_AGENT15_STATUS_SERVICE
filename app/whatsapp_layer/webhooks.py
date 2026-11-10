@@ -143,6 +143,11 @@ def process(db: Session, account: A, headers: Dict[str, str], raw: bytes) -> Non
     try:
         # Non-JSON bodies are kept raw on the row and yield no events.
         events = get_provider(account.provider).parse_webhook(headers, ev_row.body)
+        try:
+            from app.whatsapp_layer import campaign_forward
+            campaign_forward.forward(account.organization_id, headers, raw, events)
+        except Exception as exc:  # forwarding must never block our own processing
+            logger.warning("Campaign forward skipped: %s", exc)
         changed = apply_events(db, account, events)
         ev_row.processed = 1
         ev_row.matched_log_ids = changed or None

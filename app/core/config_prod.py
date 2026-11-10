@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     # with the shared X-Internal-Token.
     JOB_SERVICE_URL: str = os.getenv("JOB_SERVICE_URL", "")
     ORG_SERVICE_URL: str = os.getenv("ORG_SERVICE_URL", "")
+    # Campaign service: WhatsApp webhook events for campaign messages are
+    # forwarded to {CAMPAIGN_SERVICE_URL}/campaigns/internal/events. Empty = off.
+    CAMPAIGN_SERVICE_URL: str = os.getenv("CAMPAIGN_SERVICE_URL", "")
     INTERNAL_SERVICE_TOKEN: str = os.getenv("INTERNAL_SERVICE_TOKEN", "")
     # Fernet key for encrypting stored WhatsApp provider tokens (K8s Secret).
     WHATSAPP_CRED_KEY: str = os.getenv("WHATSAPP_CRED_KEY", "")
