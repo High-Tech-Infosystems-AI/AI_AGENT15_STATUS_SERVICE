@@ -335,7 +335,8 @@ def _iso(dt) -> Optional[str]:
 
 def serialize_log(log: L) -> Dict[str, Any]:
     return {
-        "id": log.id, "kind": log.kind, "status": log.status, "skip_reason": log.skip_reason,
+        "id": log.id, "account_id": log.account_id, "kind": log.kind, "status": log.status,
+        "skip_reason": log.skip_reason,
         "recipient_user_id": log.recipient_user_id, "recipient_name": log.recipient_name,
         "recipient_type": log.recipient_type, "phone_e164": log.phone_e164,
         "template_id": log.template_id, "template_name": log.template_name,
