@@ -89,15 +89,15 @@ def list_templates(purpose: Optional[str] = Query(None),
                    organization_id: Optional[int] = Query(None),
                    account_id: Optional[int] = Query(None),
                    ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
-    """Templates of one WhatsApp account: `account_id`, else the org's
-    clawback account. Drafts not yet tied to an account are always listed."""
+    """Every template of the org, or of one WhatsApp account when
+    `account_id` is given. Drafts not yet tied to an account are always listed."""
     ctx.require(VIEW)
     org = resolve_read_org(organization_id, ctx)
     q = db.query(T).filter(T.deleted_at.is_(None))
     if org is not None:
         q = q.filter(T.organization_id == org)
-    account = _account_for(db, org, account_id)
-    if account is not None:
+    if account_id is not None:
+        account = _account_for(db, org, account_id)
         q = q.filter(or_(T.account_id == account.id, T.account_id.is_(None)))
     if purpose:
         q = q.filter(T.purpose == purpose)

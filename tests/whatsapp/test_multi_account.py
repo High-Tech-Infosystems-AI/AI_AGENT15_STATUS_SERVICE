@@ -417,7 +417,9 @@ def test_template_create_and_list_per_account(wa_db):
         out = templates_api.list_templates(None, None, None, 1, 100, None, account_id,
                                            _ctx(), wa_db)
         return sorted((t["name"], t["account_id"]) for t in out["data"])
-    assert names() == [("for_clawback", a2.id), ("unassigned_draft", None)]
+    assert names() == [("by_body", a1.id), ("by_query", a1.id), ("for_clawback", a1.id),
+                       ("for_clawback", a2.id), ("unassigned_draft", None)]
+    assert names(a2.id) == [("for_clawback", a2.id), ("unassigned_draft", None)]
     assert names(a1.id) == [("by_body", a1.id), ("by_query", a1.id), ("for_clawback", a1.id),
                             ("unassigned_draft", None)]
     with pytest.raises(HTTPException) as err:
