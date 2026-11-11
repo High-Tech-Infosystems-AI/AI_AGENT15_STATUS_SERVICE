@@ -19,7 +19,7 @@ from app.dependencies.tenant_auth import AuthCtx, get_auth_ctx, resolve_read_org
 from app.whatsapp_layer import accounts as acct_svc, templates_service as ts
 from app.whatsapp_layer import variables as V
 from app.whatsapp_layer.api.common import get_scoped, paginate, unprocessable, write_org
-from app.whatsapp_layer.models import WhatsAppTemplate as T
+from app.whatsapp_layer.models import WhatsAppProviderAccount as A, WhatsAppTemplate as T
 from app.whatsapp_layer.providers.base import ProviderError, ProviderUnsupported
 from app.whatsapp_layer.providers.registry import get_provider
 from app.whatsapp_layer.schemas import TemplateApprove, TemplatePreview, TemplateWrite
@@ -32,7 +32,7 @@ MANAGE = "whatsapp_templates.manage"
 
 
 def _body_data(body: TemplateWrite) -> Dict[str, Any]:
-    data = body.model_dump(exclude={"organization_id"})
+    data = body.model_dump(exclude={"organization_id", "account_id"})
     data["buttons"] = [b for b in (data.get("buttons") or [])]
     data["header_format"] = (data.get("header_format") or "NONE").upper()
     data["category"] = (data.get("category") or "UTILITY").upper()
@@ -43,6 +43,29 @@ def _body_data(body: TemplateWrite) -> Dict[str, Any]:
 
 def _out(db: Session, tpl: T) -> Dict[str, Any]:
     return ts.serialize(tpl, ts.in_use_counts(db, [tpl.id]).get(tpl.id, 0))
+
+
+def _account_for(db: Session, org: Optional[int], account_id: Optional[int]):
+    """Templates belong to one WhatsApp account (channels contract §5.1). An
+    explicit `account_id` must be a non-deleted account of the org (404
+    otherwise); when omitted, the org's clawback account (§2.5), falling back
+    to any account of the org so drafts still attach before a token exists."""
+    if account_id is not None:
+        account = acct_svc.live_accounts(db).filter(A.id == int(account_id)).first()
+        if account is None or (org is not None and int(account.organization_id) != int(org)):
+            raise HTTPException(404, "WhatsApp account not found")
+        return account
+    if org is None:
+        return None
+    return acct_svc.resolve_or_any(db, org, purpose="clawback")
+
+
+def _template_account(db: Session, tpl: T):
+    """The usable account a template is sent to the provider through: its own
+    account when it has one, else the org's clawback account."""
+    if tpl.account_id:
+        return acct_svc.get_active_account(db, tpl.organization_id, account_id=tpl.account_id)
+    return acct_svc.get_active_account(db, tpl.organization_id, purpose="clawback")
 
 
 def _check_name(db: Session, org: int, account_id: Optional[int], data: Dict[str, Any],
@@ -64,12 +87,18 @@ def list_templates(purpose: Optional[str] = Query(None),
                    search: Optional[str] = Query(None),
                    page: int = Query(1, ge=1), limit: int = Query(25, ge=1, le=100),
                    organization_id: Optional[int] = Query(None),
+                   account_id: Optional[int] = Query(None),
                    ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
+    """Templates of one WhatsApp account: `account_id`, else the org's
+    clawback account. Drafts not yet tied to an account are always listed."""
     ctx.require(VIEW)
     org = resolve_read_org(organization_id, ctx)
     q = db.query(T).filter(T.deleted_at.is_(None))
     if org is not None:
         q = q.filter(T.organization_id == org)
+    account = _account_for(db, org, account_id)
+    if account is not None:
+        q = q.filter(or_(T.account_id == account.id, T.account_id.is_(None)))
     if purpose:
         q = q.filter(T.purpose == purpose)
     if approval_status:
@@ -91,12 +120,13 @@ def get_template(template_id: int, ctx: AuthCtx = Depends(get_auth_ctx),
 
 @router.post("/templates")
 def create_template(body: TemplateWrite, organization_id: Optional[int] = Query(None),
+                    account_id: Optional[int] = Query(None),
                     ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
     ctx.require(MANAGE)
     org = write_org(organization_id, body.organization_id, ctx)
     data = _body_data(body)
     unprocessable(ts.validate_template(data, for_submit=False))
-    account = acct_svc.get_any_account(db, org)
+    account = _account_for(db, org, account_id if account_id is not None else body.account_id)
     _check_name(db, org, account.id if account else None, data)
     tpl = T(organization_id=org, account_id=account.id if account else None,
             approval_status="draft", is_active=1, version=1, base_name=data["name"],
@@ -165,9 +195,11 @@ def submit_template(template_id: int, ctx: AuthCtx = Depends(get_auth_ctx),
     if tpl.approval_status not in ts.EDITABLE_STATUSES:
         raise HTTPException(409, "Only draft or rejected templates can be submitted; create a new version")
     unprocessable(ts.validate_template(ts.template_data(tpl), for_submit=True))
-    account = acct_svc.get_active_account(db, tpl.organization_id)
+    account = _template_account(db, tpl)
     if account is None:
-        raise HTTPException(409, "Connect an active WhatsApp account before submitting templates")
+        raise HTTPException(409, "Connect an active WhatsApp account before submitting templates"
+                            if not tpl.account_id else
+                            "This template's WhatsApp account is not active")
     try:
         ts.submit(db, tpl, account, ctx.user_id)
     except ProviderError as exc:
@@ -224,7 +256,7 @@ def delete_template(template_id: int, ctx: AuthCtx = Depends(get_auth_ctx),
         raise HTTPException(409, "Template is used by notification rules")
     if tpl.provider_template_id and tpl.account_id:
         # Best effort; the provider delete API is UNCONFIRMED (doc §3.27 missing).
-        account = acct_svc.get_active_account(db, tpl.organization_id)
+        account = _template_account(db, tpl)
         if account is not None:
             try:
                 get_provider(account.provider).delete_template(acct_svc.credentials(account), tpl.name)

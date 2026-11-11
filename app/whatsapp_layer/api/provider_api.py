@@ -1,5 +1,9 @@
 """Providers + provider accounts — /status/whatsapp/providers, /accounts (contract §2.1).
 
+Legacy routes: the channel service now owns WhatsApp accounts (channels
+contract §1, §5.1). An org may have any number of accounts; soft-deleted
+accounts are invisible here (404 / left out of lists).
+
 Permission: whatsapp_settings.manage (admin tier bypasses).
 """
 from __future__ import annotations
@@ -61,7 +65,7 @@ def list_accounts(organization_id: Optional[int] = Query(None),
                   db: Session = Depends(get_db)):
     ctx.require(PERM)
     org = resolve_read_org(organization_id, ctx)
-    q = db.query(A)
+    q = acct_svc.live_accounts(db)
     if org is not None:
         q = q.filter(A.organization_id == org)
     return {"data": [acct_svc.serialize(a) for a in q.order_by(A.id.asc()).all()]}
@@ -76,8 +80,7 @@ def create_account(body: AccountCreate,
     org = write_org(organization_id, body.organization_id, ctx)
     if body.provider not in available_keys():
         unprocessable([{"field": "provider", "message": f"Provider '{body.provider}' is not available"}])
-    if db.query(A.id).filter(A.organization_id == org, A.provider == body.provider).first():
-        raise HTTPException(409, "This organisation already has an account for this provider")
+    # Any number of accounts per org (channels contract §2.1): no per-provider 409.
 
     token = (body.access_token or "").strip()
     username = _token_user(body.username, token)
@@ -96,8 +99,9 @@ def create_account(body: AccountCreate,
     try:
         db.flush()
     except IntegrityError:
+        # Only uq_wa_acct_webhook_token is left: a (very unlikely) random token clash.
         db.rollback()
-        raise HTTPException(409, "This organisation already has an account for this provider")
+        raise HTTPException(409, "Could not allocate a unique webhook token; please try again")
     # Seeded / draft templates created before the account existed belong to it now.
     (db.query(T).filter(T.organization_id == org, T.account_id.is_(None))
      .update({T.account_id: acct.id}, synchronize_session=False))
@@ -112,7 +116,7 @@ def update_account(account_id: int, body: AccountUpdate,
                    ctx: AuthCtx = Depends(get_auth_ctx),
                    db: Session = Depends(get_db)):
     ctx.require(PERM)
-    acct = get_scoped(db, A, account_id, ctx, soft_delete=False)
+    acct = get_scoped(db, A, account_id, ctx)
     data = body.model_dump(exclude_unset=True)
     if "provider" in data and data["provider"] != acct.provider:
         if data["provider"] not in available_keys():
@@ -149,7 +153,7 @@ def update_account(account_id: int, body: AccountUpdate,
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(409, "This organisation already has an account for this provider")
+        raise HTTPException(409, "The account could not be saved (conflict); please try again")
     db.refresh(acct)
     return acct_svc.serialize(acct)
 
@@ -158,7 +162,7 @@ def update_account(account_id: int, body: AccountUpdate,
 def refresh_account_health(account_id: int, ctx: AuthCtx = Depends(get_auth_ctx),
                            db: Session = Depends(get_db)):
     ctx.require(PERM)
-    acct = get_scoped(db, A, account_id, ctx, soft_delete=False)
+    acct = get_scoped(db, A, account_id, ctx)
     if acct.access_token_enc is None:
         unprocessable([{"field": "access_token", "message": "Add the access token before checking health"}])
     acct_svc.refresh_health(db, acct)
@@ -171,7 +175,7 @@ def refresh_account_health(account_id: int, ctx: AuthCtx = Depends(get_auth_ctx)
 def rotate_webhook_token(account_id: int, ctx: AuthCtx = Depends(get_auth_ctx),
                          db: Session = Depends(get_db)):
     ctx.require(PERM)
-    acct = get_scoped(db, A, account_id, ctx, soft_delete=False)
+    acct = get_scoped(db, A, account_id, ctx)
     acct.webhook_token = acct_svc.new_webhook_token()
     acct.updated_by = ctx.user_id
     db.commit()
@@ -239,7 +243,7 @@ def send_test_message(account_id: int, body: Optional[AccountTest] = None,
     template or the first approved one)."""
     ctx.require(PERM)
     body = body or AccountTest()
-    acct = get_scoped(db, A, account_id, ctx, soft_delete=False)
+    acct = get_scoped(db, A, account_id, ctx)
     tpl = _test_template(db, acct.organization_id, body.template_id)
 
     recipient_id, recipient_name = None, None
@@ -264,7 +268,7 @@ def send_test_to_phone(body: PhoneTest, organization_id: Optional[int] = Query(N
     phone = people.to_e164(body.phone_country_code, body.phone_number)
     if not phone:
         unprocessable([{"field": "phone_number", "message": "Not a valid phone number"}])
-    acct = acct_svc.get_active_account(db, org)
+    acct = acct_svc.get_active_account(db, org, purpose="clawback")
     if acct is None:
         raise HTTPException(409, "WhatsApp is not connected for this organisation")
     tpl = _test_template(db, org, body.template_id)

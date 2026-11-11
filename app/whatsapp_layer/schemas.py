@@ -77,6 +77,9 @@ class TemplateWrite(_Body):
     footer_text: Optional[str] = None
     buttons: Optional[List[TemplateButton]] = None
     sample_values: Optional[Dict[str, Any]] = None
+    # Create only: the WhatsApp account the template belongs to (channels
+    # contract §5.1); omitted = the org's clawback account. Ignored on update.
+    account_id: Optional[int] = None
 
 
 class TemplateApprove(_Body):
