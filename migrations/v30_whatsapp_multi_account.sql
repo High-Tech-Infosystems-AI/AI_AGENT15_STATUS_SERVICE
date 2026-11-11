@@ -1,4 +1,4 @@
--- v27_whatsapp_multi_account.sql
+-- v30_whatsapp_multi_account.sql
 -- Multi-account WhatsApp (channels contract §2.1, §2.3):
 --   * whatsapp_provider_accounts: drop the one-account-per-org-per-provider
 --     unique key, add deleted_at (soft delete), add idx_wa_acct_org.
