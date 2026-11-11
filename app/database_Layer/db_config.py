@@ -13,6 +13,7 @@ Last Modified: [2024-05-20]
 """
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.core import settings, log
@@ -22,7 +23,17 @@ logger = logging.getLogger("app_logger")
 
 logger.info("Initializing database configuration")
 DB_URI = settings.DB_URI
-logger.info(f"Database URI configured successfully, {DB_URI}")
+
+
+def masked_db_uri(uri) -> str:
+    """The URI with its password replaced by ***, safe to log."""
+    try:
+        return make_url(uri).render_as_string(hide_password=True)
+    except Exception:
+        return "<unparseable database URI>"
+
+
+logger.info(f"Database URI configured successfully, {masked_db_uri(DB_URI)}")
 
 logger.info("Creating database engine with connection pooling")
 engine = create_engine(
