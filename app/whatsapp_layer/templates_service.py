@@ -393,6 +393,7 @@ def serialize(tpl, in_use: int = 0) -> Dict[str, Any]:
         "status": (tpl.approval_status or "").upper(),
         "rejection_reason": tpl.rejection_reason,
         "previous_category": tpl.previous_category,
+        "quality_score": getattr(tpl, "quality_score", None),
         "last_synced_at": _iso(tpl.last_synced_at),
         "submitted_at": _iso(tpl.submitted_at),
         "is_active": bool(tpl.is_active),
@@ -513,29 +514,28 @@ def submit(db: Session, tpl, account, user_id: Optional[int]) -> None:
                 tpl.id, tpl.name, tpl.organization_id, tpl.approval_status)
 
 
-def apply_provider_status(tpl, ptpl) -> bool:
-    """Copy a provider status onto a template; returns True when changed."""
+def apply_provider_status(tpl, ptpl, db: Optional[Session] = None) -> bool:
+    """Copy a provider status onto a template; returns True when changed.
+    With `db` (an existing template) this goes through
+    template_status.apply_change, the same path as the webhook: it commits
+    and notifies the submitter + admins of a new status / category."""
+    from app.whatsapp_layer import template_status as TS
     changed = False
     if ptpl.parameter_format and ptpl.parameter_format != tpl.parameter_format:
         tpl.parameter_format = ptpl.parameter_format
         changed = True
-    if ptpl.status and ptpl.status != tpl.approval_status:
-        tpl.approval_status = ptpl.status
-        changed = True
-    if ptpl.rejection_reason is not None and ptpl.rejection_reason != tpl.rejection_reason:
-        tpl.rejection_reason = ptpl.rejection_reason
-        changed = True
-    if ptpl.previous_category and ptpl.previous_category != tpl.previous_category:
-        tpl.previous_category = ptpl.previous_category
-        changed = True
-    if ptpl.category and ptpl.category in CATEGORIES and ptpl.category != tpl.category:
-        # Meta re-categorised it (e.g. UTILITY → MARKETING); keep the old one visible.
-        tpl.previous_category = tpl.previous_category or tpl.category
-        tpl.category = ptpl.category
-        changed = True
     if ptpl.provider_template_id and not tpl.provider_template_id:
         tpl.provider_template_id = ptpl.provider_template_id
         changed = True
+    change = TS.TemplateChange(
+        status=ptpl.status, reason=ptpl.rejection_reason,
+        # Meta re-categorised it (e.g. UTILITY → MARKETING); the old one stays visible.
+        category=ptpl.category if ptpl.category in CATEGORIES else None,
+        previous_category=ptpl.previous_category, source="sync")
+    if db is not None and tpl.id is not None:
+        changed = TS.apply_change(db, tpl, change) or changed
+    else:
+        changed = TS.record(tpl, change)[0] or changed
     tpl.last_synced_at = datetime.utcnow()
     return changed
 
@@ -627,7 +627,8 @@ def import_from_provider(db: Session, account) -> Dict[str, int]:
             copy_provider_content(tpl, ptpl)
             changed = True
         tpl.account_id = tpl.account_id or account.id
-        if tpl.approval_status != "disabled" and apply_provider_status(tpl, ptpl):
+        if tpl.approval_status != "disabled" and apply_provider_status(
+                tpl, ptpl, db if tpl.id is not None else None):
             changed = True
         updated += 1 if changed else 0
     return {"imported": imported, "updated": updated}
@@ -691,7 +692,7 @@ def sync_templates(db: Session, organization_id: Optional[int] = None) -> Dict[s
         except Exception as exc:  # decrypt errors etc.
             logger.warning("Template sync failed for template %s: %s", tpl.id, exc)
             continue
-        if ptpl and apply_provider_status(tpl, ptpl):
+        if ptpl and apply_provider_status(tpl, ptpl, db):
             updated += 1
             logger.info("Template %s (%s) is now %s", tpl.id, tpl.name, tpl.approval_status)
     db.commit()

@@ -145,7 +145,9 @@ class AccountHealth:
 @dataclass
 class WebhookEvent:
     """One status change understood from a webhook payload."""
-    kind: str                                 # message_status | template_status | inbound
+    # message_status | template_status | template_quality | template_category
+    # | flow_event | inbound
+    kind: str
     text: Optional[str] = None                # inbound: button label or message text
     status: Optional[str] = None              # sent|delivered|read|failed (message) / approval status (template)
     provider_message_id: Optional[str] = None
@@ -159,6 +161,17 @@ class WebhookEvent:
     template_language: Optional[str] = None
     provider_template_id: Optional[str] = None
     reason: Optional[str] = None
+    # Meta's own event word (APPROVED, FLAGGED, REINSTATED, ENDPOINT_AVAILABILITY, ...)
+    event: Optional[str] = None
+    # template_quality: GREEN | YELLOW | RED | UNKNOWN
+    quality_score: Optional[str] = None
+    previous_quality_score: Optional[str] = None
+    # template_category
+    category: Optional[str] = None
+    previous_category: Optional[str] = None
+    # flow_event
+    flow_id: Optional[str] = None
+    alert_state: Optional[str] = None
     raw: Any = None
 
 

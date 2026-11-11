@@ -8,10 +8,13 @@ Documented and used here (vendor doc v1.0.0):
 Auth is `Authorization: Bearer <User-Access-Token>` everywhere.
 
 NOT documented (index lists §3.24–3.27 but the body pages are missing), so
-get/list/delete template are best-effort guesses isolated in one block below,
-and the webhook payload mapping is a best-effort Meta Cloud API mapping.
-Both are marked `# UNCONFIRMED` and must be checked with the vendor
-(plan §4.4) before go-live.
+delete template is a best-effort guess marked `# UNCONFIRMED`. The webhook
+body is Meta's own, forwarded unchanged (CONFIRMED on staging for message
+statuses, template status updates and Flow alerts; see parse_webhook).
+
+The batch-status endpoint (§2.34) answers HTTP 400 "... current status is
+DONE ..." for a finished batch on the live server; get_send_status reads
+that as sent.
 
 Correlation: one send = one BroadNet batch (batchId = provider_ref), and we
 set campaignName = our correlation id ("cbk_<log_id>").
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -43,9 +47,15 @@ _TEMPLATE_STATUS_MAP = {
     "DISABLED": "disabled",
     "DELETED": "disabled",
     "FLAGGED": "approved",   # still sendable; quality warning only
+    "REINSTATED": "approved",  # back from PAUSED
+    "IN_REVIEW": "pending",
     "LIMIT_EXCEEDED": "paused",
 }
 
+
+# 400 text the live batch-status endpoint returns for a finished batch.
+_FINISHED_BATCH_RE = re.compile(
+    r"current\s+status\s+is\s+(DONE|FAILED|ABORTED|CANCELLED|CANCELED)\b", re.IGNORECASE)
 
 LIST_PAGE_SIZE = 50
 LIST_MAX_PAGES = 100
@@ -55,6 +65,10 @@ def normalise_template_status(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     return _TEMPLATE_STATUS_MAP.get(str(value).strip().upper())
+
+
+def _upper(value: Any) -> Optional[str]:
+    return str(value).strip().upper() if value not in (None, "") else None
 
 
 def _json_field(value: Any) -> Any:
@@ -524,9 +538,32 @@ class OmnichannelProvider(WhatsAppProvider):
                               error_message=f"Batch status {body.get('status')}", raw=body)
         return SendStatus(status="pending", processed=processed, pending=pending, raw=body)
 
+    @staticmethod
+    def finished_batch_status(status_code: int, text: str) -> Optional[SendStatus]:
+        """The live server answers HTTP 400 for a finished batch instead of
+        the documented Done body (vendor doc §2.34), e.g.
+          "Cannot edit batch 2611111136064561001 — current status is DONE
+           (allowed: PENDING / INPROGRESS / PAUSED)."
+        DONE → sent (processed count unknown; delivery comes from the
+        webhook); FAILED / ABORTED / CANCELLED → failed. Anything else → None."""
+        if status_code != 400:
+            return None
+        m = _FINISHED_BATCH_RE.search(text or "")
+        if not m:
+            return None
+        word = m.group(1).upper()
+        if word == "DONE":
+            return SendStatus(status="sent", raw=(text or "")[:500])
+        return SendStatus(status="failed", error_message=f"Batch status {word}",
+                          raw=(text or "")[:500])
+
     def get_send_status(self, creds, provider_ref) -> SendStatus:
         resp = self._request("GET", creds, "/whatsapp/message/edit",
                              params={"batch_Id": provider_ref})
+        finished = self.finished_batch_status(
+            resp.status_code, f"{_error_text(resp)} {resp.text or ''}")
+        if finished is not None:
+            return finished
         self._raise_for_status(resp)
         return self.parse_batch_status(self._json(resp))
 
@@ -562,17 +599,26 @@ class OmnichannelProvider(WhatsAppProvider):
     # Webhook
     # ------------------------------------------------------------------
     def parse_webhook(self, headers, body) -> List[WebhookEvent]:
-        # UNCONFIRMED: the vendor has not documented the webhook payload
-        # (plan §4.4 #3). This maps the Meta Cloud API shape, which BroadNet
-        # most likely forwards:
-        #   {"entry":[{"changes":[{"field":"messages","value":{"statuses":[
-        #       {"id":"wamid..","status":"delivered","recipient_id":"91..",
-        #        "timestamp":"169..","errors":[{"code":131026,"title":".."}]}]}}]}]}
-        #   {"entry":[{"changes":[{"field":"message_template_status_update",
-        #       "value":{"event":"APPROVED","message_template_id":123,
-        #        "message_template_name":"x","message_template_language":"en_US",
-        #        "reason":"NONE"}}]}]}
-        # plus flat {"statuses":[...]} / top-level batchId|campaignName keys.
+        # BroadNet forwards Meta's WhatsApp Business webhook body unchanged
+        # (CONFIRMED on staging for the fields marked below):
+        #   field "messages" (CONFIRMED) → value.statuses[] {id (wamid), status,
+        #       timestamp, recipient_id, pricing, errors?, biz_opaque_callback_data
+        #       = '{"msg_id":..,"username":"..","batch_id":..}'} and value.messages[]
+        #   field "message_template_status_update" (CONFIRMED) → value {event:
+        #       APPROVED|REJECTED|PENDING|PAUSED|DISABLED|FLAGGED|REINSTATED|
+        #       PENDING_DELETION|DELETED|..., reason, message_template_id,
+        #       message_template_name, message_template_language,
+        #       message_template_category, other_info?}
+        #   field "flows" (CONFIRMED) → value {event: ENDPOINT_AVAILABILITY|...,
+        #       flow_id, message, threshold, alert_state, availability}
+        #   field "message_template_quality_update" → value {previous_quality_score,
+        #       new_quality_score, message_template_id, message_template_name,
+        #       message_template_language}
+        #   field "template_category_update" → value {message_template_id,
+        #       message_template_name, message_template_language,
+        #       previous_category, new_category | correct_category}
+        # The last two follow Meta's documented shape; not yet seen from BroadNet.
+        # Flat {"statuses":[...]} / top-level batchId|campaignName are still read.
         events: List[WebhookEvent] = []
         if not isinstance(body, (dict, list)):
             return events
@@ -592,17 +638,55 @@ class OmnichannelProvider(WhatsAppProvider):
             for field_name, value in values:
                 if not isinstance(value, dict):
                     continue
-                if field_name == "message_template_status_update" or "message_template_name" in value:
+                tpl_keys = dict(
+                    template_name=value.get("message_template_name"),
+                    template_language=value.get("message_template_language"),
+                    provider_template_id=(str(value["message_template_id"])
+                                          if value.get("message_template_id") is not None else None),
+                    raw=value)
+                if field_name == "message_template_quality_update" or (
+                        field_name is None and "new_quality_score" in value):
+                    events.append(WebhookEvent(
+                        kind="template_quality",
+                        quality_score=_upper(value.get("new_quality_score")),
+                        previous_quality_score=_upper(value.get("previous_quality_score")),
+                        **tpl_keys))
+                    continue
+                if field_name == "template_category_update" or (
+                        field_name is None and ("new_category" in value or "correct_category" in value)):
+                    events.append(WebhookEvent(
+                        kind="template_category",
+                        category=_upper(value.get("new_category")),
+                        previous_category=_upper(value.get("previous_category")),
+                        # Meta's advance notice ("will be re-categorised") only
+                        # carries correct_category; the category is not changed yet.
+                        event=None if value.get("new_category") else (
+                            "CORRECT_CATEGORY:" + str(_upper(value.get("correct_category")))
+                            if value.get("correct_category") else None),
+                        **tpl_keys))
+                    continue
+                if field_name == "message_template_status_update" or (
+                        field_name is None and "message_template_name" in value):
+                    other = value.get("other_info") if isinstance(value.get("other_info"), dict) else {}
+                    reason = value.get("reason")
+                    if not reason or str(reason).upper() == "NONE":
+                        reason = other.get("description") or other.get("title") or None
                     events.append(WebhookEvent(
                         kind="template_status",
                         status=normalise_template_status(value.get("event")),
-                        template_name=value.get("message_template_name"),
-                        template_language=value.get("message_template_language"),
-                        provider_template_id=(str(value["message_template_id"])
-                                              if value.get("message_template_id") is not None else None),
-                        reason=value.get("reason"),
-                        raw=value,
-                    ))
+                        event=_upper(value.get("event")),
+                        reason=reason,
+                        category=_upper(value.get("message_template_category")),
+                        **tpl_keys))
+                    continue
+                if field_name == "flows":
+                    events.append(WebhookEvent(
+                        kind="flow_event",
+                        event=_upper(value.get("event")),
+                        flow_id=str(value["flow_id"]) if value.get("flow_id") is not None else None,
+                        alert_state=_upper(value.get("alert_state")),
+                        reason=value.get("message"),
+                        raw=value))
                     continue
                 for msg in value.get("messages") or []:
                     # A reply: Meta's `button` (template quick reply),
@@ -618,6 +702,8 @@ class OmnichannelProvider(WhatsAppProvider):
                 for st in value.get("statuses") or []:
                     if not isinstance(st, dict):
                         continue
+                    opaque = _json_field(st.get("biz_opaque_callback_data"))
+                    opaque = opaque if isinstance(opaque, dict) else {}
                     errors = st.get("errors") or []
                     err = errors[0] if errors and isinstance(errors[0], dict) else {}
                     ts = st.get("timestamp")
@@ -629,7 +715,8 @@ class OmnichannelProvider(WhatsAppProvider):
                         timestamp=_int(ts) if ts else None,
                         error_code=str(err.get("code")) if err.get("code") is not None else None,
                         error_message=err.get("title") or err.get("message"),
-                        batch_id=str(st.get("batchId") or top_batch or "") or None,
+                        batch_id=str(st.get("batchId") or opaque.get("batch_id")
+                                     or top_batch or "") or None,
                         campaign_name=st.get("campaignName") or top_campaign,
                         raw=st,
                     ))

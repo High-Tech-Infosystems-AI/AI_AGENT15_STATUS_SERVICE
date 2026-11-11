@@ -1,11 +1,16 @@
 """Inbound provider webhooks: store the raw event, then map what we understand.
 
-# UNCONFIRMED: the vendor has not documented the webhook payload (plan §4.4
-# #3/#4). The provider adapter maps Meta Cloud API-style payloads; matching a
-# status to our log is best-effort, in this order:
-#   1. provider_message_id (wamid)
-#   2. campaignName (= our correlation_id "cbk_<log_id>") / batchId (= provider_ref)
-#   3. recipient phone + the most recent submitted/sent log within 24 h
+Omnichannel forwards Meta's WhatsApp Business webhook body unchanged
+(CONFIRMED on staging for message statuses, template status updates and
+Flow alerts; see OmnichannelProvider.parse_webhook). Template status /
+quality / category changes go through template_status.apply_change (the
+same path as the polling sync); Flow alerts through flow_alerts.handle.
+
+Matching a message status to our log, in this order:
+  1. provider_message_id (wamid)
+  2. campaignName (= our correlation_id "cbk_<log_id>") / batchId (= provider_ref,
+     also read from biz_opaque_callback_data.batch_id)
+  3. recipient phone + the most recent submitted/sent log within 24 h
 """
 from __future__ import annotations
 
@@ -19,8 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.whatsapp_layer import sender
 from app.whatsapp_layer.models import (
-    WhatsAppMessageLog as L, WhatsAppProviderAccount as A, WhatsAppTemplate as T,
-    WhatsAppWebhookEvent,
+    WhatsAppMessageLog as L, WhatsAppProviderAccount as A, WhatsAppWebhookEvent,
 )
 from app.whatsapp_layer.providers.base import WebhookEvent
 
@@ -60,7 +64,6 @@ def store_event(db: Session, account: A, headers: Dict[str, str], raw: bytes) ->
 
 def _match_log(db: Session, account: A, ev: WebhookEvent, at: datetime) -> Optional[L]:
     base = db.query(L).filter(L.organization_id == account.organization_id)
-    # UNCONFIRMED: matching keys depend on the (undocumented) payload.
     if ev.provider_message_id:
         log = base.filter(L.provider_message_id == ev.provider_message_id).first()
         if log:
@@ -91,7 +94,8 @@ def _match_log(db: Session, account: A, ev: WebhookEvent, at: datetime) -> Optio
 
 def apply_events(db: Session, account: A, events: List[WebhookEvent]) -> List[int]:
     """Apply parsed events; returns the ids of logs that changed."""
-    from app.whatsapp_layer import alerts
+    from app.whatsapp_layer import flow_alerts
+    from app.whatsapp_layer import template_status as TS
     changed: List[int] = []
     now = datetime.utcnow()
     for ev in events:
@@ -111,32 +115,24 @@ def apply_events(db: Session, account: A, events: List[WebhookEvent]) -> List[in
                 ok = sender.advance_status(log, ev.status, at)
             if ok:
                 changed.append(log.id)
-        elif ev.kind == "template_status" and ev.status:
-            q = db.query(T).filter(T.organization_id == account.organization_id,
-                                   T.deleted_at.is_(None),
-                                   or_(T.account_id == account.id, T.account_id.is_(None)))
-            tpl = None
-            if ev.provider_template_id:
-                tpl = q.filter(T.provider_template_id == ev.provider_template_id).first()
-            if tpl is None and ev.template_name:
-                tq = q.filter(T.name == ev.template_name)
-                if ev.template_language:
-                    tq = tq.filter(T.language == ev.template_language)
-                tpl = tq.first()
-            if tpl is None or tpl.approval_status == ev.status:
+        elif ev.kind in ("template_status", "template_quality", "template_category"):
+            tpl = TS.find_template(db, account, ev.provider_template_id, ev.template_name,
+                                   ev.template_language)
+            if tpl is None:
+                logger.info("Webhook: %s for unknown template %s (%s)", ev.kind,
+                            ev.template_name, ev.provider_template_id)
                 continue
-            tpl.approval_status = ev.status
-            if ev.status == "rejected":
-                tpl.rejection_reason = ev.reason or tpl.rejection_reason
-            tpl.last_synced_at = now
-            logger.info("Webhook: template %s (%s) → %s", tpl.id, tpl.name, ev.status)
-            if ev.status == "rejected":
-                db.commit()
-                alerts.notify_org_admins(
-                    db, account.organization_id,
-                    title="WhatsApp template rejected",
-                    message=f"Template '{tpl.name}' was rejected: {tpl.rejection_reason or 'no reason given'}.",
-                    dedupe_key=f"template_rejected:{tpl.id}", event="alert_template_rejected")
+            notice = None
+            if ev.kind == "template_category" and (ev.event or "").startswith("CORRECT_CATEGORY:"):
+                notice = ev.event.split(":", 1)[1]
+            TS.apply_change(db, tpl, TS.TemplateChange(
+                status=ev.status if ev.kind == "template_status" else None,
+                event=ev.event, reason=ev.reason,
+                category=ev.category if ev.kind == "template_category" else None,
+                previous_category=ev.previous_category,
+                quality_score=ev.quality_score, category_notice=notice, source="webhook"))
+        elif ev.kind == "flow_event":
+            flow_alerts.handle(db, account, ev)
     db.commit()
     return changed
 

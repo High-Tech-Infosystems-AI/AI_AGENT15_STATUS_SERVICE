@@ -1,5 +1,5 @@
 """In-app alerts to an org's admins (provider auth_error, high failure rate,
-template rejected). Reuses the notification store + Redis fan-out exactly
+template status changes, Flow endpoint alerts). Reuses the notification store + Redis fan-out exactly
 like the scheduler does, deduplicated for 24 h per (org, key) in Redis.
 
 Each alert is an Event (contract §6.2: system:alert_failure_rate,
@@ -8,7 +8,7 @@ alert is not raised."""
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -27,27 +27,72 @@ def org_admin_user_ids(db: Session, organization_id: int) -> List[int]:
     return [int(r[0]) for r in rows]
 
 
-def _first_time(dedupe_key: Optional[str], organization_id: int) -> bool:
-    if not dedupe_key:
-        return True
+def org_user_ids(db: Session, organization_id: int, user_ids: Iterable[Optional[int]]) -> List[int]:
+    """The given users that still exist in the org (others are dropped, so a
+    deleted submitter never breaks the notification)."""
+    ids = sorted({int(i) for i in user_ids if i})
+    if not ids:
+        return []
+    try:
+        rows = db.execute(text(
+            "SELECT id FROM users WHERE organization_id = :org AND deleted_at IS NULL "
+            "AND id IN (" + ",".join(str(i) for i in ids) + ")"), {"org": organization_id}).fetchall()
+    except Exception as exc:
+        logger.warning("User lookup for org %s failed: %s", organization_id, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return []
+    return [int(r[0]) for r in rows]
+
+
+def _redis_key(organization_id: int, key: str) -> str:
+    return f"wa:alert:{organization_id}:{key}"
+
+
+def claim(organization_id: int, key: str, ttl: int = ALERT_DEDUPE_TTL) -> bool:
+    """True the first time `key` is claimed within `ttl` (Redis SET NX). Redis
+    down → True (better a duplicate than a lost alert)."""
     try:
         from app.notification_layer import redis_manager
         client = redis_manager.get_notification_redis()
-        return bool(client.set(f"wa:alert:{organization_id}:{dedupe_key}", "1",
-                               nx=True, ex=ALERT_DEDUPE_TTL))
+        return bool(client.set(_redis_key(organization_id, key), "1", nx=True, ex=ttl))
     except Exception as exc:
         logger.warning("Alert dedupe unavailable (%s); sending anyway", exc)
         return True
 
 
+def release(organization_id: int, keys: Iterable[str]) -> int:
+    """Forget claimed keys, so the same alert can be raised again. Returns
+    how many were set (0 when Redis is down)."""
+    keys = [_redis_key(organization_id, k) for k in keys]
+    if not keys:
+        return 0
+    try:
+        from app.notification_layer import redis_manager
+        return int(redis_manager.get_notification_redis().delete(*keys) or 0)
+    except Exception as exc:
+        logger.warning("Alert dedupe release failed (%s)", exc)
+        return 0
+
+
+def _first_time(dedupe_key: Optional[str], organization_id: int) -> bool:
+    if not dedupe_key:
+        return True
+    return claim(organization_id, dedupe_key)
+
+
 def notify_org_admins(db: Session, organization_id: int, *, title: str,
                       message: str, dedupe_key: Optional[str] = None,
                       metadata: Optional[dict] = None,
-                      event: Optional[str] = None) -> Optional[int]:
-    """Create a push notification for the org's admins. Returns its id, or
-    None when the `event` toggle is off / deduplicated / no admins / failed
-    (never raises). `event` is the system event name, e.g.
-    "alert_failure_rate"."""
+                      event: Optional[str] = None,
+                      user_ids: Optional[Iterable[Optional[int]]] = None) -> Optional[int]:
+    """Create a push notification for the org's admins (plus `user_ids`,
+    e.g. whoever submitted a template, when they are still in the org).
+    Returns its id, or None when the `event` toggle is off / deduplicated /
+    no recipients / failed (never raises). `event` is the system event
+    name, e.g. "alert_failure_rate"."""
     from app.notification_layer import redis_manager, store
     from app.whatsapp_layer import events as EV
 
@@ -60,8 +105,10 @@ def notify_org_admins(db: Session, organization_id: int, *, title: str,
         return None
     try:
         admin_ids = org_admin_user_ids(db, organization_id)
+        extra = org_user_ids(db, organization_id, user_ids or [])
+        admin_ids = admin_ids + [i for i in extra if i not in admin_ids]
         if not admin_ids:
-            logger.warning("No admins found for org %s; alert '%s' dropped", organization_id, title)
+            logger.warning("No recipients found for org %s; alert '%s' dropped", organization_id, title)
             return None
         meta = dict(metadata or {})
         meta.update({"organization_id": organization_id, "source": "whatsapp"})

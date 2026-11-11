@@ -123,7 +123,7 @@ Sections the chosen category or header does not use are dropped silently, not re
   "custom_validity_period": false, "validity_period_seconds": null, "time_to_live": 0,
   "provider_template_id": null,
   "approval_status": "draft", "status": "DRAFT",
-  "rejection_reason": null, "previous_category": null,
+  "rejection_reason": null, "previous_category": null, "quality_score": null,
   "last_synced_at": null, "submitted_at": null,
   "is_active": true, "version": 1, "in_use_by_rules": 0,
   "warnings": [],
@@ -140,6 +140,7 @@ How the fields map to BroadNet's list columns:
 | Category | `category` |
 | Status | `status`: `DRAFT`, `PENDING`, `APPROVED`, `REJECTED`, `PAUSED` or `DISABLED`. The lowercase `approval_status` is also returned. |
 | Previous Category | `previous_category` (`null` is shown as `-`) |
+| (Quality) | `quality_score`: `GREEN`, `YELLOW`, `RED`, `UNKNOWN` or `null` (Meta's quality webhook; column added by `migrations/v32_whatsapp_template_quality.sql`, run by hand) |
 | Template type | `template_type_label`: `DEFAULT`, `UTILITY DEFAULT`, `CATALOGUE`, `CALLING_PERMISSION_REQUEST`, `UTILITY CALLING_PERMISSION_REQUEST` or `OTP` |
 | Time to Live | `time_to_live` (custom validity seconds, otherwise 0) |
 | Header Type | `header_type` |
@@ -450,3 +451,42 @@ The following are **UNCONFIRMED**. The vendor PDF has no section for them (§3.1
 - Read, list and delete endpoints (`GET /whatsapp/template?name=`, `GET /whatsapp/template/list`, `DELETE /whatsapp/template/{name}`). These existed before this change; delete is best effort.
 
 Nothing is refused at submit because of these guesses. If BroadNet rejects a field, submit returns 502 with BroadNet's message.
+
+## Approval status updates and notifications
+
+Omnichannel forwards Meta's webhook body unchanged to the account's webhook
+URL. CONFIRMED on staging: `message_template_status_update`, `messages`
+(statuses) and `flows`. `message_template_quality_update` and
+`template_category_update` follow Meta's documented shape (not yet seen from
+Omnichannel).
+
+Webhook events and the 15-minute sync both go through
+`template_status.apply_change`, so they behave the same:
+
+| Meta event | `approval_status` | Notified |
+|---|---|---|
+| `APPROVED` | `approved` | "approved — you can now use it in clawback and campaigns" |
+| `REINSTATED` (or approved after paused) | `approved` | "active again" |
+| `FLAGGED` | `approved` (still sendable), `quality_score` = `RED` | quality dropped |
+| `PENDING`, `IN_APPEAL` | `pending` | no |
+| `REJECTED` | `rejected`, `rejection_reason` = Meta's reason | "rejected: <reason>" |
+| `PAUSED`, `LIMIT_EXCEEDED` | `paused`, reason from `other_info` | what to do |
+| `DISABLED`, `PENDING_DELETION`, `DELETED` | `disabled` | create a new version |
+
+Quality drops to `YELLOW` / `RED` notify; a category change sets
+`previous_category` / `category` and notifies. A template that was still a
+`draft` here (imported) changes quietly.
+
+Recipients: the user who submitted the template (`updated_by` at submit) and
+its creator (`created_by`), plus org admins, as in-app notifications with live
+push (there is no email path for these alerts). `metadata.link` is
+`/settings/channels/whatsapp/<account_id>/templates/<template_id>`; the bell
+opens it. Each value is notified once per template (Redis, 7 days); moving to
+another value releases the old key, so approved → paused → approved notifies
+again. Toggles: `system:alert_template_rejected` (rejections) and
+`system:alert_template_status` (everything else).
+
+Flow alerts (`flows`) notify org admins once per flow + event while
+`alert_state` is `ACTIVATED`; `DEACTIVATED` / `RESOLVED` clears it (and says it
+recovered). Toggle `system:alert_flow_endpoint`. They are forwarded to the
+Campaign Service, which stores the alert on its flow.
