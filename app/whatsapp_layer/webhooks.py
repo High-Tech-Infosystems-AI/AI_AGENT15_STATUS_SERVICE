@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.whatsapp_layer import sender
@@ -32,7 +33,9 @@ _DROP_HEADERS = {"authorization", "cookie", "x-internal-token"}
 def find_account(db: Session, provider: str, webhook_token: str) -> Optional[A]:
     if not webhook_token:
         return None
-    return (db.query(A).filter(A.webhook_token == webhook_token, A.provider == provider)
+    # A deleted account's token no longer identifies anything.
+    return (db.query(A).filter(A.webhook_token == webhook_token, A.provider == provider,
+                               A.deleted_at.is_(None))
             .first())
 
 
@@ -72,7 +75,9 @@ def _match_log(db: Session, account: A, ev: WebhookEvent, at: datetime) -> Optio
             return log
     if ev.recipient:
         phone = "+" + "".join(ch for ch in ev.recipient if ch.isdigit())
+        # Same org may send from several accounts: only this account's logs.
         log = (base.filter(L.phone_e164 == phone,
+                           or_(L.account_id == account.id, L.account_id.is_(None)),
                            L.status.in_(("submitted", "sent", "delivered")),
                            L.submitted_at >= at - timedelta(hours=24))
                .order_by(L.submitted_at.desc(), L.id.desc()).first())
@@ -108,7 +113,8 @@ def apply_events(db: Session, account: A, events: List[WebhookEvent]) -> List[in
                 changed.append(log.id)
         elif ev.kind == "template_status" and ev.status:
             q = db.query(T).filter(T.organization_id == account.organization_id,
-                                   T.deleted_at.is_(None))
+                                   T.deleted_at.is_(None),
+                                   or_(T.account_id == account.id, T.account_id.is_(None)))
             tpl = None
             if ev.provider_template_id:
                 tpl = q.filter(T.provider_template_id == ev.provider_template_id).first()

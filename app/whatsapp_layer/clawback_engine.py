@@ -615,7 +615,7 @@ def evaluate_org_reminders(db: Session, organization_id: int, items: List[Dict[s
     if not can_send:
         return stats
 
-    account = acct_svc.get_active_account(db, organization_id)
+    account = acct_svc.get_active_account(db, organization_id, purpose="clawback")
     recipients = people.get_users(db, [e["recruiter_user_id"] for e in entries + no_cooling])
     base = st.app_base_url
 
@@ -902,7 +902,7 @@ def send_now(db: Session, organization_id: int, candidate_job_id: int,
                 else sender.approved_template_for_purpose(db, organization_id, purpose))
     rid = recruiter_for(item, bool(st.fallback_to_created_by))
     users = people.get_users(db, [rid] if rid else [])
-    account = acct_svc.get_active_account(db, organization_id)
+    account = acct_svc.get_active_account(db, organization_id, purpose="clawback")
     check = db.query(H).filter(H.candidate_job_id == int(candidate_job_id),
                                H.due_date == today).first()
 
@@ -949,7 +949,7 @@ def simulate(db: Session, organization_id: int, candidate_job_id: int,
     rid = recruiter_for(item, bool(st.fallback_to_created_by) if st else True)
     users = people.get_users(db, [rid] if rid else [])
     user = users.get(rid)
-    account = acct_svc.get_active_account(db, organization_id)
+    account = acct_svc.get_active_account(db, organization_id, purpose="clawback")
     opted_out = sender.is_opted_out(db, organization_id, (user or {}).get("phone_e164"))
     templates: Dict[Optional[int], Any] = {}
 

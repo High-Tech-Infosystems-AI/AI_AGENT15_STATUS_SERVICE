@@ -467,8 +467,12 @@ def import_from_provider(db: Session, account) -> Dict[str, int]:
         if not ptpl.name or not ptpl.body_text:
             continue
         language = ptpl.language or "en_US"
+        # Templates are per account (WABA): another account's template of the
+        # same name is a different template. Drafts without an account match.
         tpl = (db.query(T).filter(T.organization_id == account.organization_id, T.name == ptpl.name,
-                                  T.language == language, T.deleted_at.is_(None)).first())
+                                  T.language == language, T.deleted_at.is_(None),
+                                  or_(T.account_id == account.id, T.account_id.is_(None)))
+               .order_by(T.account_id.is_(None), T.id.asc()).first())
         if tpl is None:
             if ptpl.category not in CATEGORIES:
                 logger.info("Skipping provider template %s: category %s", ptpl.name, ptpl.category)
@@ -510,7 +514,7 @@ def sync_templates(db: Session, organization_id: Optional[int] = None) -> Dict[s
     if organization_id is not None:
         q = q.filter(T.organization_id == organization_id)
     checked = updated = imported = failed = 0
-    accounts = db.query(A).filter(A.status == "active")
+    accounts = db.query(A).filter(A.status == "active", A.deleted_at.is_(None))
     if organization_id is not None:
         accounts = accounts.filter(A.organization_id == organization_id)
     for account in accounts.all():
@@ -536,7 +540,7 @@ def sync_templates(db: Session, organization_id: Optional[int] = None) -> Dict[s
     for tpl in q.all():
         if tpl.account_id in unsupported_accounts:
             continue
-        account = db.query(A).filter(A.id == tpl.account_id).first()
+        account = db.query(A).filter(A.id == tpl.account_id, A.deleted_at.is_(None)).first()
         if not account or account.status != "active":
             continue
         checked += 1

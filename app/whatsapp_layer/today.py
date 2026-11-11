@@ -261,7 +261,7 @@ def send_prompt(db: Session, org: int, recruiter_user_id: int, ctx_user_id: int)
     if not open_count:
         return None
     template = sender.approved_template_for_purpose(db, org, "recruiter_batch")
-    account = acct_svc.get_active_account(db, org)
+    account = acct_svc.get_active_account(db, org, purpose="clawback")
     user = people.get_users(db, [recruiter_user_id]).get(recruiter_user_id) or {}
     overdue = sum(1 for g in data["groups"] for c in g["candidates"] if c["overdue"] and c["status"] != "done")
     part = E.message_parts(template, E.candidate_list_parts(due, st.app_base_url))[0] if due else {
@@ -283,7 +283,7 @@ def send_note(db: Session, org: int, recruiter_user_id: int, ctx_user_id: int, n
     st = E.get_settings(db, org)
     template = (db.query(T).filter(T.organization_id == org, T.name == "clawback_manager_note",
                                    T.deleted_at.is_(None)).first())
-    account = acct_svc.get_active_account(db, org)
+    account = acct_svc.get_active_account(db, org, purpose="clawback")
     names = people.get_users(db, [recruiter_user_id, ctx_user_id])
     user = names.get(recruiter_user_id) or {}
     return _send_manual(db, org, st, account, template, recruiter_user_id, user, ctx_user_id, "note", {
