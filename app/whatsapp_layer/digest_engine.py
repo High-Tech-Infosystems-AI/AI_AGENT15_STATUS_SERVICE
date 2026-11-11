@@ -395,7 +395,7 @@ def run_org_digests(db: Session, organization_id: int, now_utc: Optional[datetim
         items = clients.fetch_active_clawbacks(organization_id).get("items") or []
     rules = [E.as_rule_spec(r) for r in E.active_rules(db, organization_id)]
     checks = check_dicts(db, organization_id, today - timedelta(days=7))
-    account = acct_svc.get_active_account(db, organization_id)
+    account = acct_svc.get_active_account(db, organization_id, purpose="clawback")
     recipients = people.get_users(db, list(ready))
     to_dispatch: List[int] = []
 

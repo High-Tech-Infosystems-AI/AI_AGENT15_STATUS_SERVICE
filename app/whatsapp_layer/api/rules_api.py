@@ -155,7 +155,7 @@ def readiness(organization_id: Optional[int] = Query(None),
     ctx.require(VIEW)
     org = read_org(organization_id, ctx)
     st = E.get_settings(db, org)
-    account = acct_svc.get_any_account(db, org)
+    account = acct_svc.resolve_or_any(db, org, purpose="clawback")
 
     tpls = db.query(T).filter(T.organization_id == org, T.deleted_at.is_(None),
                               T.is_active == 1).all()

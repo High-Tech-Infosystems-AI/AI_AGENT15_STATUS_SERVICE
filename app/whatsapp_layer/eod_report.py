@@ -121,7 +121,7 @@ def run_org_eod(db: Session, org: int, now_utc: Optional[datetime] = None,
     drops = fetch_drops(db, org, today)
     template = (db.query(T).filter(T.organization_id == org, T.name == TEMPLATE_NAME,
                                    T.deleted_at.is_(None)).first())
-    account = acct_svc.get_active_account(db, org)
+    account = acct_svc.get_active_account(db, org, purpose="clawback")
     users = people.get_users(db, list(ready))
     names = people.user_names(db, {int(r["recruiter_user_id"]) for r in checks + drops
                                    if r["recruiter_user_id"]})

@@ -90,7 +90,8 @@ def skip_reason_for(*, settings, account, template, user: Optional[Dict],
     """First applicable skip reason (contract §2.8), or None to send."""
     if check_org_enabled and (settings is None or not settings.enabled):
         return "disabled_org"
-    if account is None or account.status != "active":
+    if (account is None or account.status != "active"
+            or getattr(account, "deleted_at", None) is not None):
         return "account_inactive"
     if template is None or template.approval_status != "approved" or not template.is_active \
             or template.deleted_at is not None:
@@ -155,9 +156,12 @@ def send_log(db: Session, log_id: int, now: Optional[datetime] = None) -> Option
     if log is None or log.status != "queued":
         return log
 
-    account = db.query(A).filter(A.id == log.account_id).first() if log.account_id else None
-    if account is None or account.status != "active":
-        account = acct_svc.get_active_account(db, log.organization_id)
+    # The account chosen when the log was queued, if it is still usable;
+    # otherwise the org's clawback account (channels contract §2.5).
+    account = (acct_svc.get_active_account(db, log.organization_id, account_id=log.account_id)
+               if log.account_id else None)
+    if account is None:
+        account = acct_svc.get_active_account(db, log.organization_id, purpose="clawback")
     if account is None:
         mark_skipped(log, "account_inactive")
         db.commit()
@@ -273,7 +277,8 @@ def poll_batches(db: Session, now: Optional[datetime] = None, limit: int = 500) 
     accounts: Dict[int, Optional[A]] = {}
     for log in logs:
         if log.account_id not in accounts:
-            accounts[log.account_id] = db.query(A).filter(A.id == log.account_id).first()
+            accounts[log.account_id] = (db.query(A).filter(A.id == log.account_id,
+                                                           A.deleted_at.is_(None)).first())
         account = accounts[log.account_id]
         if account is None or account.status != "active":
             continue

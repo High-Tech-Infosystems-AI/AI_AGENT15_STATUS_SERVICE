@@ -160,7 +160,7 @@ def ensure_default_templates(db: Session, organization_id: int,
     from app.whatsapp_layer import accounts as acct_svc
     from app.whatsapp_layer.models import WhatsAppTemplate as T
 
-    account = acct_svc.get_any_account(db, organization_id)
+    account = acct_svc.resolve_or_any(db, organization_id, purpose="clawback")
     by_purpose: Dict[str, int] = {}
     for spec in DEFAULT_TEMPLATES:
         purpose = spec["purpose"]

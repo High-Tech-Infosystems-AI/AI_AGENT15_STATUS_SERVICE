@@ -8,6 +8,7 @@ import secrets
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.whatsapp_layer import crypto
@@ -42,9 +43,74 @@ def credentials(account: WhatsAppProviderAccount) -> ProviderCredentials:
     )
 
 
-def get_active_account(db: Session, organization_id: int) -> Optional[WhatsAppProviderAccount]:
-    """The org's sending account (one active account per org)."""
-    return (db.query(WhatsAppProviderAccount)
+CHANNEL_TYPE = "whatsapp"
+DEFAULT_PURPOSE = "default"
+
+
+def live_accounts(db: Session):
+    """Query over the accounts that still exist (not soft-deleted). Every
+    lookup in this service starts here (channels contract §2.1)."""
+    return db.query(WhatsAppProviderAccount).filter(WhatsAppProviderAccount.deleted_at.is_(None))
+
+
+def is_usable(account: Optional[WhatsAppProviderAccount], organization_id: int) -> bool:
+    """§2.5 test: belongs to the org, not deleted, status 'active'."""
+    return (account is not None and account.deleted_at is None
+            and account.status == "active"
+            and int(account.organization_id) == int(organization_id))
+
+
+def _usable_by_id(db: Session, organization_id: int,
+                  account_id: Optional[int]) -> Optional[WhatsAppProviderAccount]:
+    if account_id is None:
+        return None
+    account = (live_accounts(db)
+               .filter(WhatsAppProviderAccount.id == int(account_id),
+                       WhatsAppProviderAccount.organization_id == organization_id,
+                       WhatsAppProviderAccount.status == "active")
+               .first())
+    return account if is_usable(account, organization_id) else None
+
+
+def _default_account_id(db: Session, organization_id: int, purpose: str) -> Optional[int]:
+    """The chn_channel_defaults row's account id for (org, purpose, whatsapp).
+    The table belongs to the channel service; if it is not there yet the
+    lookup degrades to "no default" instead of breaking sends."""
+    from app.whatsapp_layer.models import ChannelDefault
+    try:
+        row = (db.query(ChannelDefault.account_id)
+               .filter(ChannelDefault.organization_id == organization_id,
+                       ChannelDefault.purpose == purpose,
+                       ChannelDefault.channel_type == CHANNEL_TYPE)
+               .first())
+    except SQLAlchemyError as exc:
+        logger.warning("chn_channel_defaults lookup failed (org %s, purpose %s): %s",
+                       organization_id, purpose, exc)
+        return None
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def get_active_account(db: Session, organization_id: int, purpose: str = "clawback",
+                       account_id: Optional[int] = None) -> Optional[WhatsAppProviderAccount]:
+    """The account to send from (channels contract §2.5):
+
+    1. `account_id` given: that account if usable, else None (no fallback).
+    2. The org's default for `purpose`, if usable.
+    3. The org's `default` purpose default, if usable.
+    4. The org's lowest-id usable account.
+    5. None (callers keep their skip / error behaviour).
+
+    Usable = same org, not deleted, status 'active'.
+    """
+    if account_id is not None:
+        return _usable_by_id(db, organization_id, account_id)
+    purposes = [purpose] if purpose == DEFAULT_PURPOSE else [purpose, DEFAULT_PURPOSE]
+    for p in purposes:
+        account = _usable_by_id(db, organization_id,
+                                _default_account_id(db, organization_id, p))
+        if account is not None:
+            return account
+    return (live_accounts(db)
             .filter(WhatsAppProviderAccount.organization_id == organization_id,
                     WhatsAppProviderAccount.status == "active")
             .order_by(WhatsAppProviderAccount.id.asc())
@@ -52,9 +118,28 @@ def get_active_account(db: Session, organization_id: int) -> Optional[WhatsAppPr
 
 
 def get_any_account(db: Session, organization_id: int) -> Optional[WhatsAppProviderAccount]:
-    return (db.query(WhatsAppProviderAccount)
+    """The org's lowest-id non-deleted account, whatever its status."""
+    return (live_accounts(db)
             .filter(WhatsAppProviderAccount.organization_id == organization_id)
             .order_by(WhatsAppProviderAccount.id.asc())
+            .first())
+
+
+def resolve_or_any(db: Session, organization_id: int,
+                   purpose: str = "clawback") -> Optional[WhatsAppProviderAccount]:
+    """The account resolved for `purpose`; failing that, any non-deleted
+    account of the org (e.g. one saved without a token yet), for owning
+    drafts and showing connection status."""
+    return (get_active_account(db, organization_id, purpose=purpose)
+            or get_any_account(db, organization_id))
+
+
+def get_org_account(db: Session, organization_id: int,
+                    account_id: int) -> Optional[WhatsAppProviderAccount]:
+    """A non-deleted account of this org (any status), else None."""
+    return (live_accounts(db)
+            .filter(WhatsAppProviderAccount.id == int(account_id),
+                    WhatsAppProviderAccount.organization_id == organization_id)
             .first())
 
 
@@ -76,7 +161,7 @@ def mark_auth_error(db: Session, account: WhatsAppProviderAccount, message: str)
                 title="WhatsApp account needs attention",
                 message=(f"The WhatsApp provider rejected the access token for "
                          f"'{account.display_name}'. Clawback reminders are paused "
-                         f"until the token is updated in Settings → WhatsApp."),
+                         f"until the token is updated in Settings → Channels."),
                 dedupe_key=f"auth_error:{account.id}",
                 event="alert_account_error",
             )

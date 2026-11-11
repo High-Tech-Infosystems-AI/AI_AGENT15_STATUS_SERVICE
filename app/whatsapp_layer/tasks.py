@@ -94,7 +94,8 @@ def _account_health(db, *_):
     from app.whatsapp_layer import accounts
     from app.whatsapp_layer.models import WhatsAppProviderAccount as A
     n = 0
-    for acct in db.query(A).filter(A.status.in_(("active", "auth_error"))).all():
+    for acct in db.query(A).filter(A.status.in_(("active", "auth_error")),
+                                   A.deleted_at.is_(None)).all():
         try:
             accounts.refresh_health(db, acct)
             db.commit()
@@ -138,11 +139,11 @@ def check_failure_alerts(db, now: Optional[datetime] = None) -> Dict[str, int]:
                              f"hour. Check Settings → WhatsApp logs."),
                     dedupe_key=f"failure_rate:{now:%Y%m%d%H}", event="alert_failure_rate"):
                 sent += 1
-    for acct in db.query(A).filter(A.status == "auth_error").all():
+    for acct in db.query(A).filter(A.status == "auth_error", A.deleted_at.is_(None)).all():
         if alerts.notify_org_admins(
                 db, acct.organization_id, title="WhatsApp account needs attention",
                 message=(f"The WhatsApp provider rejects the access token for "
-                         f"'{acct.display_name}'. Update it in Settings → WhatsApp."),
+                         f"'{acct.display_name}'. Update it in Settings → Channels."),
                 dedupe_key=f"auth_error:{acct.id}", event="alert_account_error"):
             sent += 1
     for tpl in db.query(T).filter(T.approval_status == "rejected", T.deleted_at.is_(None),

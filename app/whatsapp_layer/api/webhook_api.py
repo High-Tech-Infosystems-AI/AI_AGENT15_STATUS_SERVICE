@@ -48,7 +48,8 @@ def _signed_account(db: Session, signature: str, raw: bytes):
     sent = (signature or "").strip().lower().removeprefix("sha256=")
     if not sent:
         return None
-    accounts = db.query(A).filter(A.provider == "omnichannel", A.webhook_token.isnot(None)).all()
+    accounts = db.query(A).filter(A.provider == "omnichannel", A.webhook_token.isnot(None),
+                                  A.deleted_at.is_(None)).all()
     for account in accounts:
         digest = hmac.new(account.webhook_token.encode(), raw, hashlib.sha256).hexdigest()
         if hmac.compare_digest(digest, sent):
