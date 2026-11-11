@@ -44,11 +44,36 @@ class WhatsAppProviderAccount(Base):
     created_by = Column(Integer, nullable=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
     updated_by = Column(Integer, nullable=True)
+    # Soft delete (channels contract §2.1): a deleted account also gets
+    # status='disabled' and every reader excludes it.
+    deleted_at = Column(DateTime, nullable=True)
 
+    # Any number of accounts per org (v27_whatsapp_multi_account.sql dropped
+    # uq_wa_acct_org_provider).
     __table_args__ = (
-        UniqueConstraint("organization_id", "provider", name="uq_wa_acct_org_provider"),
         UniqueConstraint("webhook_token", name="uq_wa_acct_webhook_token"),
         Index("idx_wa_acct_status", "status"),
+        Index("idx_wa_acct_org", "organization_id", "status"),
+    )
+
+
+class ChannelDefault(Base):
+    """Read-only mirror of the channel service's `chn_channel_defaults`
+    (channels contract §2.3): which account each purpose uses. The channel
+    service is the only writer; this service only reads it to resolve the
+    sending account (§2.5)."""
+    __tablename__ = "chn_channel_defaults"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    organization_id = Column(Integer, nullable=False)
+    purpose = Column(String(40), nullable=False)
+    channel_type = Column(String(10), nullable=False)  # whatsapp | email
+    account_id = Column(Integer, nullable=False)
+    updated_by = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "purpose", "channel_type", name="uq_chn_default"),
     )
 
 

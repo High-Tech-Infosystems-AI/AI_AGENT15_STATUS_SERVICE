@@ -51,7 +51,7 @@ def wa_db():
     tables = [mdl.__table__ for mdl in (
         m.WhatsAppProviderAccount, m.WhatsAppTemplate, m.ClawbackNotificationSettings,
         m.ClawbackNotificationRule, m.ClawbackDigestRule, m.ClawbackHealthCheck,
-        m.WhatsAppMessageLog, m.WhatsAppWebhookEvent, m.WhatsAppOptOut)]
+        m.WhatsAppMessageLog, m.WhatsAppWebhookEvent, m.WhatsAppOptOut, m.ChannelDefault)]
     Base.metadata.create_all(engine, tables=tables)
     session = sessionmaker(bind=engine, expire_on_commit=False, future=True)()
     try:
