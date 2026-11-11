@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -22,7 +22,9 @@ from app.whatsapp_layer.api.common import get_scoped, paginate, unprocessable, w
 from app.whatsapp_layer.models import WhatsAppProviderAccount as A, WhatsAppTemplate as T
 from app.whatsapp_layer.providers.base import ProviderError, ProviderUnsupported
 from app.whatsapp_layer.providers.registry import get_provider
-from app.whatsapp_layer.schemas import TemplateApprove, TemplatePreview, TemplateWrite
+from app.whatsapp_layer.schemas import (
+    TemplateApprove, TemplateDraftPreview, TemplatePreview, TemplateWrite,
+)
 
 logger = logging.getLogger("app_logger")
 router = APIRouter()
@@ -32,13 +34,10 @@ MANAGE = "whatsapp_templates.manage"
 
 
 def _body_data(body: TemplateWrite) -> Dict[str, Any]:
-    data = body.model_dump(exclude={"organization_id", "account_id"})
-    data["buttons"] = [b for b in (data.get("buttons") or [])]
-    data["header_format"] = (data.get("header_format") or "NONE").upper()
-    data["category"] = (data.get("category") or "UTILITY").upper()
-    data["sample_values"] = {k: v for k, v in (data.get("sample_values") or {}).items()
-                             if v is not None}
-    return data
+    """Request body → normalised editor dict (enums upper-cased, sections the
+    category / header type does not use dropped)."""
+    data = body.model_dump(exclude={"organization_id", "account_id", "values"})
+    return ts.normalise(data)
 
 
 def _out(db: Session, tpl: T) -> Dict[str, Any]:
@@ -81,6 +80,33 @@ def list_variables(ctx: AuthCtx = Depends(get_auth_ctx)):
     return V.VARIABLES
 
 
+def _parse_dt(value: Optional[str], field: str) -> Optional[datetime]:
+    """ISO date/datetime, or BroadNet's DD-MM-YYYY HH:mm:ss.SSS."""
+    if not value:
+        return None
+    v = value.strip()
+    for fmt in ("%d-%m-%Y %H:%M:%S.%f", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(v, fmt)
+        except ValueError:
+            pass
+    try:
+        dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        unprocessable([{"field": field, "message": "Use an ISO datetime, e.g. 2026-03-02T05:30:00"}])
+    if dt.tzinfo is not None:
+        from datetime import timezone
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+@router.get("/templates/options")
+def template_options(ctx: AuthCtx = Depends(get_auth_ctx)):
+    """Enums and limits for the template editor."""
+    ctx.require(VIEW)
+    return ts.template_options()
+
+
 @router.get("/templates")
 def list_templates(purpose: Optional[str] = Query(None),
                    approval_status: Optional[str] = Query(None),
@@ -88,9 +114,18 @@ def list_templates(purpose: Optional[str] = Query(None),
                    page: int = Query(1, ge=1), limit: int = Query(25, ge=1, le=100),
                    organization_id: Optional[int] = Query(None),
                    account_id: Optional[int] = Query(None),
-                   ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
+                   ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db),
+                   from_date: Annotated[Optional[str], Query(alias="from")] = None,
+                   to_date: Annotated[Optional[str], Query(alias="to")] = None,
+                   name: Annotated[Optional[str], Query()] = None,
+                   status: Annotated[Optional[str], Query()] = None,
+                   language: Annotated[Optional[str], Query()] = None,
+                   category: Annotated[Optional[str], Query()] = None,
+                   template_type: Annotated[Optional[str], Query()] = None):
     """Every template of the org, or of one WhatsApp account when
-    `account_id` is given. Drafts not yet tied to an account are always listed."""
+    `account_id` is given. Drafts not yet tied to an account are always listed.
+    Filters (BroadNet filter modal): from/to on created_at, name (contains),
+    status, language, category, template_type."""
     ctx.require(VIEW)
     org = resolve_read_org(organization_id, ctx)
     q = db.query(T).filter(T.deleted_at.is_(None))
@@ -101,14 +136,79 @@ def list_templates(purpose: Optional[str] = Query(None),
         q = q.filter(or_(T.account_id == account.id, T.account_id.is_(None)))
     if purpose:
         q = q.filter(T.purpose == purpose)
-    if approval_status:
-        q = q.filter(T.approval_status == approval_status)
+    status = status or approval_status
+    if status:
+        q = q.filter(T.approval_status == status.strip().lower())
     if search:
         like = f"%{search.strip()}%"
         q = q.filter(or_(T.name.like(like), T.body_text_named.like(like)))
+    if name:
+        q = q.filter(T.name.like(f"%{name.strip()}%"))
+    if language:
+        q = q.filter(T.language == language.strip())
+    if category:
+        q = q.filter(T.category == category.strip().upper())
+    if template_type:
+        tt = template_type.strip().upper().replace(" ", "_")
+        if tt == "UTILITY_DEFAULT":
+            q = q.filter(T.category == "UTILITY", or_(T.template_type == "DEFAULT",
+                                                      T.template_type.is_(None)))
+        elif tt in ("DEFAULT", "OTP"):
+            implicit = "AUTHENTICATION" if tt == "OTP" else None
+            cond = T.template_type == tt
+            if implicit:
+                cond = or_(cond, (T.template_type.is_(None)) & (T.category == implicit))
+            else:
+                cond = or_(cond, (T.template_type.is_(None)) & (T.category != "AUTHENTICATION"))
+            q = q.filter(cond)
+        else:
+            q = q.filter(T.template_type == tt)
+    start, end = _parse_dt(from_date, "from"), _parse_dt(to_date, "to")
+    if start:
+        q = q.filter(T.created_at >= start)
+    if end:
+        q = q.filter(T.created_at <= end)
     rows, pagination = paginate(q.order_by(T.name.asc(), T.version.desc()), page, limit)
     counts = ts.in_use_counts(db, [r.id for r in rows])
     return {"data": [ts.serialize(r, counts.get(r.id, 0)) for r in rows], "pagination": pagination}
+
+
+@router.post("/templates/validate")
+def validate_template(body: TemplateWrite, for_submit: bool = Query(False),
+                      ctx: AuthCtx = Depends(get_auth_ctx)):
+    """Check an unsaved editor payload: `errors` block saving (or submitting
+    when `for_submit`), `warnings` never block."""
+    ctx.require(VIEW)
+    data = _body_data(body)
+    return {"valid": not ts.validate_template(data, for_submit=for_submit),
+            "errors": ts.validate_template(data, for_submit=for_submit),
+            "warnings": ts.template_warnings(data)}
+
+
+@router.post("/templates/preview")
+def preview_draft(body: TemplateDraftPreview, ctx: AuthCtx = Depends(get_auth_ctx)):
+    """Preview an unsaved editor payload (same shape as the saved preview)."""
+    ctx.require(VIEW)
+    return ts.preview_of(_body_data(body), body.values)
+
+
+@router.post("/templates/media")
+async def upload_media(file: UploadFile = File(...),
+                       media_type: Optional[str] = Form(None),
+                       organization_id: Optional[int] = Query(None),
+                       ctx: AuthCtx = Depends(get_auth_ctx)):
+    """Upload a header / carousel file; put the returned object in
+    `header_media` or `carousel_cards[].media`."""
+    ctx.require(MANAGE)
+    org = write_org(organization_id, None, ctx)
+    data = await file.read()
+    try:
+        return ts.upload_media(org, data, file.content_type or "", file.filename or "upload",
+                               media_type)
+    except ts.MediaError as exc:
+        unprocessable([{"field": "file", "message": str(exc)}])
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 @router.get("/templates/{template_id}")
@@ -202,6 +302,9 @@ def submit_template(template_id: int, ctx: AuthCtx = Depends(get_auth_ctx),
                             "This template's WhatsApp account is not active")
     try:
         ts.submit(db, tpl, account, ctx.user_id)
+    except ts.MediaError as exc:
+        db.rollback()
+        unprocessable([{"field": "header_media", "message": str(exc)}])
     except ProviderError as exc:
         db.rollback()
         if exc.auth_error:
@@ -242,9 +345,7 @@ def preview_template(template_id: int, body: Optional[TemplatePreview] = None,
                      ctx: AuthCtx = Depends(get_auth_ctx), db: Session = Depends(get_db)):
     ctx.require(VIEW)
     tpl = get_scoped(db, T, template_id, ctx)
-    return ts.render_preview(tpl.header_format, tpl.header_text, tpl.body_text_named,
-                             tpl.footer_text, tpl.buttons, (body.values if body else None),
-                             tpl.sample_values)
+    return ts.preview_of(tpl, body.values if body else None)
 
 
 @router.delete("/templates/{template_id}", status_code=204)

@@ -8,7 +8,7 @@ token and return dataclasses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class ProviderError(Exception):
@@ -50,18 +50,33 @@ class TemplateRef:
 
 @dataclass
 class TemplateSpec:
-    """A template ready for the provider: positional placeholders only."""
+    """A template ready for the provider: positional placeholders only.
+    Field shapes are documented in docs/TEMPLATES_CONTRACT.md."""
     name: str
     language: str
     category: str = "UTILITY"
+    # DEFAULT | CATALOGUE | CALLING_PERMISSION_REQUEST | OTP
+    template_type: str = "DEFAULT"
+    # NONE | TEXT | IMAGE | VIDEO | DOCUMENT | LOCATION | CAROUSEL
     header_format: str = "NONE"
     header_text: Optional[str] = None
     header_example: List[str] = field(default_factory=list)
+    # (file_name, bytes, mime) for IMAGE / VIDEO / DOCUMENT headers
+    header_file: Optional[Tuple[str, bytes, str]] = None
     body_text: str = ""
     body_example: List[str] = field(default_factory=list)
     footer_text: Optional[str] = None
-    # [{"type": "URL"|"QUICK_REPLY", "label": str, "url"?: str}]
+    # [{"type": PHONE_NUMBER|URL|VOICE_CALL|COPY_CODE|MPM|FLOW|QUICK_REPLY,
+    #   "label": str, "url"?, "example"?, "phone_number"?, "flow_id"?, ...}]
     buttons: List[Dict[str, Any]] = field(default_factory=list)
+    # {"text": str, "has_expiration": bool, "expires_at"?: str}
+    limited_time_offer: Optional[Dict[str, Any]] = None
+    # [{"media_type", "media_url", "body_text", "body_example", "buttons"}]
+    carousel_cards: List[Dict[str, Any]] = field(default_factory=list)
+    # {"code_delivery", "apps": [{"package_name", "signature_hash"}], ...}
+    auth_config: Optional[Dict[str, Any]] = None
+    custom_validity_period: bool = False
+    time_to_live: Optional[int] = None           # minutes (vendor doc)
 
 
 @dataclass
@@ -81,6 +96,11 @@ class ProviderTemplate:
     footer_text: Optional[str] = None
     sample_values: Dict[str, str] = field(default_factory=dict)
     parameter_format: Optional[str] = None   # NAMED | POSITIONAL
+    template_type: Optional[str] = None      # our vocabulary (DEFAULT, OTP, ...)
+    header_format: Optional[str] = None
+    header_media: Optional[Dict[str, Any]] = None
+    buttons: Optional[List[Dict[str, Any]]] = None
+    time_to_live: Optional[int] = None
     raw: Any = None
 
 
