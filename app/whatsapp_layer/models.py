@@ -86,9 +86,22 @@ class WhatsAppTemplate(Base):
     name = Column(String(512), nullable=False)
     language = Column(String(16), nullable=False, server_default="en_US")
     category = Column(String(20), nullable=False, server_default="UTILITY")
+    # Sub-type (v31): DEFAULT | CATALOGUE | CALLING_PERMISSION_REQUEST | OTP
+    template_type = Column(String(32), nullable=True)
     purpose = Column(String(32), nullable=False, server_default="generic")
+    # v31: NUMBER ({{1}}) | NAME ({{name}}); NULL = worked out from the body.
+    variable_type = Column(String(8), nullable=True)
+    # NONE | TEXT | IMAGE | VIDEO | DOCUMENT | LOCATION | CAROUSEL
     header_format = Column(String(10), nullable=False, server_default="NONE")
     header_text = Column(String(255), nullable=True)
+    # v31 editor sections (shapes in docs/TEMPLATES_CONTRACT.md).
+    header_media = Column(JSON, nullable=True)
+    header_sample_values = Column(JSON, nullable=True)
+    limited_time_offer = Column(JSON, nullable=True)
+    carousel_cards = Column(JSON, nullable=True)
+    auth_config = Column(JSON, nullable=True)
+    custom_validity_period = Column(Integer, nullable=False, server_default="0")
+    validity_period_seconds = Column(Integer, nullable=True)
     body_text_named = Column(Text, nullable=False)
     body_text_positional = Column(Text, nullable=True)
     footer_text = Column(String(255), nullable=True)
@@ -120,6 +133,7 @@ class WhatsAppTemplate(Base):
     __table_args__ = (
         Index("idx_wa_tpl_org_purpose", "organization_id", "purpose", "approval_status"),
         Index("idx_wa_tpl_status", "approval_status"),
+        Index("idx_wa_tpl_org_created", "organization_id", "created_at"),
     )
 
 

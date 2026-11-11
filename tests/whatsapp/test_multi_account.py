@@ -383,6 +383,24 @@ def test_legacy_routes_hide_deleted_accounts(wa_db):
     assert err.value.status_code == 404
 
 
+def test_logs_filter_by_account(wa_db):
+    from app.whatsapp_layer.api import logs_api
+    a1, a2 = _acct(wa_db, "One"), _acct(wa_db, "Two")
+    for n, acct in enumerate((a1, a2, a2)):
+        wa_db.add(L(organization_id=ORG, account_id=acct.id, kind="reminder", status="sent",
+                    idempotency_key=f"logs-filter-{n}"))
+    wa_db.commit()
+
+    def ids(account_id=None):
+        out = logs_api.list_logs(account_id=account_id, page=1, limit=100, organization_id=None,
+                                 kind=None, status=None, recipient_user_id=None, job_id=None,
+                                 candidate_job_id=None, date_from=None, date_to=None,
+                                 search=None, ctx=_ctx(), db=wa_db)
+        return sorted(r["account_id"] for r in out["data"])
+    assert ids() == [a1.id, a2.id, a2.id]
+    assert ids(a2.id) == [a2.id, a2.id]
+
+
 # --- Templates per account --------------------------------------------------------
 
 def _tpl_body(name, **kw):

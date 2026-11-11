@@ -121,8 +121,9 @@ def test_footer_rules():
 
 
 def test_buttons_rules():
-    four = [{"type": "QUICK_REPLY", "label": f"b{i}"} for i in range(4)]
-    assert "buttons" in _fields(ts.validate_template(_tpl(buttons=four)))
+    # Quick replies are capped at 5 (BroadNet "Custom: 5 buttons max").
+    six = [{"type": "QUICK_REPLY", "label": f"b{i}"} for i in range(6)]
+    assert "buttons" in _fields(ts.validate_template(_tpl(buttons=six)))
     errs = ts.validate_template(_tpl(buttons=[{"type": "URL", "label": "Open"}]))
     assert "buttons[0].url" in _fields(errs)
     errs = ts.validate_template(_tpl(buttons=[{"type": "CALL", "label": "x"}]))
@@ -140,7 +141,7 @@ def test_sample_values_required_only_for_submit():
 
 
 def test_enums():
-    errs = ts.validate_template(_tpl(category="PROMO", purpose="x", header_format="IMAGE", language="english"))
+    errs = ts.validate_template(_tpl(category="PROMO", purpose="x", header_format="AUDIO", language="english"))
     assert {"category", "purpose", "header_format", "language"} <= _fields(errs)
 
 

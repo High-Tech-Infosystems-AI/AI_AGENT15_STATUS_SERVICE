@@ -33,6 +33,7 @@ MANAGE = "clawback_notifications.manage"
 def list_logs(kind: Optional[str] = Query(None), status: Optional[str] = Query(None),
               recipient_user_id: Optional[int] = Query(None), job_id: Optional[int] = Query(None),
               candidate_job_id: Optional[int] = Query(None),
+              account_id: Optional[int] = Query(None),
               date_from: Optional[date] = Query(None), date_to: Optional[date] = Query(None),
               search: Optional[str] = Query(None),
               page: int = Query(1, ge=1), limit: int = Query(25, ge=1, le=100),
@@ -51,6 +52,8 @@ def list_logs(kind: Optional[str] = Query(None), status: Optional[str] = Query(N
         q = q.filter(L.job_id == job_id)
     if candidate_job_id:
         q = q.filter(L.candidate_job_id == candidate_job_id)
+    if account_id:
+        q = q.filter(L.account_id == account_id)
     # Date range on created_at (UTC dates, inclusive).
     if date_from:
         q = q.filter(L.created_at >= datetime.combine(date_from, datetime.min.time()))

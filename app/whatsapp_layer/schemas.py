@@ -60,23 +60,87 @@ class PhoneTest(_Body):
 
 # --- Templates (§2.2) -------------------------------------------------------
 class TemplateButton(BaseModel):
+    """One button. `type` decides which of the optional fields apply
+    (docs/TEMPLATES_CONTRACT.md §4.6). `text` is accepted as an alias of `label`."""
     model_config = ConfigDict(extra="ignore")
     type: str
-    label: str
+    label: Optional[str] = None
+    text: Optional[str] = None
+    url: Optional[str] = None                 # URL
+    url_example: Optional[str] = None         # URL ending in a variable: its sample
+    phone_number: Optional[str] = None        # PHONE_NUMBER, e.g. +911234567890
+    example: Optional[str] = None             # COPY_CODE: the offer code
+    flow_id: Optional[str] = None             # FLOW
+    flow_name: Optional[str] = None
+    flow_action: Optional[str] = None         # navigate | data_exchange
+    navigate_screen: Optional[str] = None
+
+
+class TemplateMedia(BaseModel):
+    """An uploaded file (`s3_key` from POST /templates/media) or a public URL."""
+    model_config = ConfigDict(extra="ignore")
+    s3_key: Optional[str] = None
     url: Optional[str] = None
+    file_name: Optional[str] = None
+    mime_type: Optional[str] = None
+    size_bytes: Optional[int] = None
+    media_type: Optional[str] = None          # IMAGE | VIDEO | DOCUMENT
+
+
+class LimitedTimeOffer(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    text: Optional[str] = None
+    expires_at: Optional[str] = None          # ISO date/datetime (preview)
+    has_expiration: bool = False
+
+
+class CarouselCard(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    media: Optional[TemplateMedia] = None
+    body_text: Optional[str] = None
+    sample_values: Optional[Dict[str, Any]] = None
+    buttons: Optional[List[TemplateButton]] = None
+
+
+class AuthApp(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    package_name: Optional[str] = None
+    signature_hash: Optional[str] = None
+
+
+class AuthConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    code_delivery: Optional[str] = None       # ZERO_TAP | ONE_TAP | COPY_CODE
+    apps: Optional[List[AuthApp]] = None
+    add_security_recommendation: bool = False
+    code_expiration_minutes: Optional[int] = None
+    button_text: Optional[str] = None
+    autofill_text: Optional[str] = None
 
 
 class TemplateWrite(_Body):
     name: str
     language: str = "en_US"
     category: str = "UTILITY"
+    # DEFAULT | CATALOGUE | CALLING_PERMISSION_REQUEST | OTP; omitted = DEFAULT (OTP for AUTHENTICATION)
+    template_type: Optional[str] = None
     purpose: str = "generic"
+    # NUMBER | NAME; omitted = worked out from the placeholders used.
+    variable_type: Optional[str] = None
     header_format: str = "NONE"
     header_text: Optional[str] = None
-    body_text: str
+    header_media: Optional[TemplateMedia] = None
+    header_sample_values: Optional[Dict[str, Any]] = None
+    # Required except for AUTHENTICATION (Meta fixes that body).
+    body_text: Optional[str] = None
     footer_text: Optional[str] = None
     buttons: Optional[List[TemplateButton]] = None
     sample_values: Optional[Dict[str, Any]] = None
+    limited_time_offer: Optional[LimitedTimeOffer] = None
+    carousel_cards: Optional[List[CarouselCard]] = None
+    auth_config: Optional[AuthConfig] = None
+    custom_validity_period: bool = False
+    validity_period_seconds: Optional[int] = None
     # Create only: the WhatsApp account the template belongs to (channels
     # contract §5.1); omitted = the org's clawback account. Ignored on update.
     account_id: Optional[int] = None
@@ -87,6 +151,12 @@ class TemplateApprove(_Body):
 
 
 class TemplatePreview(_Body):
+    values: Optional[Dict[str, Any]] = None
+
+
+class TemplateDraftPreview(TemplateWrite):
+    """POST /templates/preview: an unsaved editor payload plus optional values."""
+    name: str = "preview"
     values: Optional[Dict[str, Any]] = None
 
 

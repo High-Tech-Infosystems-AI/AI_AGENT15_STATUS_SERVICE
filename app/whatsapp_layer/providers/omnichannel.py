@@ -245,48 +245,180 @@ class OmnichannelProvider(WhatsAppProvider):
     # ------------------------------------------------------------------
     # Templates
     # ------------------------------------------------------------------
+    # Our sub-type → vendor `templateType` (doc §3: DEFAULT, catalogue,
+    # CALLING_PERMISSION, OTP). Utility Default is sent as DEFAULT with
+    # subCategory DEFAULT; the vendor reports it back as UTILITY_DEFAULT.
+    _TEMPLATE_TYPE_OUT = {"DEFAULT": "DEFAULT", "CATALOGUE": "catalogue",
+                          "CALLING_PERMISSION_REQUEST": "CALLING_PERMISSION", "OTP": "OTP"}
+    _TEMPLATE_TYPE_IN = {"DEFAULT": "DEFAULT", "UTILITY_DEFAULT": "DEFAULT",
+                         "CATALOGUE": "CATALOGUE", "CALLING_PERMISSION": "CALLING_PERMISSION_REQUEST",
+                         "CALLING_PERMISSION_REQUEST": "CALLING_PERMISSION_REQUEST", "OTP": "OTP"}
+
     @staticmethod
-    def build_template_fields(spec: TemplateSpec) -> List[Tuple[str, Tuple[None, str]]]:
-        fields: List[Tuple[str, str]] = [
+    def button_request(b: Dict[str, Any]) -> Optional[str]:
+        """One `buttonRequest` value, "TYPE:Label|value" (doc §3.1)."""
+        btype = (b.get("type") or "").upper()
+        label = b.get("label") or ""
+        if btype == "URL":
+            value = f"URL:{label}|{b.get('url') or ''}"
+            if b.get("example"):
+                # UNCONFIRMED: sample for a URL ending in {{1}} as a third segment.
+                value += f"|{b['example']}"
+            return value
+        if btype == "QUICK_REPLY":
+            return f"QUICK_REPLY:{label}"
+        if btype == "PHONE_NUMBER":
+            return f"PHONE_NUMBER:{label}|{b.get('phone_number') or ''}"
+        # UNCONFIRMED: the doc only shows URL / QUICK_REPLY / PHONE_NUMBER; the
+        # rest follow the same TYPE:Label|value pattern with Meta's type names.
+        if btype == "VOICE_CALL":
+            return f"VOICE_CALL:{label}"
+        if btype == "COPY_CODE":
+            return f"COPY_CODE:{label}|{b.get('example') or ''}"
+        if btype == "MPM":
+            return f"MPM:{label}"
+        if btype == "FLOW":
+            return (f"FLOW:{label}|{b.get('flow_id') or ''}|{b.get('flow_action') or 'navigate'}"
+                    f"|{b.get('navigate_screen') or ''}")
+        return None
+
+    @staticmethod
+    def _meta_button(b: Dict[str, Any]) -> Dict[str, Any]:
+        """Meta Cloud API button object (used inside UNCONFIRMED JSON fields)."""
+        btype = (b.get("type") or "").upper()
+        out: Dict[str, Any] = {"type": btype, "text": b.get("label") or ""}
+        if btype == "URL":
+            out["url"] = b.get("url") or ""
+            if b.get("example"):
+                out["example"] = [b["example"]]
+        elif btype == "PHONE_NUMBER":
+            out["phone_number"] = b.get("phone_number") or ""
+        return out
+
+    @classmethod
+    def build_template_fields(cls, spec: TemplateSpec) -> List[Tuple[str, Tuple]]:
+        category = (spec.category or "UTILITY").upper()
+        template_type = (spec.template_type or "DEFAULT").upper()
+        header_format = (spec.header_format or "NONE").upper()
+        is_auth = category == "AUTHENTICATION"
+        if header_format == "CAROUSEL":
+            # UNCONFIRMED: carousel is not a vendor header format; cards go in
+            # `carouselCards` (below) and the header is NONE, as in Meta.
+            sent_header = "NONE"
+        else:
+            # LOCATION is UNCONFIRMED (doc lists TEXT, IMAGE, DOCUMENT, VIDEO, NONE).
+            sent_header = header_format
+        fields: List[Tuple[str, Any]] = [
             ("name", spec.name),
             ("languageType", spec.language),
-            ("category", spec.category or "UTILITY"),
-            ("templateType", "DEFAULT"),
-            ("subCategory", "DEFAULT"),
-            ("headerFormat", spec.header_format or "NONE"),
-            ("bodyText", spec.body_text),
+            ("category", category),
+            ("templateType", cls._TEMPLATE_TYPE_OUT.get(template_type, "DEFAULT")),
+            ("subCategory", "ONE_TIME_PASSCODE" if is_auth else "DEFAULT"),
+            ("headerFormat", "NONE" if is_auth else sent_header),
         ]
-        if (spec.header_format or "NONE") == "TEXT" and spec.header_text:
+        if not is_auth:
+            fields.append(("bodyText", spec.body_text))
+        if header_format == "TEXT" and spec.header_text:
             fields.append(("headerText", spec.header_text))
             if spec.header_example:
                 fields.append(("headerExample", json.dumps(list(spec.header_example))))
-        if spec.body_example:
+        if spec.body_example and not is_auth:
             fields.append(("bodyExample", json.dumps([list(spec.body_example)])))
-        if spec.footer_text:
+        if spec.footer_text and not is_auth:
             fields.append(("footerText", spec.footer_text))
-        # UNCONFIRMED: the doc shows one `buttonRequest` string
-        # ("TYPE:Label|value"); for several buttons we repeat the field.
+        # The doc shows one `buttonRequest` string; several buttons repeat the field.
         for b in spec.buttons or []:
-            btype = (b.get("type") or "").upper()
-            label = b.get("label") or ""
-            if btype == "URL":
-                fields.append(("buttonRequest", f"URL:{label}|{b.get('url') or ''}"))
-            elif btype == "QUICK_REPLY":
-                fields.append(("buttonRequest", f"QUICK_REPLY:{label}"))
-        return [(k, (None, v)) for k, v in fields]
+            value = cls.button_request(b)
+            if value:
+                fields.append(("buttonRequest", value))
+        if spec.custom_validity_period and spec.time_to_live:
+            fields.append(("customValidityPeriod", "true"))
+            fields.append(("timeToLive", str(spec.time_to_live)))
+        if spec.limited_time_offer:
+            # UNCONFIRMED: not in the vendor doc; Meta's limited_time_offer component.
+            lto = spec.limited_time_offer
+            fields.append(("limitedTimeOffer", json.dumps(
+                {"text": lto.get("text") or "", "hasExpiration": bool(lto.get("has_expiration"))})))
+        if header_format == "CAROUSEL" and spec.carousel_cards:
+            # UNCONFIRMED: not in the vendor doc; Meta's carousel card components.
+            cards = []
+            for c in spec.carousel_cards:
+                comps: List[Dict[str, Any]] = [{
+                    "type": "HEADER", "format": c.get("media_type") or "IMAGE",
+                    "example": {"header_url": [c.get("media_url") or ""]}}]
+                if c.get("body_text"):
+                    body: Dict[str, Any] = {"type": "BODY", "text": c["body_text"]}
+                    if c.get("body_example"):
+                        body["example"] = {"body_text": [list(c["body_example"])]}
+                    comps.append(body)
+                if c.get("buttons"):
+                    comps.append({"type": "BUTTONS",
+                                  "buttons": [cls._meta_button(b) for b in c["buttons"]]})
+                cards.append({"components": comps})
+            fields.append(("carouselCards", json.dumps(cards, ensure_ascii=False)))
+        if is_auth and spec.auth_config:
+            # UNCONFIRMED: §3.21–3.23 bodies are missing from the vendor doc. Field
+            # name from the `authConfigJson` response key; values follow Meta.
+            cfg = spec.auth_config
+            auth = {"otpType": cfg.get("code_delivery") or "COPY_CODE",
+                    "addSecurityRecommendation": bool(cfg.get("add_security_recommendation")),
+                    "supportedApps": [{"packageName": a.get("package_name"),
+                                       "signatureHash": a.get("signature_hash")}
+                                      for a in cfg.get("apps") or []]}
+            if cfg.get("code_expiration_minutes"):
+                auth["codeExpirationMinutes"] = int(cfg["code_expiration_minutes"])
+            if cfg.get("button_text"):
+                auth["buttonText"] = cfg["button_text"]
+            if cfg.get("autofill_text"):
+                auth["autofillText"] = cfg["autofill_text"]
+            if auth["otpType"] == "ZERO_TAP":
+                auth["zeroTapTermsAccepted"] = True
+            fields.append(("authConfig", json.dumps(auth)))
+        parts: List[Tuple[str, Tuple]] = [(k, (None, v)) for k, v in fields]
+        if header_format in ("IMAGE", "VIDEO", "DOCUMENT") and spec.header_file and not is_auth:
+            parts.append(("headerfile", tuple(spec.header_file)))
+        return parts
 
-    @staticmethod
-    def parse_template(body: Any) -> ProviderTemplate:
+    @classmethod
+    def _parse_buttons(cls, raw: Any) -> Optional[List[Dict[str, Any]]]:
+        items = _json_field(raw)
+        if not isinstance(items, list):
+            return None
+        out = []
+        for i in items:
+            if not isinstance(i, dict):
+                continue
+            btype = str(i.get("type") or "").upper()
+            if btype in ("OTP",):
+                continue
+            b = {"type": btype, "label": i.get("label") or i.get("text") or ""}
+            for src, dst in (("url", "url"), ("phone_number", "phone_number"),
+                             ("phoneNumber", "phone_number")):
+                if i.get(src):
+                    b[dst] = i[src]
+            out.append(b)
+        return out
+
+    @classmethod
+    def parse_template(cls, body: Any) -> ProviderTemplate:
         body = body if isinstance(body, dict) else {}
         reason = body.get("rejectionReason")
         if not reason and body.get("rejectionInfoJson"):
             reason = str(body.get("rejectionInfoJson"))[:500]
         pid = body.get("id")
         header = _json_field(body.get("headerContentJson"))
+        header = header if isinstance(header, dict) else {}
         examples = _json_field(body.get("bodyExampleJson"))
         samples = {e["param_name"]: str(e.get("example") or "")
                    for e in (examples if isinstance(examples, list) else [])
                    if isinstance(e, dict) and e.get("param_name")}
+        header_type = str(header.get("type") or "").replace(" ", "").upper() or None
+        media = None
+        if header_type in ("IMAGE", "VIDEO", "DOCUMENT"):
+            media = {k: v for k, v in (("file_name", header.get("filename")),
+                                       ("provider_media_id", header.get("mediaId")))
+                     if v}
+        ttl = body.get("timeToLive")
         return ProviderTemplate(
             name=body.get("name"),
             language=body.get("language") or body.get("languageType"),
@@ -295,11 +427,16 @@ class OmnichannelProvider(WhatsAppProvider):
             category=body.get("category"),
             previous_category=body.get("previousCategory"),
             rejection_reason=reason,
-            header_text=header.get("text") if isinstance(header, dict) else None,
+            header_text=header.get("text"),
             body_text=body.get("bodyText"),
             footer_text=body.get("footerText"),
             sample_values=samples,
             parameter_format=body.get("parameterFormat"),
+            template_type=cls._TEMPLATE_TYPE_IN.get(str(body.get("templateType") or "").upper()),
+            header_format=header_type,
+            header_media=media or None,
+            buttons=cls._parse_buttons(body.get("buttonsJson")),
+            time_to_live=_int(ttl) if ttl not in (None, "") else None,
             raw=body,
         )
 
