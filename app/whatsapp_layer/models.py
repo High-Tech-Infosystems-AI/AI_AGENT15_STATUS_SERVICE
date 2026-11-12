@@ -115,6 +115,9 @@ class WhatsAppTemplate(Base):
     approval_status = Column(String(20), nullable=False, server_default="draft")
     rejection_reason = Column(Text, nullable=True)
     previous_category = Column(String(20), nullable=True)
+    # v32: Meta quality rating from message_template_quality_update
+    # (GREEN | YELLOW | RED | UNKNOWN); NULL = never reported.
+    quality_score = Column(String(16), nullable=True)
     approval_override_by = Column(Integer, nullable=True)
     approval_override_reason = Column(String(500), nullable=True)
     approval_override_at = Column(DateTime, nullable=True)

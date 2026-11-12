@@ -1,5 +1,5 @@
-"""Webhook mapping (UNCONFIRMED payload format): Meta Cloud API-style
-payloads → events → log status updates (SQLite)."""
+"""Webhook mapping: Meta WhatsApp Business payloads (forwarded unchanged by
+Omnichannel) → events → log status updates (SQLite)."""
 import copy
 import time
 from datetime import datetime, timedelta
@@ -81,7 +81,9 @@ def test_apply_events_matches_logs(wa_db, monkeypatch):
     db = wa_db
     sent_alerts = []
     monkeypatch.setattr("app.whatsapp_layer.alerts.notify_org_admins",
-                        lambda *a, **k: sent_alerts.append(k.get("dedupe_key")))
+                        lambda *a, **k: sent_alerts.append(k.get("title")))
+    monkeypatch.setattr("app.whatsapp_layer.alerts.claim", lambda *a, **k: True)
+    monkeypatch.setattr("app.whatsapp_layer.alerts.release", lambda *a, **k: 0)
     acct = WhatsAppProviderAccount(organization_id=12, provider="omnichannel", display_name="HTI",
                                    base_url="https://x", webhook_token="tok123", status="active")
     db.add(acct)
@@ -95,7 +97,7 @@ def test_apply_events_matches_logs(wa_db, monkeypatch):
     other_org = _log(db, idempotency_key="k5", organization_id=99, provider_message_id="wamid.CCC",
                      phone_e164="+919800000002")
     tpl = WhatsAppTemplate(organization_id=12, name="clawback_health_check_due", language="en_US",
-                           body_text_named="x", approval_status="pending",
+                           body_text_named="x", approval_status="pending", account_id=acct.id,
                            provider_template_id="1223818762524529")
     db.add(tpl)
     db.commit()
@@ -115,7 +117,7 @@ def test_apply_events_matches_logs(wa_db, monkeypatch):
     assert other_org.status == "submitted"   # never crosses orgs
     assert set(changed) == {by_wamid.id, recent.id, by_phone_failed.id}
     assert tpl.approval_status == "rejected" and tpl.rejection_reason == "INVALID_FORMAT"
-    assert sent_alerts == [f"template_rejected:{tpl.id}"]
+    assert sent_alerts == ["WhatsApp template rejected"]
 
 
 def test_status_never_moves_backwards():

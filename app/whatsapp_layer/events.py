@@ -26,6 +26,8 @@ RECRUITER_SUMMARY = "recruiter_summary"
 ALERT_FAILURE_RATE = "alert_failure_rate"
 ALERT_TEMPLATE_REJECTED = "alert_template_rejected"
 ALERT_ACCOUNT_ERROR = "alert_account_error"
+ALERT_TEMPLATE_STATUS = "alert_template_status"
+ALERT_FLOW_ENDPOINT = "alert_flow_endpoint"
 
 ADMIN_RECIPIENTS = "Org admins (in-app)"
 
@@ -42,6 +44,15 @@ ADMIN_ALERTS: Dict[str, Dict[str, str]] = {
     ALERT_ACCOUNT_ERROR: {
         "label": "Account error",
         "description": "Alert when the WhatsApp provider rejects the login or access token",
+    },
+    ALERT_TEMPLATE_STATUS: {
+        "label": "Template status changed",
+        "description": ("Alert when a WhatsApp template is approved, paused, disabled, "
+                        "re-categorised or its quality drops"),
+    },
+    ALERT_FLOW_ENDPOINT: {
+        "label": "Flow endpoint unavailable",
+        "description": "Alert when Meta reports a WhatsApp Flow endpoint is failing",
     },
 }
 EOD_REPORT = "eod_report"

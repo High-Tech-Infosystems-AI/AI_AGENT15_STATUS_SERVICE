@@ -288,7 +288,8 @@ def test_events_listing(org):
     system = [e for e in data if e["type"] == "system"]
     assert [e["key"] for e in system] == [
         "system:recruiter_summary", "system:eod_report", "system:alert_failure_rate",
-        "system:alert_template_rejected", "system:alert_account_error"]
+        "system:alert_template_rejected", "system:alert_account_error",
+        "system:alert_template_status", "system:alert_flow_endpoint"]
     assert all(e["enabled"] for e in system)
     summary = system[0]
     assert summary["template"]["name"] == "clawback_daily_checklist"

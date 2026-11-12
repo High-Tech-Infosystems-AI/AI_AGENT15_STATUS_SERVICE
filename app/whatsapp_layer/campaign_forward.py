@@ -7,7 +7,10 @@ and X-Org-Id:
   - message statuses whose campaignName starts with "cmp" (campaign sends);
   - inbound messages (STOP / YES replies, Flow answers): the Campaign Service
     matches them to its own recipients and ignores the rest;
-  - template status updates (campaign templates live in its own table).
+  - template status / quality / category updates (campaign templates live
+    in its own table);
+  - Flow alerts (field "flows"): the Campaign Service stores the alert state
+    on its flow so the Flows tab can show "Endpoint unavailable".
 
 Forwarding runs on a daemon thread with a short timeout, so the webhook
 still answers the provider quickly; a failed forward is only logged.
@@ -30,7 +33,8 @@ _FORWARD_HEADERS = {"content-type", "user-agent", "x-hub-signature-256"}
 
 def is_campaign_relevant(events: List[WebhookEvent]) -> bool:
     for ev in events:
-        if ev.kind in ("inbound", "template_status"):
+        if ev.kind in ("inbound", "template_status", "template_quality",
+                       "template_category", "flow_event"):
             return True
         if ev.kind == "message_status" and str(ev.campaign_name or "").startswith("cmp"):
             return True
