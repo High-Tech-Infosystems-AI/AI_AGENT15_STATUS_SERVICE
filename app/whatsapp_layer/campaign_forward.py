@@ -4,7 +4,12 @@ An Omnichannel account has one webhook URL, and it stays here. Events the
 Campaign Service needs are forwarded, unchanged, to
 POST {CAMPAIGN_SERVICE_URL}/campaigns/internal/events with X-Internal-Token
 and X-Org-Id:
-  - message statuses whose campaignName starts with "cmp" (campaign sends);
+  - message statuses whose campaignName starts with "cmp" (campaign sends), and
+    statuses for messages this service did not send. Omnichannel forwards Meta's
+    raw webhook, which has no campaignName (only the wamid and
+    biz_opaque_callback_data.batch_id), so a status we can't match exactly to
+    our own log belongs to a campaign send; the Campaign Service matches it by
+    batch id and ignores anything that isn't its own;
   - inbound messages (STOP / YES replies, Flow answers): the Campaign Service
     matches them to its own recipients and ignores the rest;
   - template status / quality / category updates (campaign templates live
@@ -19,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 import requests
 
@@ -31,12 +36,22 @@ TIMEOUT_SECONDS = 5
 _FORWARD_HEADERS = {"content-type", "user-agent", "x-hub-signature-256"}
 
 
-def is_campaign_relevant(events: List[WebhookEvent]) -> bool:
+def is_campaign_relevant(events: List[WebhookEvent],
+                         owned: Optional[Callable[[WebhookEvent], bool]] = None) -> bool:
+    """`owned(ev)` says whether this service sent the message (exact match on
+    wamid, correlation or batch id). Without it only "cmp" names count."""
     for ev in events:
         if ev.kind in ("inbound", "template_status", "template_quality",
                        "template_category", "flow_event"):
             return True
-        if ev.kind == "message_status" and str(ev.campaign_name or "").startswith("cmp"):
+        if ev.kind != "message_status":
+            continue
+        name = str(ev.campaign_name or "")
+        if name.startswith("cmp"):
+            return True
+        if name.startswith("cbk_"):
+            continue  # our own clawback sends
+        if owned is not None and (ev.provider_message_id or ev.batch_id) and not owned(ev):
             return True
     return False
 
@@ -54,12 +69,13 @@ def _post(url: str, token: str, org_id: int, headers: Dict[str, str], raw: bytes
 
 
 def forward(organization_id: int, headers: Dict[str, str], raw: bytes,
-            events: List[WebhookEvent], *, background: bool = True) -> bool:
+            events: List[WebhookEvent], *, background: bool = True,
+            owned: Optional[Callable[[WebhookEvent], bool]] = None) -> bool:
     """Forward when relevant and configured. Returns True when a forward was started."""
     from app.core import settings
     base = (getattr(settings, "CAMPAIGN_SERVICE_URL", "") or "").strip().rstrip("/")
     token = getattr(settings, "INTERNAL_SERVICE_TOKEN", "") or ""
-    if not base or not token or not raw or not is_campaign_relevant(events):
+    if not base or not token or not raw or not is_campaign_relevant(events, owned):
         return False
     url = f"{base}/campaigns/internal/events"
     if background:

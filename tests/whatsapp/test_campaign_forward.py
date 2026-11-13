@@ -42,3 +42,23 @@ def test_forward_posts_raw_body_with_internal_headers(monkeypatch):
 def test_forward_off_without_config(monkeypatch):
     monkeypatch.setattr(settings, "CAMPAIGN_SERVICE_URL", "", raising=False)
     assert not campaign_forward.forward(1, {}, b"{}", [_status("cmp1_m1")], background=False)
+
+
+def _raw_meta_status(wamid="wamid.X", batch_id="2611131243095041001"):
+    # Meta's body as Omnichannel forwards it: no campaignName, batch id in the callback data.
+    return WebhookEvent(kind="message_status", status="delivered", campaign_name=None,
+                        provider_message_id=wamid, batch_id=batch_id)
+
+
+def test_raw_meta_status_not_ours_is_forwarded():
+    assert campaign_forward.is_campaign_relevant([_raw_meta_status()], owned=lambda ev: False)
+
+
+def test_raw_meta_status_ours_is_not_forwarded():
+    assert not campaign_forward.is_campaign_relevant([_raw_meta_status()], owned=lambda ev: True)
+
+
+def test_clawback_name_never_forwarded_even_if_unmatched():
+    ev = WebhookEvent(kind="message_status", status="read", campaign_name="cbk_5",
+                      provider_message_id="wamid.Y")
+    assert not campaign_forward.is_campaign_relevant([ev], owned=lambda ev: False)
