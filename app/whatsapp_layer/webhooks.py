@@ -62,6 +62,24 @@ def store_event(db: Session, account: A, headers: Dict[str, str], raw: bytes) ->
     return ev
 
 
+def _match_log_exact(db: Session, account: A, ev: WebhookEvent) -> Optional[L]:
+    """Our log for this event by wamid, correlation id or batch id; no phone guess."""
+    base = db.query(L).filter(L.organization_id == account.organization_id)
+    if ev.provider_message_id:
+        log = base.filter(L.provider_message_id == ev.provider_message_id).first()
+        if log:
+            return log
+    if ev.campaign_name:
+        log = base.filter(L.correlation_id == ev.campaign_name).first()
+        if log:
+            return log
+    if ev.batch_id:
+        log = base.filter(L.provider_ref == str(ev.batch_id)).first()
+        if log:
+            return log
+    return None
+
+
 def _match_log(db: Session, account: A, ev: WebhookEvent, at: datetime) -> Optional[L]:
     base = db.query(L).filter(L.organization_id == account.organization_id)
     if ev.provider_message_id:
@@ -76,7 +94,9 @@ def _match_log(db: Session, account: A, ev: WebhookEvent, at: datetime) -> Optio
         log = base.filter(L.provider_ref == str(ev.batch_id)).first()
         if log:
             return log
-    if ev.recipient:
+    # A status with a batch id belongs to whoever sent that batch: when it isn't
+    # ours (a campaign send) the phone guess would mark an unrelated message.
+    if ev.recipient and not ev.batch_id:
         phone = "+" + "".join(ch for ch in ev.recipient if ch.isdigit())
         # Same org may send from several accounts: only this account's logs.
         log = (base.filter(L.phone_e164 == phone,
@@ -147,7 +167,9 @@ def process(db: Session, account: A, headers: Dict[str, str], raw: bytes) -> Non
         events = get_provider(account.provider).parse_webhook(headers, ev_row.body)
         try:
             from app.whatsapp_layer import campaign_forward
-            campaign_forward.forward(account.organization_id, headers, raw, events)
+            campaign_forward.forward(
+                account.organization_id, headers, raw, events,
+                owned=lambda ev: _match_log_exact(db, account, ev) is not None)
         except Exception as exc:  # forwarding must never block our own processing
             logger.warning("Campaign forward skipped: %s", exc)
         changed = apply_events(db, account, events)
