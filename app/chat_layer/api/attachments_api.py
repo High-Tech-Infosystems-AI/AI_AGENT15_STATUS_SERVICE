@@ -1,5 +1,6 @@
 """Chat attachment upload + URL endpoints."""
 from typing import Optional
+from starlette.concurrency import run_in_threadpool
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
@@ -40,7 +41,9 @@ async def upload_attachment(
     data = await file.read()
     mime = file.content_type or "application/octet-stream"
     try:
-        meta = s3.upload_attachment(
+        # S3 upload and DB writes are blocking: keep them off the event loop.
+        meta = await run_in_threadpool(
+            s3.upload_attachment,
             data=data, mime_type=mime, file_name=file.filename or "upload.bin",
             uploaded_by=user["user_id"], conversation_id=conversation_id,
             duration_seconds=duration_seconds,
@@ -50,13 +53,17 @@ async def upload_attachment(
         if "size" in msg or "too large" in msg:
             return _err("CHAT_ATTACHMENT_TOO_LARGE", str(ve), 413)
         return _err("CHAT_ATTACHMENT_TYPE_NOT_ALLOWED", str(ve), 415)
+    return await run_in_threadpool(_save_attachment, meta, user["user_id"])
+
+
+def _save_attachment(meta: dict, user_id) -> dict:
     db = SessionLocal()
     try:
         row = _persist_attachment(
             db, s3_key=meta["s3_key"], mime_type=meta["mime_type"],
             file_name=meta["file_name"], size_bytes=meta["size_bytes"],
             duration_seconds=meta.get("duration_seconds"),
-            uploaded_by=user["user_id"],
+            uploaded_by=user_id,
         )
         return AttachmentOut(
             id=row.id, mime_type=row.mime_type, file_name=row.file_name,
