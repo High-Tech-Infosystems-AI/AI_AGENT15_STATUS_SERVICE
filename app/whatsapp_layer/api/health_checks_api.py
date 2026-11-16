@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database_Layer.db_config import get_db
@@ -42,6 +43,24 @@ def _subordinates(org: int, user_id: int) -> Set[int]:
     except Exception as exc:
         logger.warning("Org service subordinates lookup failed for user %s: %s", user_id, exc)
         return set()
+
+
+_OWNER_SQL = text("""
+    SELECT c.assigned_to, c.created_by FROM candidate_jobs cj
+      JOIN candidates c ON c.candidate_id = cj.candidate_id
+     WHERE cj.id = :cj LIMIT 1
+""")
+
+
+def _current_owner(db: Session, candidate_job_id: int) -> Optional[int]:
+    """The case's recruiter now, as the dashboard shows it (assigned_to, else created_by)."""
+    try:
+        row = db.execute(_OWNER_SQL, {"cj": candidate_job_id}).first()
+    except Exception as exc:
+        logger.warning("Owner lookup failed for candidate_job %s: %s", candidate_job_id, exc)
+        return None
+    rid = row and (row[0] or row[1])
+    return int(rid) if rid else None
 
 
 def visible_recruiters(ctx: AuthCtx, org: int) -> Optional[Set[int]]:
@@ -128,11 +147,17 @@ def record_health_check(check_id: int, body: HealthCheckRecord,
     chk = get_scoped(db, H, check_id, ctx, soft_delete=False)
     if body.outcome not in OUTCOMES:
         unprocessable([{"field": "outcome", "message": f"Must be one of {', '.join(OUTCOMES)}"}])
-    if not ctx.is_admin_tier and chk.recruiter_user_id != ctx.user_id:
-        if chk.recruiter_user_id not in _subordinates(chk.organization_id, ctx.user_id):
+    # The candidate may have moved to another recruiter after this check was made;
+    # the case's current recruiter (and their managers) may then record it too.
+    owner = _current_owner(db, chk.candidate_job_id)
+    if not ctx.is_admin_tier and ctx.user_id not in (chk.recruiter_user_id, owner):
+        allowed = {r for r in (chk.recruiter_user_id, owner) if r}
+        if not allowed & _subordinates(chk.organization_id, ctx.user_id):
             raise HTTPException(403, "Only the recruiter, their managers or an admin can record this check")
     if chk.status == "cancelled":
         raise HTTPException(409, "This health check was cancelled")
+    if owner and owner != chk.recruiter_user_id:
+        chk.recruiter_user_id = owner
     chk.status = "done"
     chk.outcome = body.outcome
     chk.notes = body.notes
