@@ -11,13 +11,14 @@ Security: the endpoint only fires pre-registered events from
 """
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
-from app.database_Layer.db_config import get_db
+from app.database_Layer.db_config import SessionLocal, get_db
 from app.notification_layer.event_handler import handle_event
 from app.notification_layer.schemas import EventTriggerRequest, EventTriggerResponse
+from app.webhooks_layer.delivery import deliver_now, fan_out
 from app.whatsapp_layer.clawback_engine import handle_clawback_state_changed
 
 CLAWBACK_STATE_CHANGED = "clawback_state_changed"
@@ -25,10 +26,23 @@ CLAWBACK_STATE_CHANGED = "clawback_state_changed"
 logger = logging.getLogger("app_logger")
 router = APIRouter()
 
+GATEWAY_HEADER = "X-Trace-Id"
+
+
+def _queue_webhooks(event_name: str, data: dict) -> list:
+    """Own session, so a webhook problem can't touch the event's transaction."""
+    db = SessionLocal()
+    try:
+        return fan_out(db, event_name, data)
+    finally:
+        db.close()
+
 
 @router.post("/event", response_model=EventTriggerResponse)
 async def trigger_event(
     request: EventTriggerRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -41,6 +55,18 @@ async def trigger_event(
     """
     logger.info("Event trigger received: %s (data keys: %s)",
                 request.event_name, list((request.data or {}).keys()))
+
+    # Outgoing webhooks get every event, whether or not it is registered for
+    # in-app notifications. Never let this affect the event's own handling.
+    # Only events the services send directly qualify: anything that came in
+    # through the public gateway (which always adds X-Trace-Id) could be
+    # forged, and webhooks are signed as coming from us.
+    if not http_request.headers.get(GATEWAY_HEADER):
+        try:
+            delivery_ids = await run_in_threadpool(_queue_webhooks, request.event_name, request.data or {})
+            background_tasks.add_task(deliver_now, delivery_ids)
+        except Exception as e:
+            logger.error("Queueing webhooks for '%s' failed: %s", request.event_name, e, exc_info=True)
 
     # Clawback state changes (job service, contract §3.1) cancel / refresh
     # WhatsApp health checks and never create an in-app notification.

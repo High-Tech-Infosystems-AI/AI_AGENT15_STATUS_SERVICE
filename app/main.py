@@ -12,6 +12,7 @@ from app.api import status_api
 from app.api import notification_api
 from app.api.endpoints.notifications import test_api as notification_test_api
 from app.whatsapp_layer.api import whatsapp_router, clawback_notifications_router
+from app.webhooks_layer.api import router as webhooks_router
 
 from app.core import settings
 from app.core.consul_registration import consul_registry
@@ -97,6 +98,7 @@ app.include_router(notification_test_api.router, prefix="/test")
 # Clawback WhatsApp notifications (CLAWBACK_WHATSAPP_API_CONTRACT.md §2)
 app.include_router(whatsapp_router, prefix="/status/whatsapp")
 app.include_router(clawback_notifications_router, prefix="/status/clawback-notifications")
+app.include_router(webhooks_router, prefix="/status/webhooks", tags=["Webhooks"])
 
 _CONTRACT_422_PREFIXES = ("/status/whatsapp", "/status/clawback-notifications")
 
