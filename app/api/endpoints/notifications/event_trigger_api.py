@@ -10,8 +10,9 @@ Security: the endpoint only fires pre-registered events from
 `notification_events` table. It cannot be used to inject arbitrary content.
 """
 
+import asyncio
 import logging
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,20 @@ router = APIRouter()
 
 GATEWAY_HEADER = "X-Trace-Id"
 
+# Running first attempts, kept so they aren't garbage-collected mid-send.
+_deliveries_in_flight: set = set()
+
+
+def _start_delivery(delivery_ids: list) -> None:
+    """Send now, whatever this request returns: most events aren't registered
+    for in-app notifications and end in a 404, and FastAPI skips background
+    tasks on error responses."""
+    if not delivery_ids:
+        return
+    task = asyncio.create_task(asyncio.to_thread(deliver_now, delivery_ids))
+    _deliveries_in_flight.add(task)
+    task.add_done_callback(_deliveries_in_flight.discard)
+
 
 def _queue_webhooks(event_name: str, data: dict) -> list:
     """Own session, so a webhook problem can't touch the event's transaction."""
@@ -41,7 +56,6 @@ def _queue_webhooks(event_name: str, data: dict) -> list:
 @router.post("/event", response_model=EventTriggerResponse)
 async def trigger_event(
     request: EventTriggerRequest,
-    background_tasks: BackgroundTasks,
     http_request: Request,
     db: Session = Depends(get_db),
 ):
@@ -64,7 +78,7 @@ async def trigger_event(
     if not http_request.headers.get(GATEWAY_HEADER):
         try:
             delivery_ids = await run_in_threadpool(_queue_webhooks, request.event_name, request.data or {})
-            background_tasks.add_task(deliver_now, delivery_ids)
+            _start_delivery(delivery_ids)
         except Exception as e:
             logger.error("Queueing webhooks for '%s' failed: %s", request.event_name, e, exc_info=True)
 
