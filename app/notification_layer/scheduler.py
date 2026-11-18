@@ -45,6 +45,9 @@ async def run_scheduler():
             # calling this every tick runs each job at most once per interval.
             await asyncio.to_thread(_run_whatsapp_tick)
 
+            # Outgoing webhooks: retries that are due, and the daily clean-up.
+            await asyncio.to_thread(_run_webhooks_tick)
+
         except Exception as e:
             logger.error("Scheduler tick error: %s", e, exc_info=True)
 
@@ -67,6 +70,29 @@ def _run_whatsapp_tick():
         run_fallback_tick()
     except Exception as e:
         logger.error("WhatsApp scheduler tick error: %s", e, exc_info=True)
+
+
+def _run_webhooks_tick():
+    """Send due webhook deliveries. Deliveries are claimed one by one, so the
+    lock only avoids two pods doing the same sweep."""
+    try:
+        from app.webhooks_layer import delivery
+        if redis_manager.acquire_scheduler_lock("webhooks:lock:due", ttl=55):
+            db = SessionLocal()
+            try:
+                counts = delivery.run_due(db)
+                if any(counts.values()):
+                    logger.info("Webhook deliveries → %s", counts)
+            finally:
+                db.close()
+        if redis_manager.acquire_scheduler_lock("webhooks:lock:cleanup", ttl=24 * 3600):
+            db = SessionLocal()
+            try:
+                delivery.cleanup(db)
+            finally:
+                db.close()
+    except Exception as e:
+        logger.error("Webhook scheduler tick error: %s", e, exc_info=True)
 
 
 def _process_tick():
